@@ -636,6 +636,13 @@ async def session_finalize(
                                         remote_dir, method,
                                     )
                                 )
+                                # Console: in-place upload progress.
+                                pct = (bytes_done * 100.0 / total_bytes) if total_bytes else 0.0
+                                _log.progress(
+                                    "upload",
+                                    f"Uploading {_name}: {pct:.0f}% "
+                                    f"({bytes_done/1048576:.1f}/{total_bytes/1048576:.1f} MiB)",
+                                )
 
                         ok, err, url = upload_file(method, local_path, remote_dir, _on_progress, overwrite)
                         duration_s = round(time.monotonic() - start, 2)

@@ -56,16 +56,17 @@ def _quiet_model_load():
         tf_logger.setLevel(logging.ERROR)
     except Exception:
         pass
-    # loguru (used by the mokuro fork): raise default level to WARNING so its
-    # "Initializing text detector / Loading OCR model / OCR ready" INFO lines
-    # are hidden; warnings/errors still pass. Restored on exit.
-    loguru_prev = None
+    # loguru (used by the mokuro fork): temporarily replace its handlers with
+    # a WARNING-level sink so model-init INFO lines are hidden but real
+    # warnings/errors still print. Restored on exit.
+    loguru_state = None
     try:
         import loguru
-        loguru_prev = []
-        for h in loguru.logger._core.handlers.values():
-            loguru_prev.append((h, h.levelno))
-            h.levelno = 40  # WARNING
+        ids = list(loguru.logger._core.handlers.keys())
+        sink = loguru.logger._core.handlers[ids[0]]._sink if ids else None
+        loguru_state = (ids, sink)
+        loguru.logger.remove()
+        loguru.logger.add(sink or sys.stderr, level="WARNING")
     except Exception:
         pass
     # huggingface_hub "unauthenticated requests" warning → silence
@@ -89,12 +90,13 @@ def _quiet_model_load():
                 pass
         if tf_logger is not None and tf_logger_prev is not None:
             tf_logger.setLevel(tf_logger_prev)
-        if loguru_prev is not None:
+        if loguru_state is not None:
             try:
                 import loguru
-                for h, lvl in loguru_prev:
-                    if h in loguru.logger._core.handlers.values():
-                        h.levelno = lvl
+                loguru.logger.remove()
+                ids, sink = loguru_state
+                for _id in ids:
+                    loguru.logger.add(sink or sys.stderr, level=0)
             except Exception:
                 pass
         if hf_logger is not None and hf_prev is not None:

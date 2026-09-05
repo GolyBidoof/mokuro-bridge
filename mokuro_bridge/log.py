@@ -26,14 +26,23 @@ def _enabled(level: str) -> bool:
     return _LEVEL_ORDER.get(level, 20) >= _LEVEL_ORDER.get(_LEVEL, 20)
 
 
+# True when the last thing written to the console was an in-place progress
+# line (no trailing newline). info()/warn()/error() clear it first so their
+# line never runs into the tail of a progress line.
+_PROGRESS_ACTIVE = False
+
+
 def _emit(level: str, tag: str, msg: str) -> None:
+    global _PROGRESS_ACTIVE
     if not _enabled(level):
         return
     stream = sys.stderr if level == "error" else sys.stdout
     ts = time.strftime("%H:%M:%S")
     label = {"debug": "DBG", "info": " • ", "warn": " ⚠ ", "error": " ✗ "}.get(level, " • ")
     try:
-        print(f"{ts}{label}[{tag}] {msg}", file=stream, flush=True)
+        prefix = "\r\x1b[K" if _PROGRESS_ACTIVE else ""
+        _PROGRESS_ACTIVE = False
+        print(f"{prefix}{ts}{label}[{tag}] {msg}", file=stream, flush=True)
     except Exception:
         pass  # never let logging break the server
 
@@ -58,7 +67,8 @@ def progress(tag: str, msg: str, throttle_s: float = _THROTTLE_S) -> None:
     """Throttled, in-place progress line: each update overwrites the previous
     one on the same line (carriage return + clear-line), so a stream of
     progress doesn't scroll the terminal. Real completion should use info()/
-    error(), which print a proper newline-terminated line."""
+    error(), which clear the in-place line and print a proper newline line."""
+    global _PROGRESS_ACTIVE
     if not _enabled("info"):
         return
     now = time.time()
@@ -69,5 +79,6 @@ def progress(tag: str, msg: str, throttle_s: float = _THROTTLE_S) -> None:
     try:
         line = f"{time.strftime('%H:%M:%S')} • [{tag}] {msg}"
         print(f"\r\x1b[K{line}", end="", flush=True)
+        _PROGRESS_ACTIVE = True
     except Exception:
         pass
