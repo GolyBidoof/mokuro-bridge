@@ -16,10 +16,9 @@ three files reader.mokuro.app reads, arranged per series:
 Output stays on your machine by default; uploading to your own cloud is
 optional — **MEGA, Google Drive, OneDrive or WebDAV** (Nextcloud/ownCloud/…).
 Nothing about the OCR touches the cloud — it all runs locally, and it works on
-macOS, Windows and Linux.
-
-It's built around **Japanese manga**: mokuro's OCR model reads Japanese text,
-and the input is ordinary page images (`.jpg`, `.png` or `.webp`).
+macOS, Windows and Linux. It's built around **Japanese manga**: mokuro's OCR
+model reads Japanese text, and the input is ordinary page images (`.jpg`,
+`.png` or `.webp`).
 
 ---
 
@@ -112,6 +111,8 @@ There are two ways to get your volumes in:
 
 That's the whole loop. Prefer scripting your own capture? Jump to
 [Writing a capture client](#writing-a-capture-client) — four HTTP calls.
+
+---
 
 ## Uploading to a cloud drive (optional)
 
@@ -236,6 +237,8 @@ mokuro-reader/<series>/
 like `creds_source`, and `current_folder` — where that method writes),
 plus `upload_method_default`.
 
+---
+
 ## Choosing a mokuro engine
 
 The bridge's OCR is powered by [mokuro](https://github.com/kha-white/mokuro).
@@ -286,6 +289,8 @@ take longer. Use this if you want zero setup or prefer the upstream package.
 > the upload providers and your capture scripts don't care which engine you
 > chose. You can switch at any time by changing `MOKURO_REPO` / reinstalling.
 
+---
+
 ## How it works
 
 ```
@@ -322,6 +327,8 @@ take longer. Use this if you want zero setup or prefer the upstream package.
 - Sessions survive server restarts (state is persisted under the work dir).
 - One bridge serves many capture clients at once — each volume is its own
   session, so a whole series can be captured in parallel.
+
+---
 
 ## Configuration
 
@@ -363,6 +370,8 @@ set -a; source .env; set +a        # macOS / Linux
 | `MIN_PAGES_FOR_MEGA` | `10` | Refuse remote upload below this many pages (failed-scrape guard). |
 | `UVICORN_RELOAD` | `0` | Dev auto-reload (wipes in-memory sessions on change). |
 
+---
+
 ## HTTP API
 
 | Method | Path | Description |
@@ -377,7 +386,7 @@ set -a; source .env; set +a        # macOS / Linux
 | `GET` | `/sessions` | All live sessions. |
 | `POST` | `/session/{id}/finalize` | `upload_method`, `local_dir`, `delete_after_upload` → NDJSON progress stream. |
 
-`finalize` form fields:
+### `finalize` form fields
 
 - `upload_method` — destination: `local` (default), `mega`, `drive`,
   `onedrive`, or `webdav`. Unset → falls back to the legacy `upload_to_mega`,
@@ -415,13 +424,11 @@ set -a; source .env; set +a        # macOS / Linux
 
 ### Progress stream format
 
-`/session/{id}/finalize` streams one JSON object per line (NDJSON). Every
+`/session/{id}/finalize` streams **NDJSON** — one JSON object per line. Every
 line has a `stage` and `message`; `stage` is one of: `wait_ocr`, `ocr`,
 `assemble`, `pack`, `upload`, `upload_progress`, `cleanup`, `done`, `error`.
 
-When uploading to a remote method, each file emits `upload_progress` events
-with live byte/percent/speed metrics (the `method` field tells you which
-provider; `remote_path` is where it's going):
+`upload_progress` events (per file, every remote method) look like:
 
 ```json
 {"stage":"upload_progress","message":"My Manga 1巻.cbz: 42.5%",
@@ -433,45 +440,42 @@ provider; `remote_path` is where it's going):
  "mega_path":"/Root/mokuro-reader/My Manga","method":"mega"}
 ```
 
-- `upload.file` — the file being uploaded (`.cbz`, `.mokuro` or `.webp`).
-- `current_bytes` / `total_bytes` — bytes uploaded so far / file size in bytes.
-- `percent` — 0.0–100.0.
-- `speed_bps` — transfer rate in bytes/second (0 while throttled/unknown).
-- `speed_human` — human-readable rate (`5.2 MiB/s`).
-- `method` — which upload method (`mega`, `drive`, `onedrive`, `webdav`).
-- `remote_path` — the destination path on that provider. `mega_path` is kept
-  as a legacy alias (same value).
+- `upload` — per-file progress: `file`, `bytes`/`current_bytes` (uploaded so
+  far), `total_bytes`, `percent` (0–100), `speed_bps`, `speed_human`, `method`.
+  The top-level `current_bytes`/`total_bytes`/`percent`/`speed_bps` fields are
+  mirrors of the same values for convenience.
+- `remote_path` — where the file is going on that provider (`mega_path` is a
+  legacy alias of the same value).
 
-The `upload` object and the top-level `current_bytes`/`total_bytes`/`percent`/
-`speed_bps` fields carry the same values (top-level is a convenience mirror).
-
-The final `done` event includes an `uploads` array — one entry per file with
-the same `upload` schema plus `duration_s` (seconds) and `success`:
+The final `done` event includes `status`, an `uploads` array (one entry per
+file, mirroring the `upload` schema plus `duration_s`), and `remote_path`:
 
 ```json
 {"stage":"done","message":"Done! 132 pages → MEGA /Root/mokuro-reader/My Manga/",
  "status":"success","method":"mega","remote_path":"/Root/mokuro-reader/My Manga",
- "mega_path":"/Root/mokuro-reader/My Manga","pages":132,
  "uploads":[{"file":"My Manga 1巻.cbz","bytes":29125632,"total_bytes":29125632,
              "current_bytes":29125632,"percent":100.0,"speed_bps":5452595,
-             "duration_s":5.3,"success":true},
+             "speed_human":"5.2 MiB/s","duration_s":5.3,"success":true},
             {"file":"My Manga 1巻.mokuro","bytes":4128768,"total_bytes":4128768,
              "current_bytes":4128768,"percent":100.0,"speed_bps":1032192,
-             "duration_s":4.0,"success":true},
+             "speed_human":"984.4 KiB/s","duration_s":4.0,"success":true},
             {"file":"My Manga 1巻.webp","bytes":512000,"total_bytes":512000,
              "current_bytes":512000,"percent":100.0,"speed_bps":256000,
-             "duration_s":2.0,"success":true}]}
+             "speed_human":"250.0 KiB/s","duration_s":2.0,"success":true}]}
 ```
 
-`error` events carry a `status` (e.g. `partial_upload`) plus the failing
-`uploads` array so a client can see exactly which files failed.
+On partial failure the stream ends with a `done` event carrying
+`"status":"partial_upload"` and the `uploads` array shows which files failed.
+
+---
 
 ## Writing a capture client
 
 A client only needs four HTTP calls:
 
 1. `POST /session/start` with a `title` → get `session_id`;
-2. `POST /session/{id}/page` once per captured page (multipart image + filename);
+2. `POST /session/{id}/page` once per captured page (multipart image +
+   filename);
 3. optionally poll `GET /session/{id}/status`;
 4. `POST /session/{id}/finalize` when capture finishes.
 
@@ -480,61 +484,45 @@ are intentionally **not** part of this repository — they embed account/session
 handling. In browsers, a userscript can POST straight from the storefront
 origin as long as that origin is in `CORS_ORIGINS`.
 
-## Security notes
+---
 
-- The bridge binds to **127.0.0.1 only** by default. It is a local tool; don't
+## Security
+
+- The bridge binds to **127.0.0.1** by default and is a local tool — don't
   expose it to a network without adding authentication.
-- MEGA credentials are never stored in this repository. They live in your OS
-  keychain / credential store (macOS Keychain, Windows Credential Manager,
-  Linux Secret Service), an optional permissions-restricted file, or your
-  environment. The temporary `.megarc` files written during uploads are
-  deleted afterwards.
-- CORS is an allow-list, not `*`. `page-local` ingest is restricted to your
-  home directory and system temp paths.
-- Session/persisted files under the work dir — page copies, `.mokuro`/`.html`
-  siblings and mokuro's per-volume OCR cache (`<work>/_ocr/<volume>/`) — are
-  removed after a successful finalize (`delete_after_upload=true`).
+- Credentials are stored in your **OS keychain / credential store** (macOS
+  Keychain, Windows Credential Manager, Linux Secret Service) or in
+  permissions-restricted 0600 files under `~/.config/mokuro-bridge/` — never
+  in this repository.
+- `page-local` ingest only accepts paths under your home directory or system
+  temp locations.
+- CORS is an allow-list, not `*`. `CORS_ORIGINS` controls which storefront
+  origins may POST from a browser userscript.
+- After a successful finalize, the session's working files are removed
+  (`delete_after_upload=true` default); in local mode the finished trio in the
+  output dir is kept.
+
+---
 
 ## Troubleshooting
 
-**`mokuro_installed: false` in /health**
-`pip install -r requirements.txt` should have installed mokuro. Otherwise
-`pip install mokuro` or set `MOKURO_REPO` to a checkout.
+| Symptom | Fix |
+|---|---|
+| `mokuro_installed: false` in `/health` | `pip install -r requirements.txt` should have installed mokuro. Otherwise `pip install mokuro` or set `MOKURO_REPO` to a checkout. |
+| `mega_configured: false` | Run `python server.py --setup-upload mega` (stores in your OS keychain/credential store or a 0600 file), export `MEGA_EMAIL`/`MEGA_PASSWORD`, or use `./setup-keychain.sh` (macOS). On headless Linux, keychain storage needs a Secret Service daemon (gnome-keyring). |
+| Upload fails with `partial_upload` | Check the `stderr` in the NDJSON error frame. Make sure the destination is creatable by your account — the bridge creates the `mokuro-reader` folder automatically. |
+| OCR is slow | Normal without a GPU. Raise `OCR_CHUNK_SIZE` / `OCR_IDLE_FLUSH_S`, or use the batch-OCR fork via `MOKURO_REPO`. First run downloads the model. |
+| Port `62642` already in use | Another process holds it. Stop it, or pick another port with `MOKURO_BRIDGE_PORT=62643 ./run.sh`. If an older launchd auto-start agent is running: `launchctl bootout gui/$(id -u)/com.mokuro-bridge` (macOS). |
+| reader can't see your `output/` folder | Local import only works in desktop Chromium (Chrome, Edge, Brave, Opera). In Safari/Firefox, upload to a cloud provider and connect it inside the reader, or drag a single series folder into the app. |
 
-**`mega_configured: false`**
-Run `python server.py --setup-upload mega` (stores in your OS keychain/credential
-store or a file), export `MEGA_EMAIL`/`MEGA_PASSWORD`, or on macOS run
-`./setup-keychain.sh`. On headless Linux, keychain storage needs a Secret
-Service daemon (gnome-keyring); the wizard then falls back to a 0600 file.
-
-**OCR is slow**
-Normal without a GPU. Raise `OCR_CHUNK_SIZE`/`OCR_IDLE_FLUSH_S` or use a
-GPU/MPS-capable mokuro build via `MOKURO_REPO`. First run downloads models.
-
-**Upload fails with `partial_upload`**
-Check the `stderr` in the NDJSON error frame. Ensure `/mokuro-reader` (or your
-`MEGA_LIBRARY_ROOT`) is creatable by your account — the bridge tries to create
-it automatically.
-
-**Port 62642 already in use**
-Another process holds the port. Stop it, or pick another port with
-`MOKURO_BRIDGE_PORT=62643 ./run.sh`. If an older auto-start agent from a
-previous install is running, unload it: `launchctl bootout
-gui/$(id -u)/com.mokuro-bridge` (macOS).
-
-**reader.mokuro.app can't see my `output/` folder**
-Local folder import only works in desktop Chromium browsers (Chrome, Edge,
-Brave, Opera). In Safari or Firefox, enable MEGA uploads (above) and open
-`/mokuro-reader` from inside the reader instead — or drag-and-drop a single
-series folder into the app.
+---
 
 ## Development
 
 ```bash
-python3 -m py_compile server.py          # syntax check
-./run.sh                                 # run with default config
-UVICORN_RELOAD=1 python3 server.py       # dev auto-reload
-python3 ocr_folder.py --help             # folder helper usage
+python3 -m py_compile server.py        # syntax check
+./run.sh                               # run with default config
+UVICORN_RELOAD=1 python3 server.py     # dev auto-reload
 ```
 
 ## License
