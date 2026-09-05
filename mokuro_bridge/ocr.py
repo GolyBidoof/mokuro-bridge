@@ -20,10 +20,13 @@ _ocr_error_tracebacks_seen: set = set()
 
 @contextlib.contextmanager
 def _quiet_model_load():
-    """Silence tqdm bars + the transformers 'LOAD REPORT' banner while mokuro
-    loads its OCR models, so the bridge console stays clean. tqdm is
-    redirected to devnull (not replaced — transformers iterates it), and the
-    transformers logger is raised to ERROR. Restored on exit."""
+    """Silence model-load console noise while mokuro initializes its OCR
+    models, so the bridge console stays clean. Suppresses:
+      - tqdm bars (redirected to devnull, kept iterable — transformers iterates)
+      - transformers logging (LOAD REPORT banner, generation-flags warning)
+      - loguru INFO lines from the fork (Initializing text detector, Loading
+        OCR model, Using MPS, OCR ready, ...) — WARNING/ERROR still pass
+    All restored on exit."""
     import logging
     import os as _os
 
@@ -53,6 +56,28 @@ def _quiet_model_load():
         tf_logger.setLevel(logging.ERROR)
     except Exception:
         pass
+    # loguru (used by the mokuro fork): raise default level to WARNING so its
+    # "Initializing text detector / Loading OCR model / OCR ready" INFO lines
+    # are hidden; warnings/errors still pass. Restored on exit.
+    loguru_prev = None
+    try:
+        import loguru
+        loguru_prev = []
+        for h in loguru.logger._core.handlers.values():
+            loguru_prev.append((h, h.levelno))
+            h.levelno = 40  # WARNING
+    except Exception:
+        pass
+    # huggingface_hub "unauthenticated requests" warning → silence
+    hf_logger = None
+    hf_prev = None
+    try:
+        import logging as _logging
+        hf_logger = _logging.getLogger("huggingface_hub")
+        hf_prev = hf_logger.level
+        hf_logger.setLevel(_logging.ERROR)
+    except Exception:
+        pass
     try:
         yield
     finally:
@@ -64,6 +89,19 @@ def _quiet_model_load():
                 pass
         if tf_logger is not None and tf_logger_prev is not None:
             tf_logger.setLevel(tf_logger_prev)
+        if loguru_prev is not None:
+            try:
+                import loguru
+                for h, lvl in loguru_prev:
+                    if h in loguru.logger._core.handlers.values():
+                        h.levelno = lvl
+            except Exception:
+                pass
+        if hf_logger is not None and hf_prev is not None:
+            try:
+                hf_logger.setLevel(hf_prev)
+            except Exception:
+                pass
         try:
             devnull.close()
         except Exception:
@@ -282,15 +320,16 @@ def _process_ocr_batch(items: list[tuple[str, str]]) -> None:
     mpocr = gen.mpocr
     use_fork_api = _fork_supported()
 
-    _log.info(
-        "ocr",
-        f"OCR flush {len(items)} page(s) (engine: {'fork batch' if use_fork_api else 'stock'}): "
-        + ", ".join(f"{sid[:6]}/{fn}" for sid, fn in items[:6])
-        + ("…" if len(items) > 6 else ""),
-    )
-
     if use_fork_api:
-        _ocr_batch_fork(items, gen, mpocr, on_progress_cb=_log.progress)
+        _ocr_batch_fork(
+            items,
+            gen,
+            mpocr,
+            on_progress_cb=lambda done, total: _log.progress(
+                "ocr",
+                f"OCR {done}/{total} crops",
+            ),
+        )
     else:
         _ocr_batch_stock(items, gen, mpocr)
 
@@ -359,11 +398,6 @@ def _ocr_batch_fork(
         for sub_start in range(0, len(all_crops), ocr_batch_size):
             sub_crops = all_crops[sub_start : sub_start + ocr_batch_size]
             sub_map = crop_map[sub_start : sub_start + ocr_batch_size]
-            _log.progress(
-                "ocr",
-                f"Recognizing crops {sub_start + 1}–{min(sub_start + len(sub_crops), len(all_crops))}"
-                f" of {len(all_crops)}…",
-            )
             texts = mpocr.recognize_text(
                 sub_crops,
                 batch_size=ocr_batch_size,
@@ -377,7 +411,8 @@ def _ocr_batch_fork(
                 blk_idx, line_idx = crop_meta_map[(sid, fname, crop_idx)]
                 result["blocks"][blk_idx]["lines"][line_idx] += text
             if on_progress_cb is not None:
-                on_progress_cb(min(sub_start + len(sub_crops), len(all_crops)), len(all_crops))
+                done = min(sub_start + len(sub_crops), len(all_crops))
+                on_progress_cb(done, len(all_crops), final=(done >= len(all_crops)))
     except Exception as e:
         for (sid, fname) in page_results:
             session = _session_or_none(sid)
@@ -405,10 +440,8 @@ def _save_page_result(session: Session, volume, filename: str, result: dict) -> 
         total = len(session.pages_received)
         session.message = f"OCR {done}/{total} pages"
     _persist_session(session)
-    _log.progress(
-        "ocr",
-        f"{session.safe_title}: OCR {done}/{total} pages",
-    )
+    if done >= total:
+        _log.info("ocr", f"{session.safe_title}: OCR complete ({done} pages)")
 
 def _mark_page_failed(session: Session, filename: str, error: Exception) -> None:
     with session.lock:
@@ -459,7 +492,6 @@ def _ocr_worker_loop() -> None:
                 _ocr_processing.add(item)
 
         try:
-            _log.progress("ocr", f"Dispatching OCR batch of {len(batch)} page(s)…")
             _process_ocr_batch(batch)
         finally:
             with _ocr_cv:

@@ -55,20 +55,19 @@ def error(tag: str, msg: str) -> None:
 
 
 def progress(tag: str, msg: str, throttle_s: float = _THROTTLE_S) -> None:
-    """Throttled progress line: at most one per `throttle_s` per tag.
-
-    Always prints a final line when msg contains a completion marker (e.g.
-    "done", "100%", "complete") so progress never ends on a stale line.
-    """
+    """Throttled, in-place progress line: each update overwrites the previous
+    one on the same line (carriage return + clear-line), so a stream of
+    progress doesn't scroll the terminal. Real completion should use info()/
+    error(), which print a proper newline-terminated line."""
     if not _enabled("info"):
         return
     now = time.time()
     last = _LAST_THROTTLE.get(tag, 0.0)
-    is_final = any(m in msg.lower() for m in ("done", "complete", "100%", "failed"))
-    if not is_final and now - last < throttle_s:
+    if now - last < throttle_s:
         return
     _LAST_THROTTLE[tag] = now
     try:
-        print(f"{time.strftime('%H:%M:%S')} • [{tag}] {msg}", flush=True)
+        line = f"{time.strftime('%H:%M:%S')} • [{tag}] {msg}"
+        print(f"\r\x1b[K{line}", end="", flush=True)
     except Exception:
         pass

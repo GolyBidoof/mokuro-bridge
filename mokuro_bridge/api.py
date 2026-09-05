@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import APP_NAME, __version__
+from . import log as _log
 from .config import (
     CORS_ORIGINS,
     DRIVE_ROOT_NAME,
@@ -563,6 +564,10 @@ async def session_finalize(
             shutil.copy2(webp_pages[0] if webp_pages else image_files[0], titled_cover)
 
             if method == "local":
+                _log.info(
+                    "upload",
+                    f"{session.safe_title}: saved locally → {staging}",
+                )
                 yield ndjson(
                     "pack",
                     f"Saved local pack → {staging}",
@@ -652,6 +657,11 @@ async def session_finalize(
                     await asyncio.sleep(0)
                 for r in upload_results:
                     if r["success"]:
+                        _log.info(
+                            "upload",
+                            f"{session.safe_title}: uploaded {r['file']}"
+                            + (f" → {r.get('url')}" if r.get("url") else ""),
+                        )
                         yield ndjson(
                             "upload",
                             f"Uploaded {r['file']}",
@@ -660,6 +670,11 @@ async def session_finalize(
                             url=r.get("url"),
                         )
                     else:
+                        _log.error(
+                            "upload",
+                            f"{session.safe_title}: {r['file']} upload failed: "
+                            f"{r.get('stderr') or 'unknown'}",
+                        )
                         yield ndjson(
                             "upload",
                             f"Upload failed for {r['file']}: {r.get('stderr') or 'unknown'}",
@@ -669,6 +684,11 @@ async def session_finalize(
                     await asyncio.sleep(0)
 
                 all_success = all(r["success"] for r in upload_results)
+                if all_success:
+                    _log.info(
+                        "upload",
+                        f"{session.safe_title}: upload complete ({method_label})",
+                    )
 
             session.finalized = True
 

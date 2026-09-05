@@ -32,6 +32,11 @@ from __future__ import annotations
 
 import os
 
+# Quiet transformers (model-load banners, "generation flags not valid", …)
+# before anything imports it — must be set before transformers is imported.
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
 from mokuro_bridge import APP_NAME, __version__  # noqa: F401  (module-level compat)
 from mokuro_bridge.api import app
 from mokuro_bridge.config import (
