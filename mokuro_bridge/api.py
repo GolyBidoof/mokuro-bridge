@@ -649,6 +649,16 @@ async def session_finalize(
 
             if method != "local":
                 _set_activity("uploading", f"{method_label} → {remote_dir}")
+                # Announce every file that will upload (with its size) before
+                # any bytes flow, so clients can pre-size the overall progress
+                # bar instead of discovering totals one file at a time (which
+                # makes a finished file look like 100% until the next total
+                # arrives and the bar has to step back down).
+                file_plan = [
+                    {"file": f"{file_base}.cbz", "total_bytes": titled_cbz.stat().st_size},
+                    {"file": f"{file_base}.mokuro", "total_bytes": titled_mokuro.stat().st_size},
+                    {"file": f"{file_base}.webp", "total_bytes": titled_cover.stat().st_size},
+                ]
                 yield ndjson(
                     "upload",
                     f"Uploading to {method_label}… ({series_dir_name}/)",
@@ -656,6 +666,7 @@ async def session_finalize(
                     remote_path=remote_dir,
                     mega_path=remote_dir if method == "mega" else None,
                     method=method,
+                    files=file_plan,
                 )
                 await asyncio.sleep(0)
 

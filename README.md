@@ -446,6 +446,20 @@ uploading (each file, every remote method) — the stream is not buffered until
 the end, so a client reading the response body gets a smooth 0→100% walk per
 file as the transfer progresses. They look like:
 
+The **initial** `upload` frame (emitted once, before any bytes flow) carries
+`files` — the full list of files that will upload with each one's `total_bytes`
+— so a client can pre-size its overall progress bar (sum the totals) instead
+of discovering each file's size only when that file starts:
+
+```json
+{"stage":"upload","message":"Uploading to MEGA… (My Manga/)",
+ "remote_path":"/Root/mokuro-reader/My Manga","method":"mega",
+ "files":[
+   {"file":"My Manga 1巻.cbz","total_bytes":29125632},
+   {"file":"My Manga 1巻.mokuro","total_bytes":4128768},
+   {"file":"My Manga 1巻.webp","total_bytes":512000}]}
+```
+
 ```json
 {"stage":"upload_progress","message":"My Manga 1巻.cbz: 42.5%",
  "upload":{"file":"My Manga 1巻.cbz","bytes":12451840,"total_bytes":29125632,
