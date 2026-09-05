@@ -218,6 +218,53 @@ set -a; source .env; set +a        # macOS / Linux
   after a successful run (in MEGA mode that's everything; in local mode the
   finished trio in the output dir is kept).
 
+### Progress stream format
+
+`/session/{id}/finalize` streams one JSON object per line (NDJSON). Every
+line has a `stage` and `message`; `stage` is one of: `wait_ocr`, `ocr`,
+`assemble`, `pack`, `upload`, `upload_progress`, `cleanup`, `done`, `error`.
+
+When uploading to MEGA, each file emits `upload_progress` events with live
+byte/percent/speed metrics:
+
+```json
+{"stage":"upload_progress","message":"My Manga 1巻.cbz: 42.5%",
+ "upload":{"file":"My Manga 1巻.cbz","bytes":12451840,"total_bytes":29125632,
+           "current_bytes":12451840,"percent":42.5,"speed_bps":5452595,
+           "speed_human":"5.2 MiB/s"},
+ "current_bytes":12451840,"total_bytes":29125632,"percent":42.5,
+ "speed_bps":5452595,"mega_path":"/Root/mokuro-reader/My Manga"}
+```
+
+- `upload.file` — the file being uploaded (`.cbz`, `.mokuro` or `.webp`).
+- `current_bytes` / `total_bytes` — bytes uploaded so far / file size in bytes.
+- `percent` — 0.0–100.0.
+- `speed_bps` — transfer rate in bytes/second (0 while throttled/unknown).
+- `speed_human` — human-readable rate (`5.2 MiB/s`).
+
+The `upload` object and the top-level `current_bytes`/`total_bytes`/`percent`/
+`speed_bps` fields carry the same values (top-level is a convenience mirror).
+
+The final `done` event includes an `uploads` array — one entry per file with
+the same `upload` schema plus `duration_s` (seconds) and `success`:
+
+```json
+{"stage":"done","message":"Done! 132 pages → MEGA /Root/mokuro-reader/My Manga/",
+ "status":"success","mega_path":"/Root/mokuro-reader/My Manga","pages":132,
+ "uploads":[{"file":"My Manga 1巻.cbz","bytes":29125632,"total_bytes":29125632,
+             "current_bytes":29125632,"percent":100.0,"speed_bps":5452595,
+             "duration_s":5.3,"success":true},
+            {"file":"My Manga 1巻.mokuro","bytes":4128768,"total_bytes":4128768,
+             "current_bytes":4128768,"percent":100.0,"speed_bps":1032192,
+             "duration_s":4.0,"success":true},
+            {"file":"My Manga 1巻.webp","bytes":512000,"total_bytes":512000,
+             "current_bytes":512000,"percent":100.0,"speed_bps":256000,
+             "duration_s":2.0,"success":true}]}
+```
+
+`error` events carry a `status` (e.g. `partial_upload`) plus the failing
+`uploads` array so a client can see exactly which files failed.
+
 ## Writing a capture client
 
 A client only needs four HTTP calls:

@@ -39,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import uuid
 import zipfile
 from collections import deque
@@ -682,13 +683,119 @@ def mega_put(megarc_path: Path, local_path: Path, remote_path: str) -> subproces
             str(megarc_path),
             "--path",
             remote_path,
-            "--no-progress",
             str(local_path),
         ],
         capture_output=True,
         text=True,
         timeout=300,
     )
+
+
+# Progress lines from `megatools put` (progress bar disabled when stdout is not
+# a TTY — each update becomes a newline-terminated plain line, ~1/sec):
+#   My Manga 1巻.cbz: 42.50% - 12.4 MiB of 29.2 MiB (5.2 MiB/s)
+#   My Manga 1巻.cbz: 100.00% - done 29.2 MiB (avg. 5.2 MiB/s)
+# and the completion line:
+#   Uploaded My Manga 1巻.cbz
+_MEGATOOLS_PROGRESS_RE = re.compile(
+    r"^([^:]+):\s+(\d+(?:\.\d+)?)%\s*-\s*(.*?)(?:\s+\(([^)]+)\))?$"
+)
+_MEGATOOLS_UPLOADED_RE = re.compile(r"^Uploaded\s+(.+)$")
+
+
+def _parse_megatools_size(s: str) -> int:
+    """Parse a megatools human size ("29.2 MiB", "4.0 KiB", "1024 B") → bytes."""
+    s = s.strip()
+    m = re.match(r"^([\d.]+)\s*([A-Za-z]*)$", s)
+    if not m:
+        return 0
+    value, unit = float(m.group(1)), m.group(2).upper()
+    factors = {
+        "": 1,
+        "B": 1,
+        "KIB": 1024,
+        "MIB": 1024**2,
+        "GIB": 1024**3,
+        "TIB": 1024**4,
+        "KB": 1000,
+        "MB": 1000**2,
+        "GB": 1000**3,
+        "TB": 1000**4,
+    }
+    return int(value * factors.get(unit, 1))
+
+
+def _parse_megatools_speed(s: str) -> int:
+    """Parse "5.2 MiB/s" → bytes per second (0 when unparseable)."""
+    return _parse_megatools_size(s.rstrip("/s"))
+
+
+def _mega_upload_file(
+    megarc_path: Path,
+    local_path: Path,
+    remote_path: str,
+    on_progress: Optional[callable],
+) -> tuple[bool, Optional[str]]:
+    """Upload one file with `megatools put`, streaming progress.
+
+    Runs megatools with stdout piped (stderr still goes to the process's
+    stderr). Progress is throttled by megatools to ~1 update/second and each
+    line is flushed by glib, so `on_progress(percent, bytes_done, total_bytes,
+    speed_bps)` fires live. Returns (success, error_message).
+    """
+    total_bytes = local_path.stat().st_size
+    proc = subprocess.Popen(
+        [
+            "megatools",
+            "put",
+            "--config",
+            str(megarc_path),
+            "--path",
+            remote_path,
+            str(local_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=None,  # inherit → megatools errors land on our stderr
+        text=True,
+        bufsize=1,  # line-buffered reads
+    )
+    assert proc.stdout is not None
+    success = False
+    error_msg: Optional[str] = None
+    try:
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+            m = _MEGATOOLS_UPLOADED_RE.match(line)
+            if m:
+                success = True
+                if on_progress:
+                    on_progress(100.0, total_bytes, total_bytes, 0)
+                continue
+            m = _MEGATOOLS_PROGRESS_RE.match(line)
+            if m and on_progress:
+                percent = float(m.group(2))
+                rest = m.group(3)
+                speed_bps = _parse_megatools_speed(m.group(4) or "")
+                # "12.4 MiB of 29.2 MiB" → done/total
+                size_match = re.match(r"^(.+?)\s+of\s+(.+)$", rest)
+                if size_match:
+                    bytes_done = min(_parse_megatools_size(size_match.group(1)), total_bytes)
+                    on_progress(percent, bytes_done, total_bytes, speed_bps)
+                elif rest.startswith("done "):
+                    on_progress(100.0, total_bytes, total_bytes, speed_bps)
+        proc.wait(timeout=300)
+    except Exception as e:
+        error_msg = str(e)
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        proc.wait()
+    if not success and error_msg is None:
+        error_msg = f"megatools exited with code {proc.returncode}" if proc.returncode else "no completion line"
+    return success, error_msg
 
 
 def find_mokuro_output(vol_dir: Path) -> Optional[Path]:
@@ -717,6 +824,43 @@ def cleanup_volume_artifacts(vol_dir: Path) -> None:
 
 def ndjson(stage: str, message: str, **extra) -> str:
     return json.dumps({"stage": stage, "message": message, **extra}, ensure_ascii=False) + "\n"
+
+
+def _upload_progress_event(
+    remote_name: str,
+    bytes_done: int,
+    total_bytes: int,
+    speed_bps: int,
+    mega_path: str,
+) -> str:
+    """Standardized per-file upload progress event (shared for every remote dir).
+
+    Schema (stable across all MEGA targets):
+      {"stage":"upload_progress","message":"<file>: 42.5%",
+       "upload":{"file","bytes","total_bytes","current_bytes","percent","speed_bps","speed_human"},
+       "mega_path":"<remote dir>"}
+    """
+    percent = 100.0 if total_bytes <= 0 else round(bytes_done * 100.0 / total_bytes, 2)
+    speed_human = f"{speed_bps / 1024 / 1024:.2f} MiB/s" if speed_bps >= 1024**2 else f"{speed_bps / 1024:.1f} KiB/s" if speed_bps else "—"
+    upload = {
+        "file": remote_name,
+        "bytes": bytes_done,
+        "total_bytes": total_bytes,
+        "current_bytes": bytes_done,  # explicit alias: bytes uploaded so far
+        "percent": percent,
+        "speed_bps": speed_bps,
+        "speed_human": speed_human,
+    }
+    return ndjson(
+        "upload_progress",
+        f"{remote_name}: {percent:.1f}%",
+        upload=upload,
+        current_bytes=bytes_done,  # top-level mirror for easy consumption
+        total_bytes=total_bytes,
+        percent=percent,
+        speed_bps=speed_bps,
+        mega_path=mega_path,
+    )
 
 
 def session_snapshot(session: Session) -> dict:
@@ -1454,24 +1598,47 @@ async def session_finalize(
                             (titled_cover, f"{file_base}.webp"),
                         ]
                         for local_path, remote_name in items:
-                            result = mega_put(
-                                megarc_path,
-                                local_path,
-                                f"{mega_remote_dir}/{remote_name}",
+                            start = time.monotonic()
+                            last_progress = {"bytes": 0, "speed": 0, "emitted": 0.0}
+
+                            def _on_progress(percent, bytes_done, total_bytes, speed_bps, _name=remote_name):
+                                # Throttle upstream NDJSON events to ~4/sec so
+                                # megatools' 1/sec lines stay live without flooding.
+                                now = time.monotonic()
+                                if (
+                                    percent >= 100.0
+                                    or bytes_done <= 0
+                                    or now - last_progress["emitted"] >= 0.25
+                                ):
+                                    last_progress["bytes"] = bytes_done
+                                    last_progress["speed"] = speed_bps
+                                    last_progress["emitted"] = now
+                                    progress_events.append(
+                                        _upload_progress_event(
+                                            _name, bytes_done, total_bytes, speed_bps, mega_remote_dir
+                                        )
+                                    )
+
+                            progress_events = []
+                            ok, err = _mega_upload_file(
+                                megarc_path, local_path, f"{mega_remote_dir}/{remote_name}", _on_progress
                             )
+                            duration_s = round(time.monotonic() - start, 2)
                             results.append(
                                 {
                                     "file": remote_name,
                                     "size": local_path.stat().st_size,
-                                    "success": result.returncode == 0,
-                                    "stderr": result.stderr.strip()
-                                    if result.returncode != 0
-                                    else None,
+                                    "success": ok,
+                                    "stderr": err if not ok else None,
+                                    "duration_s": duration_s,
                                 }
                             )
-                    return results
+                    return results, progress_events
 
-                upload_results = await asyncio.to_thread(_mega_upload_batch)
+                upload_results, progress_events = await asyncio.to_thread(_mega_upload_batch)
+                for ev in progress_events:
+                    yield ev
+                    await asyncio.sleep(0)
                 for r in upload_results:
                     if r["success"]:
                         yield ndjson("upload", f"Uploaded {r['file']}", file=r["file"])
@@ -1516,6 +1683,25 @@ async def session_finalize(
                 if do_mega
                 else f"Done! {len(image_files)} pages OCR'd → {staging}"
             )
+            # Standardized per-file upload summary for the "done" event (only
+            # in MEGA mode); each entry mirrors the "upload_progress" schema.
+            uploads_summary = []
+            if do_mega:
+                for r in upload_results:
+                    total = r.get("size", 0)
+                    dur = r.get("duration_s") or 0
+                    uploads_summary.append(
+                        {
+                            "file": r["file"],
+                            "bytes": total,
+                            "total_bytes": total,
+                            "current_bytes": total if r["success"] else 0,
+                            "percent": 100.0 if r["success"] else 0.0,
+                            "speed_bps": int(total / dur) if dur and r["success"] else 0,
+                            "duration_s": dur,
+                            "success": r["success"],
+                        }
+                    )
             yield ndjson(
                 "done",
                 done_msg,
@@ -1527,7 +1713,7 @@ async def session_finalize(
                 mega_path=mega_remote_dir if do_mega else None,
                 output_dir=str(staging) if not do_mega else None,
                 staging=str(staging),
-                uploads=upload_results,
+                uploads=uploads_summary if do_mega else upload_results,
                 reader_url="https://reader.mokuro.app/" if do_mega else None,
             )
         except Exception as e:
