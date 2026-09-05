@@ -412,7 +412,7 @@ def _ocr_batch_fork(
                 result["blocks"][blk_idx]["lines"][line_idx] += text
             if on_progress_cb is not None:
                 done = min(sub_start + len(sub_crops), len(all_crops))
-                on_progress_cb(done, len(all_crops), final=(done >= len(all_crops)))
+                on_progress_cb(done, len(all_crops))
     except Exception as e:
         for (sid, fname) in page_results:
             session = _session_or_none(sid)
