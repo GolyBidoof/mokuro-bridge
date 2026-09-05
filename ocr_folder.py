@@ -88,7 +88,7 @@ def list_methods(url: str) -> None:
 
 
 # Method ids the bridge can know about, even before we can ask it.
-_KNOWN_METHODS = ("local", "mega", "drive", "onedrive", "webdav")
+_KNOWN_METHODS = ("local", "mega", "drive", "onedrive")
 
 
 def main() -> int:

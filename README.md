@@ -14,7 +14,7 @@ three files reader.mokuro.app reads, arranged per series:
 ```
 
 Output stays on your machine by default; uploading to your own cloud is
-optional — **MEGA, Google Drive, OneDrive or WebDAV** (Nextcloud/ownCloud/…).
+optional — **MEGA, Google Drive or OneDrive**.
 Nothing about the OCR touches the cloud — it all runs locally, and it works on
 macOS, Windows and Linux. It's built around **Japanese manga**: mokuro's OCR
 model reads Japanese text, and the input is ordinary page images (`.jpg`,
@@ -45,7 +45,7 @@ while and a few GB of disk).
 **Cloud uploads are opt-in, including their dependencies.** The base install
 has none of the cloud libraries. Each provider's setup wizard will detect the
 missing packages and offer to `pip install` them for you when you run
-`python server.py --setup-upload <mega|drive|onedrive|webdav>` (or install
+`python server.py --setup-upload <mega|drive|onedrive>` (or install
 them yourself with the matching `requirements-*.txt`).
 
 **You need Python 3.10+.** That's mokuro's floor, and the very newest Python
@@ -119,7 +119,7 @@ That's the whole loop. Prefer scripting your own capture? Jump to
 Remote upload is **off by default**. The bridge has a generic *upload method*
 system — `local` (default) or a configured remote — and `/upload-methods`
 lists what's configured. `ocr_folder.py` accepts
-`--upload-method local|mega|drive|onedrive|webdav` (and `--list-methods` to
+`--upload-method local|mega|drive|onedrive` (and `--list-methods` to
 print what the bridge reports); the HTTP API accepts `upload_method=` on
 `/session/{id}/finalize` (legacy `upload_to_mega=true` still means `mega`).
 
@@ -202,20 +202,6 @@ the current default and never change it.
    stored (0600) and auto-refreshes. Re-run only when it expires.
 3. **Upload** with `--upload-method onedrive`.
 
-### WebDAV (Nextcloud / ownCloud / Seafile / …)
-
-1. **Give the bridge your WebDAV base URL + credentials** — the wizard
-   installs `requests` when needed (or run
-   `pip install -r requirements-webdav.txt` yourself):
-   - **Setup wizard:** `python server.py --setup-upload webdav` — prompts for
-     the base URL, username and password, stores them in the OS keychain
-     (username/password) and a 0600 file (URL).
-   - **Environment variables:** `WEBDAV_BASE_URL`, `WEBDAV_USERNAME`,
-     `WEBDAV_PASSWORD`. The base URL is the DAV root the server exposes, e.g.
-     Nextcloud: `https://host/remote.php/dav/files/<username>`. Use an **app
-     password** if the account has 2FA on.
-2. **Upload** with `--upload-method webdav`.
-
 ### Where things land
 
 Every provider stores a finished volume under a `mokuro-reader` library
@@ -229,7 +215,6 @@ mokuro-reader/<series>/
 - MEGA → `/Root/mokuro-reader/<series>/`
 - Google Drive → `mokuro-reader/<series>/` at the top of My Drive
 - OneDrive → `mokuro-reader/<series>/` at the top of your OneDrive
-- WebDAV → `<base URL>/mokuro-reader/<series>/`
 - local → `<MOKURO_BRIDGE_OUTPUT_DIR>/<series>/` (or the `local_dir` you pass)
 
 `GET /upload-methods` reports all of this as JSON:
@@ -361,10 +346,6 @@ set -a; source .env; set +a        # macOS / Linux
 | `ONEDRIVE_CLIENT_ID` | *(none)* | Azure app (public client) ID for OneDrive. |
 | `ONEDRIVE_ROOT_NAME` | `mokuro-reader` | OneDrive folder (at your OneDrive root) that receives series folders. |
 | `ONEDRIVE_TOKEN_FILE` | `~/.config/mokuro-bridge/onedrive_token.json` | msal token cache (0600). |
-| `WEBDAV_BASE_URL` | *(none)* | WebDAV DAV root, e.g. `https://host/remote.php/dav/files/<user>`. |
-| `WEBDAV_ROOT_NAME` | `mokuro-reader` | WebDAV library folder under the base URL. |
-| `WEBDAV_USERNAME` / `WEBDAV_PASSWORD` | *(none)* | WebDAV credentials (alternative to `--setup-upload webdav`). |
-| `WEBDAV_CREDS_FILE` | `~/.config/mokuro-bridge/webdav.env` | WebDAV base URL + creds file (0600) used when env/keychain are absent. |
 | `OCR_CHUNK_SIZE` | `8` | Pages per OCR batch (tune for your GPU/CPU). |
 | `OCR_IDLE_FLUSH_S` | `1.5` | Seconds to wait for a fuller batch before flushing. |
 | `MIN_PAGES_FOR_MEGA` | `10` | Refuse remote upload below this many pages (failed-scrape guard). |
@@ -388,9 +369,9 @@ set -a; source .env; set +a        # macOS / Linux
 
 ### `finalize` form fields
 
-- `upload_method` — destination: `local` (default), `mega`, `drive`,
-  `onedrive`, or `webdav`. Unset → falls back to the legacy `upload_to_mega`,
-  then the `MOKURO_BRIDGE_UPLOAD_DEFAULT` env var.
+- `upload_method` — destination: `local` (default), `mega`, `drive`, or
+  `onedrive`. Unset → falls back to the legacy `upload_to_mega`, then the
+  `MOKURO_BRIDGE_UPLOAD_DEFAULT` env var.
 - `local_dir` — when `upload_method=local`, write the finished volume into
   this folder instead of the default output dir. Ignored for remote methods.
 - `upload_to_mega` — legacy alias; `true` → MEGA, `false` → local.
@@ -415,10 +396,7 @@ set -a; source .env; set +a        # macOS / Linux
     "current_folder":"mokuro-reader (My Drive root)"},
    {"id":"onedrive","name":"OneDrive","configured":false,"default":false,
     "creds_source":null,"root":"mokuro-reader",
-    "current_folder":"mokuro-reader (OneDrive root)"},
-   {"id":"webdav","name":"WebDAV","configured":false,"default":false,
-    "creds_source":null,"base_url":"",
-    "current_folder":"mokuro-reader (WebDAV root)"}
+    "current_folder":"mokuro-reader (OneDrive root)"}
  ]}
 ```
 

@@ -39,8 +39,6 @@ from mokuro_bridge.config import (
     MEGA_LIBRARY_ROOT,
     ONEDRIVE_ROOT_NAME,
     OUTPUT_DIR,
-    WEBDAV_BASE_URL,
-    WEBDAV_ROOT_NAME,
     WORK_DIR,
     _MEGA_UPLOAD_DEFAULT,
 )
@@ -51,7 +49,6 @@ from mokuro_bridge.providers import (
     _run_setup_drive,
     _run_setup_mega,
     _run_setup_onedrive,
-    _run_setup_webdav,
 )
 
 
@@ -64,7 +61,7 @@ def _main() -> None:
         metavar="METHOD",
         default=None,
         help="Interactively configure/authenticate an upload method "
-        "(available: mega, drive, onedrive, webdav). e.g. --setup-upload drive",
+        "(available: mega, drive, onedrive). e.g. --setup-upload drive",
     )
     parser.add_argument(
         "--setup-mega",
@@ -90,8 +87,6 @@ def _main() -> None:
             _run_setup_drive()
         elif setup_method == "onedrive":
             _run_setup_onedrive()
-        elif setup_method == "webdav":
-            _run_setup_webdav()
         elif setup_method in _UPLOAD_METHODS:
             print(f"error: upload method '{setup_method}' has no setup wizard yet")
             raise SystemExit(2)
@@ -115,11 +110,6 @@ def _main() -> None:
     print(f"  drive root: {DRIVE_ROOT_NAME} (configured: {'yes' if _UPLOAD_METHODS['drive'].configured else 'no'})")
     onedrive_state = "yes" if _UPLOAD_METHODS["onedrive"].configured else "no"
     print(f"  onedrive root: {ONEDRIVE_ROOT_NAME} (configured: {onedrive_state})")
-    webdav_state = "yes" if _UPLOAD_METHODS["webdav"].configured else "no"
-    webdav_detail = (
-        f" (base URL: {WEBDAV_BASE_URL})" if WEBDAV_BASE_URL else " (no base URL)"
-    )
-    print(f"  webdav root: {WEBDAV_ROOT_NAME} (configured: {webdav_state}){webdav_detail}")
     if _MOKURO_REPO is not None:
         print(f"  custom mokuro repo: {_MOKURO_REPO}")
     if _mokuro_pkg is not None:

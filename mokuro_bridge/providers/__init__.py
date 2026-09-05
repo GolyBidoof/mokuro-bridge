@@ -10,8 +10,6 @@ from ..config import (
     MEGA_LIBRARY_ROOT,
     ONEDRIVE_ROOT_NAME,
     OUTPUT_DIR,
-    WEBDAV_BASE_URL,
-    WEBDAV_ROOT_NAME,
     _MEGA_UPLOAD_DEFAULT,
     _load_remembered_local_dir,
 )
@@ -39,14 +37,6 @@ from .onedrive import (
     _onedrive_upload_file,
     _run_setup_onedrive,
 )
-from .webdav import (
-    _run_setup_webdav,
-    _webdav_base_url,
-    _webdav_configured,
-    _webdav_password,
-    _webdav_upload_file,
-    _webdav_username,
-)
 
 _mega_lock = threading.Lock()  # serializes megatools runs (see upload_file)
 
@@ -61,7 +51,7 @@ class UploadMethod:
 # Static list of every method id this build can target. Kept separate from the
 # runtime `_UPLOAD_METHODS` snapshot (below) so validation/state helpers can run
 # at import time without ordering hazards.
-_KNOWN_UPLOAD_METHODS = ("local", "mega", "drive", "onedrive", "webdav")
+_KNOWN_UPLOAD_METHODS = ("local", "mega", "drive", "onedrive")
 
 # The default upload method is "sticky": once a client explicitly asks for a
 # method (upload_method=… / upload_to_mega=…), that choice is remembered and
@@ -110,7 +100,7 @@ def resolve_upload_method(value: Optional[str]) -> str:
     """Map a client-supplied upload target to a concrete method id.
 
     Accepts: None/"" (current default), "local", "mega", "drive", "onedrive",
-    "webdav", and legacy booleans ("true"→mega, "false"→local) for backward
+    and legacy booleans ("true"→mega, "false"→local) for backward
     compatibility with upload_to_mega.
     """
     raw = str(value).strip().lower() if value is not None else ""
@@ -181,14 +171,6 @@ def upload_file(
             return _drive_upload_file(service, folder_id, local_path, on_progress, overwrite)
         except Exception as e:
             return False, str(e), None
-    if method == "webdav":
-        try:
-            username, password = _webdav_username(), _webdav_password()
-            if not username or not password:
-                return False, "WebDAV credentials not configured. Run `python server.py --setup-upload webdav`.", None
-            return _webdav_upload_file(_webdav_base_url(), username, password, local_path, remote_dir, on_progress, overwrite)
-        except Exception as e:
-            return False, str(e), None
     if method == "onedrive":
         try:
             token = _onedrive_token()
@@ -210,9 +192,6 @@ def _method_current_folder(method_id: str) -> str:
         return f"{DRIVE_ROOT_NAME} (My Drive root)"
     if method_id == "onedrive":
         return f"{ONEDRIVE_ROOT_NAME} (OneDrive root)"
-    if method_id == "webdav":
-        base = _webdav_base_url()
-        return f"{base}/{WEBDAV_ROOT_NAME}" if base else f"{WEBDAV_ROOT_NAME} (WebDAV root)"
     return ""
 
 def _build_upload_methods() -> dict[str, UploadMethod]:
@@ -253,16 +232,6 @@ def _build_upload_methods() -> dict[str, UploadMethod]:
             extra={
                 "creds_source": "token" if _onedrive_configured() else None,
                 "root": ONEDRIVE_ROOT_NAME,
-            },
-        ),
-        "webdav": UploadMethod(
-            id="webdav",
-            name="WebDAV",
-            configured=_webdav_configured(),
-            default=(_default_upload_method() == "webdav"),
-            extra={
-                "creds_source": "keyring/file" if _webdav_configured() else None,
-                "base_url": WEBDAV_BASE_URL,
             },
         ),
     }

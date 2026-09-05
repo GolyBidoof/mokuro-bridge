@@ -20,7 +20,6 @@ from .config import (
     MIN_PAGES_FOR_MEGA,
     ONEDRIVE_ROOT_NAME,
     OUTPUT_DIR,
-    WEBDAV_ROOT_NAME,
     WORK_DIR,
     _LOCAL_DIR_STATE_FILE,
     _LOCAL_INGEST_ROOTS,
@@ -579,15 +578,12 @@ async def session_finalize(
                 remote_dir = f"{DRIVE_ROOT_NAME}/{series}"
             elif method == "onedrive":
                 remote_dir = f"{ONEDRIVE_ROOT_NAME}/{series}"
-            elif method == "webdav":
-                remote_dir = f"{WEBDAV_ROOT_NAME}/{series}"
             else:
                 remote_dir = ""  # local — not used
             method_label = {
                 "mega": "MEGA",
                 "drive": "Google Drive",
                 "onedrive": "OneDrive",
-                "webdav": "WebDAV",
             }.get(method, method)
             upload_results = []
             all_success = True
@@ -661,6 +657,7 @@ async def session_finalize(
                             f"Uploaded {r['file']}",
                             file=r["file"],
                             method=method,
+                            url=r.get("url"),
                         )
                     else:
                         yield ndjson(
@@ -723,6 +720,7 @@ async def session_finalize(
                             "speed_bps": int(total / dur) if dur and r["success"] else 0,
                             "duration_s": dur,
                             "success": r["success"],
+                            "url": r.get("url") if r["success"] else None,
                         }
                     )
             yield ndjson(

@@ -4,5 +4,5 @@
 # (device-code flow — prints a URL + code to approve in your browser).
 msal>=1.24.0
 
-# requests is also required (WebDAV / Graph); it ships in requirements.txt.
+# requests is also required (Graph); it ships in requirements.txt.
 requests>=2.31

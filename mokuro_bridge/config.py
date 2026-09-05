@@ -57,16 +57,6 @@ DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 _DRIVE_CLIENT_SECRET_ENV = "DRIVE_CLIENT_SECRET_FILE"
 _DRIVE_CLIENT_ID_ENV = "DRIVE_CLIENT_ID"
 
-# WebDAV (optional destination; works with Nextcloud, ownCloud, Seafile, ...).
-# Base URL is the DAV root the server exposes (e.g. Nextcloud:
-# https://host/remote.php/dav/files/<username>). The bridge creates/uses
-# <base>/mokuro-reader/<Series>/ under it.
-WEBDAV_BASE_URL = os.environ.get("WEBDAV_BASE_URL", "").strip()
-WEBDAV_ROOT_NAME = os.environ.get("WEBDAV_ROOT_NAME", "mokuro-reader")
-WEBDAV_CREDS_FILE = _env_path(
-    "WEBDAV_CREDS_FILE", Path.home() / ".config" / "mokuro-bridge" / "webdav.env"
-)
-
 # OneDrive (optional destination via MS Graph, msal device-code auth).
 # NOTE: msal reserves 'offline_access' — it's added automatically, so it must
 # NOT appear in the scopes list (msal raises ValueError otherwise).
