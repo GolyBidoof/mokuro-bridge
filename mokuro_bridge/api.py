@@ -654,10 +654,14 @@ async def session_finalize(
                 # bar instead of discovering totals one file at a time (which
                 # makes a finished file look like 100% until the next total
                 # arrives and the bar has to step back down).
+                # Cover .webp first: it is tiny, so it completes almost instantly,
+                # giving clients immediate visible progress and a usable file
+                # URL (and failing fast on a broken destination) before the big
+                # .cbz/.mokuro transfers start.
                 file_plan = [
+                    {"file": f"{file_base}.webp", "total_bytes": titled_cover.stat().st_size},
                     {"file": f"{file_base}.cbz", "total_bytes": titled_cbz.stat().st_size},
                     {"file": f"{file_base}.mokuro", "total_bytes": titled_mokuro.stat().st_size},
-                    {"file": f"{file_base}.webp", "total_bytes": titled_cover.stat().st_size},
                 ]
                 yield ndjson(
                     "upload",
@@ -679,9 +683,9 @@ async def session_finalize(
                 def _upload_batch():
                     results = []
                     items = [
+                        (titled_cover, f"{file_base}.webp"),
                         (titled_cbz, f"{file_base}.cbz"),
                         (titled_mokuro, f"{file_base}.mokuro"),
-                        (titled_cover, f"{file_base}.webp"),
                     ]
                     for local_path, remote_name in items:
                         start = time.monotonic()
