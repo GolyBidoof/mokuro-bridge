@@ -1,0 +1,10 @@
+[
+  {
+    "name": "SESSION_COOKIE_NAME",
+    "value": "paste-value-here",
+    "domain": ".bookwalker.jp",
+    "path": "/",
+    "httpOnly": true,
+    "secure": true
+  }
+]
