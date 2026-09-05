@@ -1,5 +1,15 @@
+# ── Server ─────────────────────────────────────────────────────────────
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 python-multipart>=0.0.12
-# mokuro should already be installed system-wide (you have it).
-# If not: pip3 install mokuro
+
+# ── OS credential store (optional but recommended) ─────────────────────
+# Enables storing MEGA credentials in the system keychain / credential
+# store (macOS Keychain, Windows Credential Manager, Linux Secret Service).
+# Without it, credentials are kept in a plain 0600 file instead.
+keyring>=23.13
+
+# ── OCR engine ─────────────────────────────────────────────────────────
+# Vanilla mokuro from PyPI. If you run a custom mokuro checkout instead,
+# set MOKURO_REPO=/path/to/checkout and this line is not needed.
+mokuro

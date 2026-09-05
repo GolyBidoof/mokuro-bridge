@@ -38,7 +38,6 @@ import shutil
 import subprocess
 import sys
 import threading
-import time
 import uuid
 import zipfile
 from collections import deque
@@ -53,7 +52,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 # ── Identity ──────────────────────────────────────────────────────────
 
 APP_NAME = "mokuro-bridge"
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # ── mokuro backend ────────────────────────────────────────────────────
 # OCR engine resolution order:
@@ -138,7 +137,7 @@ MIN_PAGES_FOR_MEGA = max(1, int(os.environ.get("MIN_PAGES_FOR_MEGA", "10")))
 _OCR_CHUNK_SIZE = max(1, int(os.environ.get("OCR_CHUNK_SIZE", "8")))
 _OCR_IDLE_FLUSH_S = float(os.environ.get("OCR_IDLE_FLUSH_S", "1.5"))
 
-# MEGA credentials, resolved in order: env vars → creds file → macOS Keychain.
+# MEGA credentials, resolved in order: env vars → creds file → OS keychain.
 MEGA_CREDS_FILE = _env_path(
     "MEGA_CREDS_FILE", Path.home() / ".config" / "mokuro-bridge" / "credentials.env"
 )
@@ -341,9 +340,31 @@ def _find_session_by_safe_title(safe_title: str) -> Optional[Session]:
 
 
 # ── MEGA credentials ──────────────────────────────────────────────────
-# Resolution order: MEGA_EMAIL/MEGA_PASSWORD env vars → MEGA_CREDS_FILE
-# (KEY=VALUE, chmod 600) → macOS Keychain (setup-keychain.sh). All optional:
-# MEGA upload is disabled by default and can be skipped entirely.
+# Resolution order:
+#   1. MEGA_EMAIL / MEGA_PASSWORD env vars
+#   2. MEGA_CREDS_FILE (KEY=VALUE, chmod 600)
+#   3. the OS credential store, when one is available:
+#        macOS  — Keychain (via `security`, or `keyring`)
+#        Windows— Credential Manager (via `keyring`)
+#        Linux  — Secret Service / gnome-keyring (via `keyring`)
+# All optional: MEGA upload is disabled by default and can be skipped entirely.
+
+_KEYRING_SERVICE = "mokuro-bridge"  # namespace used for keyring-based entries
+
+
+def _keyring():
+    """Best-effort import of the optional `keyring` package.
+
+    Returns the module when a usable backend is configured, else None (callers
+    then fall back to the credentials file / macOS `security`).
+    """
+    try:
+        import keyring
+
+        keyring.get_keyring()  # raises if no backend is available
+        return keyring
+    except Exception:
+        return None
 
 
 def _read_creds_file() -> Optional[tuple[str, str]]:
@@ -381,33 +402,49 @@ def _write_creds_file(email: str, password: str) -> None:
 
 
 def _keychain_mega_creds() -> Optional[tuple[str, str]]:
-    if sys.platform != "darwin":
-        return None
-    try:
-        result = subprocess.run(
-            ["security", "find-internet-password", "-s", "mega.nz", "-r", "htps", "-w"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            return None
-        password = result.stdout.strip()
-        acct_result = subprocess.run(
-            ["security", "find-internet-password", "-s", "mega.nz", "-r", "htps", "-g"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        email_match = re.search(r'"acct"<blob>="([^"]+)"', acct_result.stdout)
-        if not email_match:
-            return None
-        return email_match.group(1), password
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return None
+    """Look up MEGA credentials in the OS credential store.
+
+    Tries, in order: macOS Keychain via `security` (keeps setup-keychain.sh
+    entries working), then any `keyring` backend (macOS Keychain, Windows
+    Credential Manager, Linux Secret Service).
+    """
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["security", "find-internet-password", "-s", "mega.nz", "-r", "htps", "-w"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                password = result.stdout.strip()
+                acct_result = subprocess.run(
+                    ["security", "find-internet-password", "-s", "mega.nz", "-r", "htps", "-g"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                email_match = re.search(r'"acct"<blob>="([^"]+)"', acct_result.stdout)
+                if email_match:
+                    return email_match.group(1), password
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass  # fall through to keyring
+
+    kr = _keyring()
+    if kr is not None:
+        try:
+            email = kr.get_password(_KEYRING_SERVICE, "email")
+            if email:
+                password = kr.get_password(_KEYRING_SERVICE, email)
+                if password:
+                    return email, password
+        except Exception:
+            pass
+    return None
 
 
 def _store_mega_creds_keychain(email: str, password: str) -> None:
+    # macOS only: store via the `security` binary (setup-keychain.sh parity).
     subprocess.run(
         [
             "security",
@@ -424,6 +461,29 @@ def _store_mega_creds_keychain(email: str, password: str) -> None:
         timeout=10,
         check=True,
     )
+
+
+def _store_mega_creds_os(email: str, password: str) -> str:
+    """Store credentials in the OS credential store.
+
+    Returns the backend name. Raises RuntimeError when no usable store is
+    available (caller falls back to the credentials file).
+    """
+    if sys.platform == "darwin":
+        try:
+            _store_mega_creds_keychain(email, password)
+            return "macOS Keychain"
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass  # fall through to keyring
+    kr = _keyring()
+    if kr is not None:
+        try:
+            kr.set_password(_KEYRING_SERVICE, "email", email)
+            kr.set_password(_KEYRING_SERVICE, email, password)
+            return "system keyring"
+        except Exception as exc:  # pragma: no cover - backend-specific
+            raise RuntimeError(f"system keyring store failed: {exc}") from exc
+    raise RuntimeError("no OS credential store is available")
 
 
 def _mega_creds_source() -> Optional[str]:
@@ -451,9 +511,10 @@ def _get_mega_creds() -> tuple[str, str]:
     if keychain_creds is not None:
         return keychain_creds
     raise RuntimeError(
-        "MEGA credentials not configured. Either set MEGA_EMAIL + MEGA_PASSWORD "
-        "environment variables, run `python server.py --setup-mega`, or on macOS "
-        "run ./setup-keychain.sh."
+        "MEGA credentials not configured. Set MEGA_EMAIL + MEGA_PASSWORD "
+        "environment variables, run `python server.py --setup-mega` (stores "
+        "them in your OS keychain/credential store or a 0600 file), or write "
+        "them to the credentials file."
     )
 
 
@@ -485,13 +546,13 @@ def _run_setup_mega() -> None:
         return
     password = getpass.getpass("MEGA password: ")
 
-    if sys.platform == "darwin":
-        try:
-            _store_mega_creds_keychain(email, password)
-            print(f"Stored in macOS Keychain (service mega.nz, account {email}).")
-            return
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            print(f"Keychain store failed ({exc}); falling back to credentials file.")
+    try:
+        backend = _store_mega_creds_os(email, password)
+    except RuntimeError as exc:
+        print(f"{exc}; falling back to a credentials file.")
+    else:
+        print(f"Stored in {backend}.")
+        return
     _write_creds_file(email, password)
     print(f"Stored in {MEGA_CREDS_FILE} (permissions 0600).")
     print(
@@ -627,27 +688,31 @@ def session_snapshot(session: Session) -> dict:
         }
 
 
-def _assert_local_ingest_path(raw_path: str) -> Path:
-    """Allow same-machine clients to hand us a file path instead of multipart upload."""
+def _resolve_ingest_path(raw_path: str) -> Path:
+    """Resolve a same-machine path and ensure it sits under an allowed root.
+
+    Local clients (headless scrapers, ocr_folder.py) hand us filesystem paths
+    instead of uploading bytes. We only accept paths under the user's home
+    directory or system temp locations. The caller validates the type
+    (file vs directory) afterwards.
+    """
     resolved = Path(raw_path).expanduser().resolve()
-    allowed = False
-    for root in _LOCAL_INGEST_ROOTS:
-        try:
-            resolved.relative_to(root)
-            allowed = True
-            break
-        except ValueError:
-            continue
-    if not allowed:
+    if not any(
+        _is_relative_to(resolved, root) for root in _LOCAL_INGEST_ROOTS
+    ):
         raise HTTPException(
             status_code=403,
             detail=f"Local ingest path not under allowed roots: {resolved}",
         )
-    if not resolved.is_file():
-        raise HTTPException(status_code=400, detail=f"Not a file: {resolved}")
-    if resolved.suffix.lower() not in IMAGE_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"Unsupported image type: {resolved.suffix}")
     return resolved
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _queue_page_ocr(session: Session, safe_name: str) -> dict:
@@ -884,7 +949,7 @@ async def session_start(
 ):
     """Create a new pipelined capture+OCR session."""
     safe_title = sanitize_filename(title) or f"manga_{uuid.uuid4().hex[:8]}"
-    do_reuse = str(reuse_existing).lower() in ("1", "true", "yes", "on")
+    do_reuse = _truthy(reuse_existing)
 
     if do_reuse:
         existing = _find_session_by_safe_title(safe_title)
@@ -957,7 +1022,9 @@ async def session_resume(
 
     synced = 0
     if source_dir.strip():
-        src = _assert_local_ingest_path_dir(source_dir.strip())
+        src = _resolve_ingest_path(source_dir.strip())
+        if not src.is_dir():
+            raise HTTPException(status_code=400, detail=f"Not a directory: {src}")
         for img in sorted(src.iterdir()):
             if not img.is_file() or img.suffix.lower() not in IMAGE_EXTENSIONS:
                 continue
@@ -1021,26 +1088,6 @@ async def session_resume(
     return JSONResponse(snap)
 
 
-def _assert_local_ingest_path_dir(raw_path: str) -> Path:
-    resolved = Path(raw_path).expanduser().resolve()
-    allowed = False
-    for root in _LOCAL_INGEST_ROOTS:
-        try:
-            resolved.relative_to(root)
-            allowed = True
-            break
-        except ValueError:
-            continue
-    if not allowed:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Local ingest path not under allowed roots: {resolved}",
-        )
-    if not resolved.is_dir():
-        raise HTTPException(status_code=400, detail=f"Not a directory: {resolved}")
-    return resolved
-
-
 @app.post("/session/{session_id}/page")
 async def session_page(
     session_id: str,
@@ -1080,7 +1127,11 @@ async def session_page_local(
     if session.finalized:
         raise HTTPException(status_code=400, detail="Session already finalized")
 
-    src = _assert_local_ingest_path(path)
+    src = _resolve_ingest_path(path)
+    if not src.is_file():
+        raise HTTPException(status_code=400, detail=f"Not a file: {src}")
+    if src.suffix.lower() not in IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported image type: {src.suffix}")
     safe_name = Path(filename).name or src.name
     if not safe_name or safe_name.startswith("."):
         safe_name = f"page_{int(page_num):03d}{src.suffix.lower()}"
@@ -1108,7 +1159,7 @@ async def session_page_local(
 
 @app.get("/sessions")
 async def list_sessions():
-    """Active pipelined sessions (useful when several capture clients run at once at once)."""
+    """Active pipelined sessions (useful when several capture clients run at once)."""
     with _sessions_lock:
         snaps = [session_snapshot(s) for s in _sessions.values()]
     return JSONResponse({"sessions": snaps, "count": len(snaps)})
@@ -1435,8 +1486,9 @@ def _main() -> None:
     parser.add_argument(
         "--setup-mega",
         action="store_true",
-        help="Interactively store MEGA credentials (Keychain on macOS, else a "
-        "0600 file) so /session/{id}/finalize can upload.",
+        help="Interactively store MEGA credentials in the OS keychain / "
+        "credential store (macOS Keychain, Windows Credential Manager, Linux "
+        "Secret Service) or, failing that, a 0600 credentials file.",
     )
     parser.add_argument("--host", default=os.environ.get("MOKURO_BRIDGE_HOST", "127.0.0.1"))
     parser.add_argument(

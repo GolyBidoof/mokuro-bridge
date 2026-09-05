@@ -43,12 +43,6 @@ sed \
 # Unload any previous install of this label
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 
-# Legacy: unload + remove the pre-rename agent (com.bw-mokuro-bridge), if any
-if launchctl print "gui/$(id -u)/com.bw-mokuro-bridge" >/dev/null 2>&1; then
-  launchctl bootout "gui/$(id -u)/com.bw-mokuro-bridge" 2>/dev/null || true
-fi
-rm -f "$HOME/Library/LaunchAgents/com.bw-mokuro-bridge.plist"
-
 launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
 launchctl enable "gui/$(id -u)/$LABEL"
 launchctl kickstart -k "gui/$(id -u)/$LABEL"

@@ -1,8 +1,10 @@
 #!/bin/bash
-# Store MEGA credentials in the macOS Keychain for mokuro-bridge / megatools.
+# macOS-only convenience wrapper: store MEGA credentials in the login Keychain
+# (service 'mega.nz', protocol https) for mokuro-bridge / megatools.
 #
-# (On non-macOS, or if you prefer a plain file, run `python3 server.py
-# --setup-mega` instead — it stores to ~/.config/mokuro-bridge/credentials.env.)
+# Cross-platform alternative (works on macOS, Windows and Linux):
+#   python3 server.py --setup-mega
+# which stores in the OS keychain/credential store or a 0600 credentials file.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"

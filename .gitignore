@@ -1,13 +1,10 @@
 # ── Secrets / personal data (never commit!) ─────────────────────────────
-# Session cookies for the storefront scrapers (root, bookwalker/, ebookjapan…)
+# Session cookies / credential files
 cookies.json
 yahoo_cookies.json
-# Credential/env files
 .env
 *.env
 !.env.example
-# Aider/assistant history
-.aider*
 
 # ── Python ───────────────────────────────────────────────────────────────
 __pycache__/
@@ -24,16 +21,14 @@ node_modules/
 # ── macOS ────────────────────────────────────────────────────────────────
 .DS_Store
 
-# ── Runtime data (captured pages, archives, debug output) ───────────────
-# ebookjapan + bookwalker scrapers
+# ── Misc local artifacts ─────────────────────────────────────────────────
+_debug*
+_preview*
+*.log
 manga_archives/
 manga_pages/
 manga_archive/
 manga_archive.zip
-ebookjapan.yahoo.co.jp/*.zip
-_debug*
-_preview*
-*.log
 
 # Bridge output / local OCR work (see MOKURO_BRIDGE_OUTPUT_DIR / WORK_DIR)
 /output/
@@ -42,8 +37,5 @@ _preview*
 # MOKURO_REPO at your own fork elsewhere)
 /mokuro/
 
-# ── Store-specific capture clients (BookWalker/ebookjapan scrapers and
-#    userscripts) — kept out of the public repo; they stay local on disk ──
-/bookwalker/
-/ebookjapan.yahoo.co.jp/
+# Local browser userscripts (kept out of the public repo)
 /*.user.js
