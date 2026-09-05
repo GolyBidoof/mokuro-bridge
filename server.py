@@ -40,6 +40,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import uuid
 import zipfile
 from collections import deque
@@ -54,7 +55,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 # ── Identity ──────────────────────────────────────────────────────────
 
 APP_NAME = "mokuro-bridge"
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # ── OCR engine ────────────────────────────────────────────────────────
 # By default the bridge uses the stock mokuro package from PyPI
@@ -161,6 +162,25 @@ DRIVE_CREDS_FILE = _env_path(
 )
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 _DRIVE_CLIENT_SECRET_ENV = "DRIVE_CLIENT_SECRET_FILE"
+
+# WebDAV (optional destination; works with Nextcloud, ownCloud, Seafile, ...).
+# Base URL is the DAV root the server exposes (e.g. Nextcloud:
+# https://host/remote.php/dav/files/<username>). The bridge creates/uses
+# <base>/mokuro-reader/<Series>/ under it.
+WEBDAV_BASE_URL = os.environ.get("WEBDAV_BASE_URL", "").strip()
+WEBDAV_ROOT_NAME = os.environ.get("WEBDAV_ROOT_NAME", "mokuro-reader")
+WEBDAV_CREDS_FILE = _env_path(
+    "WEBDAV_CREDS_FILE", Path.home() / ".config" / "mokuro-bridge" / "webdav.env"
+)
+
+# OneDrive (optional destination via MS Graph, msal device-code auth).
+ONEDRIVE_ROOT_NAME = os.environ.get("ONEDRIVE_ROOT_NAME", "mokuro-reader")
+ONEDRIVE_CLIENT_ID = os.environ.get("ONEDRIVE_CLIENT_ID", "").strip()
+ONEDRIVE_TOKEN_FILE = _env_path(
+    "ONEDRIVE_TOKEN_FILE", Path.home() / ".config" / "mokuro-bridge" / "onedrive_token.json"
+)
+_ONEDRIVE_SCOPES = ["https://graph.microsoft.com/Files.ReadWrite", "offline_access"]
+_GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 # ── Upload methods ─────────────────────────────────────────────────────
 # Multi-destination ("upload method") architecture: every destination — the
@@ -738,6 +758,26 @@ def _build_upload_methods() -> dict[str, UploadMethod]:
             default=False,
             extra={"creds_source": _drive_creds_source(), "root": DRIVE_ROOT_NAME},
         ),
+        "onedrive": UploadMethod(
+            id="onedrive",
+            name="OneDrive",
+            configured=_onedrive_configured(),
+            default=False,
+            extra={
+                "creds_source": "token" if _onedrive_configured() else None,
+                "root": ONEDRIVE_ROOT_NAME,
+            },
+        ),
+        "webdav": UploadMethod(
+            id="webdav",
+            name="WebDAV",
+            configured=_webdav_configured(),
+            default=False,
+            extra={
+                "creds_source": "keyring/file" if _webdav_configured() else None,
+                "base_url": WEBDAV_BASE_URL,
+            },
+        ),
     }
 
 
@@ -924,6 +964,20 @@ def upload_file(
             return _drive_upload_file(service, folder_id, local_path, on_progress)
         except Exception as e:
             return False, str(e)
+    if method == "webdav":
+        try:
+            username, password = _webdav_username(), _webdav_password()
+            if not username or not password:
+                return False, "WebDAV credentials not configured. Run `python server.py --setup-upload webdav`."
+            return _webdav_upload_file(_webdav_base_url(), username, password, local_path, remote_dir, on_progress)
+        except Exception as e:
+            return False, str(e)
+    if method == "onedrive":
+        try:
+            token = _onedrive_token()
+            return _onedrive_upload_file(token, local_path, remote_dir, on_progress)
+        except Exception as e:
+            return False, str(e)
     if method == "local":
         raise ValueError("local uploads are handled by the caller")
     raise ValueError(f"unknown upload method: {method}")
@@ -936,6 +990,14 @@ def upload_file(
 _DRIVE_IMPORT_HINT = (
     "Google Drive upload needs the google client libraries. "
     "Install them with: pip install -r requirements-drive.txt"
+)
+_WEBDAV_IMPORT_HINT = (
+    "WebDAV upload needs the requests library. "
+    "Install it with: pip install requests"
+)
+_ONEDRIVE_IMPORT_HINT = (
+    "OneDrive upload needs the msal and requests libraries. "
+    "Install them with: pip install msal requests"
 )
 
 
@@ -1175,6 +1237,641 @@ def _run_setup_drive() -> None:
     print(f"Stored Drive credentials in {DRIVE_CREDS_FILE} (permissions 0600).")
 
 
+# ── WebDAV helpers (optional destination) ──────────────────────────────
+# Uploads go over HTTP(S) with requests (lazy-imported). The base URL is not
+# secret; credentials resolve in order: env vars → OS keychain (keyring) →
+# the 0600 JSON creds file (which also persists the base URL). The setup
+# wizard writes the creds file and, when keyring is available, also stores
+# username/password there so the file only carries the URL on those machines.
+_WEBDAV_KEYRING_USERNAME = "webdav:username"
+_WEBDAV_KEYRING_PASSWORD = "webdav:password"
+
+
+def _webdav_username() -> Optional[str]:
+    """WebDAV username: env WEBDAV_USERNAME → keyring 'webdav:username'."""
+    env = os.environ.get("WEBDAV_USERNAME", "").strip()
+    if env:
+        return env
+    kr = _keyring()
+    if kr is not None:
+        try:
+            value = kr.get_password(_KEYRING_SERVICE, _WEBDAV_KEYRING_USERNAME)
+            if value:
+                return value
+        except Exception:
+            pass
+    creds = _read_webdav_creds_file()
+    if creds:
+        return creds.get("username") or None
+    return None
+
+
+def _webdav_password() -> Optional[str]:
+    """WebDAV password: env WEBDAV_PASSWORD → keyring 'webdav:password'."""
+    env = os.environ.get("WEBDAV_PASSWORD", "").strip()
+    if env:
+        return env
+    kr = _keyring()
+    if kr is not None:
+        try:
+            value = kr.get_password(_KEYRING_SERVICE, _WEBDAV_KEYRING_PASSWORD)
+            if value:
+                return value
+        except Exception:
+            pass
+    creds = _read_webdav_creds_file()
+    if creds:
+        return creds.get("password") or None
+    return None
+
+
+def _webdav_configured() -> bool:
+    """Whether the WebDAV method is usable right now."""
+    return (
+        bool(WEBDAV_BASE_URL)
+        and bool(_webdav_username())
+        and bool(_webdav_password())
+        and importlib.util.find_spec("requests") is not None
+    )
+
+
+def _webdav_base_url() -> str:
+    """The configured DAV base URL with any trailing slash stripped."""
+    return WEBDAV_BASE_URL.rstrip("/")
+
+
+def _read_webdav_creds_file() -> Optional[dict]:
+    """Read WEBDAV_CREDS_FILE (JSON: base_url/username/password) or None."""
+    try:
+        data = json.loads(WEBDAV_CREDS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _write_webdav_creds_file(url: str, username: str, password: str) -> None:
+    """Persist WebDAV URL + credentials as JSON (0600)."""
+    WEBDAV_CREDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    WEBDAV_CREDS_FILE.write_text(
+        json.dumps(
+            {"base_url": url, "username": username, "password": password},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    try:
+        WEBDAV_CREDS_FILE.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _run_setup_webdav() -> None:
+    """Interactive first-run wizard: capture base URL + credentials and store.
+
+    Resolution order at runtime: env vars (WEBDAV_USERNAME / WEBDAV_PASSWORD)
+    → OS keychain (keyring) → WEBDAV_CREDS_FILE. The base URL is read from
+    WEBDAV_BASE_URL (required) and persisted into the creds file so the setup
+    survives restarts; when keyring is available the username/password are
+    ALSO stored there and the file only holds the URL.
+    """
+    try:
+        import getpass
+    except ImportError:
+        getpass = None
+
+    print("WebDAV upload setup for mokuro-bridge")
+    print("-" * 40)
+    if not WEBDAV_BASE_URL:
+        print(
+            "No WebDAV base URL configured. Set the WEBDAV_BASE_URL "
+            "environment variable (e.g. "
+            "https://host/remote.php/dav/files/<username>) and re-run."
+        )
+        return
+
+    print(f"Base URL: {WEBDAV_BASE_URL}")
+    print(
+        "Leave a prompt empty to keep the currently configured value "
+        "(env / keyring / file)."
+    )
+
+    username = os.environ.get("WEBDAV_USERNAME", "").strip() or _webdav_username() or ""
+    answer = input(f"Username [{username}]: ").strip()
+    if answer:
+        username = answer
+    if not username:
+        print("No username given — aborting.")
+        return
+
+    password = os.environ.get("WEBDAV_PASSWORD", "").strip() or _webdav_password() or ""
+    if getpass is not None:
+        entered = getpass.getpass("Password (empty = keep current): ")
+    else:
+        entered = input("Password (empty = keep current): ")
+    if entered:
+        password = entered
+    if not password:
+        print("No password given — aborting.")
+        return
+
+    stored = []
+    _write_webdav_creds_file(WEBDAV_BASE_URL, username, password)
+    stored.append(str(WEBDAV_CREDS_FILE))
+    kr = _keyring()
+    if kr is not None:
+        try:
+            kr.set_password(_KEYRING_SERVICE, _WEBDAV_KEYRING_USERNAME, username)
+            kr.set_password(_KEYRING_SERVICE, _WEBDAV_KEYRING_PASSWORD, password)
+            stored.append("system keyring")
+        except Exception as exc:  # pragma: no cover - backend-specific
+            print(f"note: could not store in the system keyring: {exc}")
+    print(
+        "Stored WebDAV credentials in: "
+        + ", ".join(stored)
+        + " (creds file is 0600)."
+    )
+    print(
+        "Tip: you can also use environment variables WEBDAV_USERNAME / "
+        "WEBDAV_PASSWORD instead of storing anything."
+    )
+
+
+class _CountingBody:
+    """File-like body that counts bytes as requests streams it, throttled.
+
+    `requests` reads via `.read()` and sets Content-Length from `.len`.
+    on_progress(bytes_done, total_bytes, speed_bps) fires at most every
+    0.25s (or immediately on start/finish), mirroring the caller-side
+    throttle in _upload_batch.
+    """
+
+    def __init__(self, path, total, on_progress):
+        self._f = open(path, "rb")
+        self.len = total
+        self.done = 0
+        self._on_progress = on_progress
+        self._last_t = time.monotonic()
+        self._last_done = 0
+        self._last_emit = 0.0
+
+    def read(self, n=-1):
+        chunk = self._f.read(n if n and n > 0 else 1 << 16)
+        if chunk:
+            self.done += len(chunk)
+            now = time.monotonic()
+            dt = now - self._last_t
+            speed = int((self.done - self._last_done) / dt) if dt > 0 else 0
+            self._last_t, self._last_done = now, self.done
+            if (
+                self.done >= self.len
+                or self.done <= 0
+                or now - self._last_emit >= 0.25
+            ):
+                self._last_emit = now
+                self._on_progress(self.done, self.len, speed)
+        return chunk
+
+    def close(self):
+        self._f.close()
+
+
+def _webdav_mkcol(sess, url: str) -> bool:
+    """Best-effort MKCOL; returns True when the collection exists/ok.
+
+    Accepts 201 (created), 301 (moved), 405 (exists, method not allowed on
+    an existing collection), 409 (already exists / conflict) as
+    "exists/ok"; anything else returns False.
+    """
+    try:
+        resp = sess.request("MKCOL", url, timeout=30)
+    except Exception:
+        return False
+    return resp.status_code in (201, 204, 301, 405, 409)
+
+
+def _webdav_upload_file(
+    base_url: str,
+    username: str,
+    password: str,
+    local_path: Path,
+    remote_dir: str,
+    on_progress: Optional[callable],
+) -> tuple[bool, Optional[str]]:
+    """PUT one file over WebDAV under <base_url>/<remote_dir>/<name>.
+
+    Ensures the parent collections exist (idempotent MKCOL per segment),
+    then streams the PUT through a counting body so on_progress fires with
+    live byte/speed deltas. Returns (success, error_message).
+    """
+    try:
+        import requests
+    except ImportError as exc:
+        raise RuntimeError(_WEBDAV_IMPORT_HINT) from exc
+    base = base_url.rstrip("/")
+    remote_dir = str(remote_dir or "").strip("/")
+    if not base:
+        raise RuntimeError(
+            "WebDAV base URL not configured. Set WEBDAV_BASE_URL or run "
+            "`python server.py --setup-upload webdav`."
+        )
+    total = local_path.stat().st_size
+    remote_url = f"{base}/{remote_dir}/{local_path.name}"
+
+    sess = requests.Session()
+    sess.auth = (username, password)  # preemptive Basic auth
+    sess.headers["Content-Type"] = "application/octet-stream"
+
+    # Ensure parent collections exist (root, then each series segment).
+    accumulated = base
+    for seg in remote_dir.split("/"):
+        if not seg:
+            continue
+        accumulated = f"{accumulated}/{seg}"
+        if not _webdav_mkcol(sess, accumulated):
+            return False, f"WebDAV MKCOL failed for {accumulated}"
+
+    body = None
+    try:
+        if on_progress is None:
+            with open(local_path, "rb") as f:
+                resp = sess.put(remote_url, data=f, timeout=None)
+        else:
+            body = _CountingBody(local_path, total, on_progress)
+            resp = sess.put(remote_url, data=body, timeout=None)
+        if resp.status_code in (200, 201, 204):
+            if on_progress:
+                on_progress(total, total, 0)
+            return True, None
+        text = (resp.text or "").strip()
+        return False, f"WebDAV PUT {resp.status_code}: {text[:300] or 'no detail'}"
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        if body is not None:
+            body.close()
+
+
+# ── OneDrive helpers (optional destination) ────────────────────────────
+# Auth = msal PublicClientApplication device-code flow; the token cache is
+# persisted as JSON in ONEDRIVE_TOKEN_FILE (0600). All msal/requests imports
+# are LAZY so server.py imports cleanly without them.
+
+
+def _onedrive_configured() -> bool:
+    """Whether the OneDrive method is usable right now."""
+    return (
+        importlib.util.find_spec("msal") is not None
+        and bool(ONEDRIVE_CLIENT_ID)
+        and ONEDRIVE_TOKEN_FILE.is_file()
+    )
+
+
+def _load_token_cache():
+    """Load ONEDRIVE_TOKEN_FILE into a SerializableTokenCache (empty if absent)."""
+    try:
+        from msal import SerializableTokenCache
+    except ImportError as exc:
+        raise RuntimeError(_ONEDRIVE_IMPORT_HINT) from exc
+    cache = SerializableTokenCache()
+    try:
+        data = ONEDRIVE_TOKEN_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return cache
+    if data.strip():
+        try:
+            cache.deserialize(data)
+        except Exception:
+            pass  # corrupt cache — start over
+    return cache
+
+
+def _save_token_cache(cache) -> None:
+    """Persist the msal token cache to ONEDRIVE_TOKEN_FILE (0600)."""
+    if not cache.has_state_changed:
+        return
+    ONEDRIVE_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ONEDRIVE_TOKEN_FILE.write_text(cache.serialize(), encoding="utf-8")
+    try:
+        ONEDRIVE_TOKEN_FILE.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _onedrive_msal_app():
+    """Build the msal PublicClientApplication with the persisted cache."""
+    try:
+        from msal import PublicClientApplication
+    except ImportError as exc:
+        raise RuntimeError(_ONEDRIVE_IMPORT_HINT) from exc
+    cache = _load_token_cache()
+    app = PublicClientApplication(
+        client_id=ONEDRIVE_CLIENT_ID,
+        authority="https://login.microsoftonline.com/common",
+        token_cache=cache,
+    )
+    return app, cache
+
+
+def _onedrive_token() -> str:
+    """Silently acquire a valid access token (or raise with a re-setup hint).
+
+    Raises RuntimeError (with a `--setup-upload onedrive` hint) when no
+    account/token is cached or the cached refresh token is no longer usable.
+    """
+    app, cache = _onedrive_msal_app()
+    accounts = app.get_accounts()
+    result = None
+    if accounts:
+        result = app.acquire_token_silent_with_error(
+            _ONEDRIVE_SCOPES, account=accounts[0]
+        )
+        _save_token_cache(cache)
+    if result and "access_token" in result:
+        return result["access_token"]
+    if accounts and result and "error" in result:
+        raise RuntimeError(
+            f"OneDrive token refresh failed ({result.get('error')}: "
+            f"{result.get('error_description', '')}). Re-run `python "
+            "server.py --setup-upload onedrive` to sign in again."
+        )
+    raise RuntimeError(
+        "OneDrive not authorized. Run `python server.py --setup-upload "
+        "onedrive` to sign in (device-code flow)."
+    )
+
+
+def _run_setup_onedrive() -> None:
+    """Interactive device-code wizard: sign in and persist the token cache."""
+    try:
+        from msal import PublicClientApplication
+    except ImportError:
+        print(
+            "OneDrive setup needs the msal library. Install it with:\n"
+            "  pip install msal requests"
+        )
+        return
+
+    print("OneDrive upload setup for mokuro-bridge")
+    print("-" * 40)
+    client_id = ONEDRIVE_CLIENT_ID or input("Azure app client ID: ").strip()
+    if not client_id:
+        print(
+            "No client ID given. In the Azure portal:\n"
+            "  1. Create an app registration\n"
+            "  2. Add the 'Mobile and desktop applications' platform and "
+            "enable public client flows\n"
+            "  3. Add the delegated Microsoft Graph permission "
+            "'Files.ReadWrite'\n"
+            "  4. Copy the Application (client) ID into "
+            "ONEDRIVE_CLIENT_ID (env) or enter it above."
+        )
+        return
+
+    cache = _load_token_cache()
+    app = PublicClientApplication(
+        client_id=client_id,
+        authority="https://login.microsoftonline.com/common",
+        token_cache=cache,
+    )
+    flow = app.initiate_device_flow(scopes=_ONEDRIVE_SCOPES)
+    if "user_code" not in flow:
+        print(f"error: could not start device flow: {flow.get('error_description', flow)}")
+        return
+    print(flow.get("message", ""))
+    print("Waiting for you to sign in…")
+    result = app.acquire_token_by_device_flow(flow)
+    if "access_token" not in result:
+        print(
+            "error: sign-in failed: "
+            f"{result.get('error')}: {result.get('error_description', '')}"
+        )
+        return
+    _save_token_cache(cache)
+    print(
+        f"OneDrive token stored in {ONEDRIVE_TOKEN_FILE} (permissions 0600)."
+    )
+
+
+def _onedrive_headers() -> dict:
+    """Authorization headers for Graph calls."""
+    return {"Authorization": f"Bearer {_onedrive_token()}"}
+
+
+def _graph_request(sess, method: str, url: str, **kwargs):
+    """Graph call wrapper that surfaces non-2xx as RuntimeError."""
+    resp = sess.request(method, url, timeout=30, **kwargs)
+    if resp.status_code not in (200, 201, 202, 204):
+        try:
+            detail = resp.json()
+        except ValueError:
+            detail = (resp.text or "")[:300]
+        raise RuntimeError(
+            f"Graph {method} {url} → {resp.status_code}: {detail}"
+        )
+    return resp
+
+
+def _onedrive_ensure_folder(
+    sess, headers: dict, parent_id: str, name: str
+) -> str:
+    """Find (or create) a folder named `name` under parent_id; return its id.
+
+    GET 200 → exists; GET 404 → create via POST children; create 409 →
+    already exists → re-GET to resolve the id. Any other status raises.
+    """
+    quoted = urllib.parse.quote(name, safe="")
+    if parent_id == "root":
+        check_url = f"{_GRAPH_BASE}/me/drive/root:/{quoted}:"
+        create_url = f"{_GRAPH_BASE}/me/drive/root/children"
+    else:
+        check_url = f"{_GRAPH_BASE}/me/drive/items/{parent_id}:/{quoted}:"
+        create_url = f"{_GRAPH_BASE}/me/drive/items/{parent_id}/children"
+    resp = sess.get(check_url, headers=headers, timeout=30)
+    if resp.status_code == 200:
+        info = resp.json()
+        if info.get("folder") is not None or info.get("id"):
+            return info["id"]
+        raise RuntimeError(f"Graph path exists but is not a folder: {name}")
+    if resp.status_code != 404:
+        raise RuntimeError(
+            f"Graph GET {check_url} → {resp.status_code}: "
+            f"{(resp.text or '')[:300]}"
+        )
+    # Missing → create.
+    create_resp = sess.post(
+        create_url,
+        headers={**headers, "Content-Type": "application/json"},
+        json={"name": name, "folder": {}},
+        timeout=30,
+    )
+    if create_resp.status_code in (200, 201):
+        return create_resp.json()["id"]
+    if create_resp.status_code == 409:
+        # Raced with another creator — resolve the existing id.
+        retry = sess.get(check_url, headers=headers, timeout=30)
+        if retry.status_code == 200:
+            return retry.json()["id"]
+        raise RuntimeError(
+            f"Graph create {name} conflicted (409) and re-GET failed: "
+            f"{retry.status_code}: {(retry.text or '')[:300]}"
+        )
+    raise RuntimeError(
+        f"Graph POST {create_url} → {create_resp.status_code}: "
+        f"{(create_resp.text or '')[:300]}"
+    )
+
+
+def _onedrive_ensure_remote_dir(
+    sess, headers: dict, remote_dir: str
+) -> str:
+    """Ensure the OneDrive folder chain for remote_dir; return deepest folder id.
+
+    First segment is created under drive root, later segments nest under the
+    previously resolved folder id.
+    """
+    segments = [seg for seg in str(remote_dir or "").strip("/").split("/") if seg]
+    if not segments:
+        raise ValueError(f"empty OneDrive remote path: {remote_dir!r}")
+    parent_id = "root"
+    for seg in segments:
+        parent_id = _onedrive_ensure_folder(sess, headers, parent_id, seg)
+    return parent_id
+
+
+def _onedrive_upload_file(
+    token: str,
+    local_path: Path,
+    remote_dir: str,
+    on_progress: Optional[callable],
+) -> tuple[bool, Optional[str]]:
+    """Upload one file to OneDrive via a chunked createUploadSession.
+
+    Ensures the parent folder chain exists, then PUTs 10 MiB chunks
+    (a multiple of the required 320 KiB fragment size) through the session
+    upload URL. Handles 202 continuation, 416 resume, 404 expiry, and
+    429/5xx retries. Returns (success, error_message).
+    """
+    try:
+        import requests
+    except ImportError as exc:
+        raise RuntimeError(_ONEDRIVE_IMPORT_HINT) from exc
+    total = local_path.stat().st_size
+    headers = {"Authorization": f"Bearer {token}"}
+    series_folder_id = _onedrive_ensure_remote_dir(
+        requests.Session(), headers, remote_dir
+    )
+
+    sess = requests.Session()
+    quoted_name = urllib.parse.quote(local_path.name, safe="")
+    create_url = (
+        f"{_GRAPH_BASE}/me/drive/items/{series_folder_id}:/"
+        f"{quoted_name}:/createUploadSession"
+    )
+    try:
+        resp = sess.post(
+            create_url,
+            headers={**headers, "Content-Type": "application/json"},
+            json={"item": {"@microsoft.graph.conflictBehavior": "replace"}},
+            timeout=30,
+        )
+    except Exception as exc:
+        return False, f"OneDrive createUploadSession failed: {exc}"
+    if resp.status_code not in (200, 201):
+        return (
+            False,
+            f"OneDrive createUploadSession → {resp.status_code}: "
+            f"{(resp.text or '')[:300]}",
+        )
+    upload_url = resp.json().get("uploadUrl")
+    if not upload_url:
+        return False, "OneDrive createUploadSession returned no uploadUrl"
+
+    CHUNK = 10 * 1024 * 1024  # multiple of 320 KiB (327680)
+    start = 0
+    last_time = time.monotonic()
+    last_done = 0
+    tries = 0
+    try:
+        with open(local_path, "rb") as f:
+            while start < total:
+                end = min(start + CHUNK, total) - 1
+                f.seek(start)
+                data = f.read(end - start + 1)
+                put_headers = {
+                    "Content-Range": f"bytes {start}-{end}/{total}",
+                    "Content-Length": str(len(data)),
+                }  # NO Authorization header on session PUTs (docs: can 401)
+                put_resp = sess.put(upload_url, data=data, headers=put_headers, timeout=300)
+                status = put_resp.status_code
+                if status == 202:
+                    next_ranges = put_resp.json().get("nextExpectedRanges") or []
+                    if not next_ranges:
+                        break  # nothing to continue from → treat as done
+                    try:
+                        nxt = int(str(next_ranges[0]).split("-")[0])
+                    except (ValueError, IndexError):
+                        break
+                    if nxt <= start:
+                        # Some servers finish with a 202 then return on GET;
+                        # a non-advancing range means we are done.
+                        start = total
+                        break
+                    start = nxt
+                    now = time.monotonic()
+                    dt = now - last_time
+                    speed = int((start - last_done) / dt) if dt > 0 else 0
+                    last_time, last_done = now, start
+                    if on_progress and (
+                        start >= total or start <= 0 or dt >= 0.25
+                    ):
+                        on_progress(start, total, speed)
+                    tries = 0
+                    continue
+                if status in (200, 201):
+                    if on_progress:
+                        on_progress(total, total, 0)
+                    return True, None
+                if status == 416:
+                    # Range not satisfiable — fetch the server's expected range.
+                    get_resp = sess.get(upload_url, timeout=30)
+                    if get_resp.status_code in (200, 202):
+                        body = get_resp.json()
+                        ranges = body.get("nextExpectedRanges") or []
+                        if ranges:
+                            try:
+                                start = int(str(ranges[0]).split("-")[0])
+                            except (ValueError, IndexError):
+                                return False, f"OneDrive upload 416 with unparseable ranges: {ranges}"
+                            continue
+                    return False, (
+                        f"OneDrive upload 416 and no resumable range: "
+                        f"{(get_resp.text or put_resp.text or '')[:300]}"
+                    )
+                if status == 404:
+                    return False, "OneDrive upload session expired — recreate & restart the upload"
+                if status in (429, 500, 502, 503, 504) and tries < 3:
+                    tries += 1
+                    retry_after = put_resp.headers.get("Retry-After")
+                    try:
+                        delay = float(retry_after) if retry_after else 1.0 * tries
+                    except ValueError:
+                        delay = 1.0 * tries
+                    time.sleep(min(delay, 10))
+                    continue
+                return False, (
+                    f"OneDrive chunk PUT → {status}: {(put_resp.text or '')[:300]}"
+                )
+        # Loop ended with start >= total (or a server-side 202 finish).
+        if on_progress:
+            on_progress(total, total, 0)
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
 # Registry snapshot taken once at startup (used by the banner + fallback lookups
 # in resolve_upload_method); health() rebuilds it live per request. Built here,
 # after the drive helpers above, so the snapshot includes the drive method.
@@ -1296,6 +1993,23 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _resolve_local_output_dir(raw_path: str) -> Path:
+    """Resolve a client-supplied local_dir and ensure it is allowed.
+
+    Mirrors the ingest guard (_resolve_ingest_path): the path must sit under
+    the user's home directory or system temp. The directory is created
+    (parents OK) when missing. Raises HTTPException(400) on disallowed paths.
+    """
+    resolved = Path(raw_path).expanduser().resolve()
+    if not any(_is_relative_to(resolved, root) for root in _LOCAL_INGEST_ROOTS):
+        raise HTTPException(
+            status_code=400,
+            detail="local_dir must be under your home directory or system temp",
+        )
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
 
 
 def _queue_page_ocr(session: Session, safe_name: str) -> dict:
@@ -1815,6 +2529,7 @@ async def session_finalize(
     delete_after_upload: str = Form("true"),
     upload_to_mega: str = Form(""),
     upload_method: str = Form(""),
+    local_dir: str = Form(""),
 ):
     """
     Wait for OCR queue, assemble .mokuro, pack CBZ + cover, then either keep
@@ -1826,11 +2541,19 @@ async def session_finalize(
     "false", i.e. local).
     upload_to_mega: legacy alias — "true" → MEGA; "false" → local; unset →
     env default. New clients should prefer upload_method.
+    local_dir: only used when the resolved method is "local" — a custom
+    output directory (must be under your home dir or system temp; created if
+    missing). Ignored for remote methods.
     """
     session = _get_session(session_id)
     do_delete = _truthy(delete_after_upload)
     raw_target = str(upload_method).strip() or str(upload_to_mega).strip() or None
     method = resolve_upload_method(raw_target)
+    # Custom local output dir (only meaningful for the "local" method; the
+    # validation below raises a proper HTTP 400 before the stream starts).
+    local_output_base = None
+    if method == "local" and local_dir.strip():
+        local_output_base = _resolve_local_output_dir(local_dir)
 
     async def generate():
         try:
@@ -1928,7 +2651,7 @@ async def session_finalize(
             staging = (
                 session.vol_dir / "_mega_upload"
                 if method == "mega"
-                else OUTPUT_DIR / series_dir_name
+                else (local_output_base or OUTPUT_DIR) / series_dir_name
             )
             staging.mkdir(parents=True, exist_ok=True)
             # Files keep the full volume title; folder is the shared series name.
@@ -1958,9 +2681,18 @@ async def session_finalize(
                 remote_dir = f"{MEGA_LIBRARY_ROOT}/{series}"
             elif method == "drive":
                 remote_dir = f"{DRIVE_ROOT_NAME}/{series}"
+            elif method == "onedrive":
+                remote_dir = f"{ONEDRIVE_ROOT_NAME}/{series}"
+            elif method == "webdav":
+                remote_dir = f"{WEBDAV_ROOT_NAME}/{series}"
             else:
                 remote_dir = ""  # local — not used
-            method_label = {"mega": "MEGA", "drive": "Google Drive"}.get(method, method)
+            method_label = {
+                "mega": "MEGA",
+                "drive": "Google Drive",
+                "onedrive": "OneDrive",
+                "webdav": "WebDAV",
+            }.get(method, method)
             upload_results = []
             all_success = True
 
@@ -2122,7 +2854,46 @@ async def session_finalize(
     )
 
 
-# ── Health ─────────────────────────────────────────────────────────────
+# ── Health / upload-methods ────────────────────────────────────────────
+
+
+def _method_current_folder(method_id: str) -> str:
+    """Human-readable 'current folder' for an upload method (for clients)."""
+    if method_id == "local":
+        return str(OUTPUT_DIR)
+    if method_id == "mega":
+        return MEGA_LIBRARY_ROOT
+    if method_id == "drive":
+        return f"{DRIVE_ROOT_NAME} (My Drive root)"
+    if method_id == "onedrive":
+        return f"{ONEDRIVE_ROOT_NAME} (OneDrive root)"
+    if method_id == "webdav":
+        base = _webdav_base_url()
+        return f"{base}/{WEBDAV_ROOT_NAME}" if base else f"{WEBDAV_ROOT_NAME} (WebDAV root)"
+    return ""
+
+
+@app.get("/upload-methods")
+async def upload_methods():
+    methods = []
+    for m in _build_upload_methods().values():
+        entry = {
+            "id": m.id,
+            "name": m.name,
+            "configured": m.configured,
+            "default": m.default,
+            **m.extra,
+        }
+        # current folder per method
+        entry["current_folder"] = _method_current_folder(m.id)
+        methods.append(entry)
+    return JSONResponse(
+        {
+            "upload_method_default": _DEFAULT_UPLOAD_METHOD,
+            "upload_method_selected": None,
+            "methods": methods,
+        }
+    )
 
 
 @app.get("/health")
@@ -2181,7 +2952,7 @@ def _main() -> None:
         metavar="METHOD",
         default=None,
         help="Interactively configure/authenticate an upload method "
-        "(currently: mega, drive). e.g. --setup-upload drive",
+        "(available: mega, drive, onedrive, webdav). e.g. --setup-upload drive",
     )
     parser.add_argument(
         "--setup-mega",
@@ -2205,6 +2976,10 @@ def _main() -> None:
             _run_setup_mega()
         elif setup_method == "drive":
             _run_setup_drive()
+        elif setup_method == "onedrive":
+            _run_setup_onedrive()
+        elif setup_method == "webdav":
+            _run_setup_webdav()
         elif setup_method in _UPLOAD_METHODS:
             print(f"error: upload method '{setup_method}' has no setup wizard yet")
             raise SystemExit(2)
@@ -2226,6 +3001,13 @@ def _main() -> None:
     print(f"  upload methods: local (default), mega (configured: {mega_state})")
     print(f"  MEGA root:  {MEGA_LIBRARY_ROOT} (upload default: {_MEGA_UPLOAD_DEFAULT})")
     print(f"  drive root: {DRIVE_ROOT_NAME} (configured: {'yes' if _UPLOAD_METHODS['drive'].configured else 'no'})")
+    onedrive_state = "yes" if _UPLOAD_METHODS["onedrive"].configured else "no"
+    print(f"  onedrive root: {ONEDRIVE_ROOT_NAME} (configured: {onedrive_state})")
+    webdav_state = "yes" if _UPLOAD_METHODS["webdav"].configured else "no"
+    webdav_detail = (
+        f" (base URL: {WEBDAV_BASE_URL})" if WEBDAV_BASE_URL else " (no base URL)"
+    )
+    print(f"  webdav root: {WEBDAV_ROOT_NAME} (configured: {webdav_state}){webdav_detail}")
     if _MOKURO_REPO is not None:
         print(f"  custom mokuro repo: {_MOKURO_REPO}")
     if _mokuro_pkg is not None:

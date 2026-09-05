@@ -65,7 +65,7 @@ release may not work yet — PyTorch wheels often lag new Python versions. If
 python server.py
 ```
 
-You'll see `mokuro-bridge v0.2.0 on http://127.0.0.1:62642`.
+You'll see `mokuro-bridge v0.3.0 on http://127.0.0.1:62642`.
 
 **3. OCR a folder of pages you already have**
 
@@ -108,9 +108,10 @@ That's the whole loop. Prefer scripting your own capture? Jump to
 ## Uploading to a cloud drive (optional)
 
 Remote upload is **off by default**. The bridge has a generic *upload method*
-system — `local` (default) or a configured remote like `mega` / `drive` — and
-`/health` reports which methods are configured. `ocr_folder.py` accepts
-`--upload-method local|mega|drive`; the HTTP API accepts `upload_method=` on
+system — `local` (default) or a configured remote — and `/upload-methods`
+lists what's configured. `ocr_folder.py` accepts
+`--upload-method local|mega|drive|onedrive|webdav` (and `--list-methods` to
+print what the bridge reports); the HTTP API accepts `upload_method=` on
 `/session/{id}/finalize` (legacy `upload_to_mega=true` still means `mega`).
 
 ### MEGA
@@ -132,14 +133,6 @@ system — `local` (default) or a configured remote like `mega` / `drive` — an
 3. **Upload** with `--upload-method mega` (or `MOKURO_BRIDGE_UPLOAD_DEFAULT=true`
    to make it the default).
 
-Uploaded layout mirrors the local one — every provider stores under a
-`mokuro-reader` library folder:
-
-```
-/Root/mokuro-reader/<series>/
-  <volume>.cbz  <volume>.mokuro  <volume>.webp
-```
-
 ### Google Drive
 
 1. **Install the extra dependency** (Google's API client):
@@ -157,15 +150,57 @@ Uploaded layout mirrors the local one — every provider stores under a
      delegation on Workspace).
 3. **Upload** with `--upload-method drive`.
 
-The bridge auto-creates a `mokuro-reader` folder at the top of your My Drive
-and uploads `<series>/<volume>.{cbz,mokuro,webp}` under it — the layout
-reader.mokuro.app expects.
+### OneDrive
+
+1. **Install the extra dependency:** `pip install -r requirements-onedrive.txt`.
+2. **Register a small Azure app** (one time, ~2 min): [Azure portal → App
+   registrations → New registration](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade)
+   — name it anything; under **Authentication → Add platform → Mobile and
+   desktop applications**, tick `https://login.microsoftonline.com/common/oauth2/nativeclient`; under
+   **API permissions** add Microsoft Graph **delegated** `Files.ReadWrite`;
+   set the app to allow public client flows. Copy the **Application (client) ID**.
+3. **Log in** — the easy headless way, no redirect URI or secret:
+   ```bash
+   export ONEDRIVE_CLIENT_ID=<your app client id>
+   python server.py --setup-upload onedrive
+   ```
+   It prints a URL + code; open it, sign in, paste the code. The token is
+   stored (0600) and auto-refreshes. Re-run only when it expires.
+4. **Upload** with `--upload-method onedrive`.
+
+### WebDAV (Nextcloud / ownCloud / Seafile / …)
+
+1. **No extra pip install** (uses `requests`, in `requirements.txt`).
+2. **Give the bridge your WebDAV base URL + credentials** — one of:
+   - **Setup wizard:** `python server.py --setup-upload webdav` — prompts for
+     the base URL, username and password, stores them in the OS keychain
+     (username/password) and a 0600 file (URL).
+   - **Environment variables:** `WEBDAV_BASE_URL`, `WEBDAV_USERNAME`,
+     `WEBDAV_PASSWORD`. The base URL is the DAV root the server exposes, e.g.
+     Nextcloud: `https://host/remote.php/dav/files/<username>`. Use an **app
+     password** if the account has 2FA on.
+3. **Upload** with `--upload-method webdav`.
 
 ### Where things land
 
-`/health` reports all of this: `upload_methods` (each method's `id`, `name`,
-`configured`, `default` and provider info like `creds_source` /
-`library_root`), plus `upload_method_default` and `upload_method_selected`.
+Every provider stores a finished volume under a `mokuro-reader` library
+folder in that provider's root — the exact layout reader.mokuro.app scans:
+
+```
+mokuro-reader/<series>/
+  <volume>.cbz  <volume>.mokuro  <volume>.webp
+```
+
+- MEGA → `/Root/mokuro-reader/<series>/`
+- Google Drive → `mokuro-reader/<series>/` at the top of My Drive
+- OneDrive → `mokuro-reader/<series>/` at the top of your OneDrive
+- WebDAV → `<base URL>/mokuro-reader/<series>/`
+- local → `<MOKURO_BRIDGE_OUTPUT_DIR>/<series>/` (or the `local_dir` you pass)
+
+`GET /upload-methods` reports all of this as JSON:
+`methods[]` (each with `id`, `name`, `configured`, `default`, provider info
+like `creds_source`, and `current_folder` — where that method writes),
+plus `upload_method_default`.
 
 ## How it works
 
@@ -230,6 +265,13 @@ set -a; source .env; set +a        # macOS / Linux
 | `DRIVE_ROOT_NAME` | `mokuro-reader` | Google Drive folder (at My Drive root) that receives series folders. |
 | `DRIVE_CREDS_FILE` | `~/.config/mokuro-bridge/drive_credentials.json` | Google OAuth token or service-account JSON (0600). |
 | `DRIVE_CLIENT_SECRET_FILE` | *(none)* | Path to your Google OAuth `client_secret.json` for `--setup-upload drive`. |
+| `ONEDRIVE_CLIENT_ID` | *(none)* | Azure app (public client) ID for OneDrive. |
+| `ONEDRIVE_ROOT_NAME` | `mokuro-reader` | OneDrive folder (at your OneDrive root) that receives series folders. |
+| `ONEDRIVE_TOKEN_FILE` | `~/.config/mokuro-bridge/onedrive_token.json` | msal token cache (0600). |
+| `WEBDAV_BASE_URL` | *(none)* | WebDAV DAV root, e.g. `https://host/remote.php/dav/files/<user>`. |
+| `WEBDAV_ROOT_NAME` | `mokuro-reader` | WebDAV library folder under the base URL. |
+| `WEBDAV_USERNAME` / `WEBDAV_PASSWORD` | *(none)* | WebDAV credentials (alternative to `--setup-upload webdav`). |
+| `WEBDAV_CREDS_FILE` | `~/.config/mokuro-bridge/webdav.env` | WebDAV base URL + creds file (0600) used when env/keychain are absent. |
 | `OCR_CHUNK_SIZE` | `8` | Pages per OCR batch (tune for your GPU/CPU). |
 | `OCR_IDLE_FLUSH_S` | `1.5` | Seconds to wait for a fuller batch before flushing. |
 | `MIN_PAGES_FOR_MEGA` | `10` | Refuse remote upload below this many pages (failed-scrape guard). |
@@ -239,24 +281,51 @@ set -a; source .env; set +a        # macOS / Linux
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Dependency/config status (mokuro, megatools, MEGA creds, configured upload methods…). |
+| `GET` | `/health` | Dependency/config status (mokuro, engines, creds, upload methods…). |
+| `GET` | `/upload-methods` | Configured upload methods + their current folder (JSON). |
 | `POST` | `/session/start` | `title`, `reuse_existing` → new session id. |
 | `POST` | `/session/resume` | `title`, `source_dir` — OCR a folder on disk (what `ocr_folder.py` uses). |
 | `POST` | `/session/{id}/page` | Multipart `page` image + `filename` (browser capture). |
 | `POST` | `/session/{id}/page-local` | `path` — ingest an image already on this machine (headless scrapers). |
 | `GET` | `/session/{id}/status` | Capture/OCR progress snapshot. |
 | `GET` | `/sessions` | All live sessions. |
-| `POST` | `/session/{id}/finalize` | `upload_method`, `delete_after_upload` → NDJSON progress stream. |
+| `POST` | `/session/{id}/finalize` | `upload_method`, `local_dir`, `delete_after_upload` → NDJSON progress stream. |
 
 `finalize` form fields:
 
-- `upload_method` — destination for the finished volume: `local` (default)
-  or `mega`. Unset → falls back to the legacy `upload_to_mega`, then the
-  `MOKURO_BRIDGE_UPLOAD_DEFAULT` env var.
+- `upload_method` — destination: `local` (default), `mega`, `drive`,
+  `onedrive`, or `webdav`. Unset → falls back to the legacy `upload_to_mega`,
+  then the `MOKURO_BRIDGE_UPLOAD_DEFAULT` env var.
+- `local_dir` — when `upload_method=local`, write the finished volume into
+  this folder instead of the default output dir. Ignored for remote methods.
 - `upload_to_mega` — legacy alias; `true` → MEGA, `false` → local.
 - `delete_after_upload` — `true` (default) removes the session's working files
   after a successful run (in remote mode that's everything; in local mode the
   finished trio in the output dir is kept).
+
+### Upload methods
+
+`GET /upload-methods` returns what a client can target before it uploads:
+
+```json
+{"upload_method_default":"local","upload_method_selected":null,
+ "methods":[
+   {"id":"local","name":"Local output directory","configured":true,
+    "default":true,"current_folder":"/Users/you/mokuro-bridge/output"},
+   {"id":"mega","name":"MEGA (megatools)","configured":true,"default":false,
+    "creds_source":"keychain","library_root":"/Root/mokuro-reader",
+    "current_folder":"/Root/mokuro-reader"},
+   {"id":"drive","name":"Google Drive","configured":false,"default":false,
+    "creds_source":null,"root":"mokuro-reader",
+    "current_folder":"mokuro-reader (My Drive root)"},
+   {"id":"onedrive","name":"OneDrive","configured":false,"default":false,
+    "creds_source":null,"root":"mokuro-reader",
+    "current_folder":"mokuro-reader (OneDrive root)"},
+   {"id":"webdav","name":"WebDAV","configured":false,"default":false,
+    "creds_source":null,"base_url":"",
+    "current_folder":"mokuro-reader (WebDAV root)"}
+ ]}
+```
 
 ### Progress stream format
 
@@ -264,16 +333,18 @@ set -a; source .env; set +a        # macOS / Linux
 line has a `stage` and `message`; `stage` is one of: `wait_ocr`, `ocr`,
 `assemble`, `pack`, `upload`, `upload_progress`, `cleanup`, `done`, `error`.
 
-When uploading to MEGA, each file emits `upload_progress` events with live
-byte/percent/speed metrics:
+When uploading to a remote method, each file emits `upload_progress` events
+with live byte/percent/speed metrics (the `method` field tells you which
+provider; `remote_path` is where it's going):
 
 ```json
 {"stage":"upload_progress","message":"My Manga 1巻.cbz: 42.5%",
  "upload":{"file":"My Manga 1巻.cbz","bytes":12451840,"total_bytes":29125632,
            "current_bytes":12451840,"percent":42.5,"speed_bps":5452595,
-           "speed_human":"5.2 MiB/s"},
+           "speed_human":"5.2 MiB/s","method":"mega"},
  "current_bytes":12451840,"total_bytes":29125632,"percent":42.5,
- "speed_bps":5452595,"mega_path":"/Root/mokuro-reader/My Manga"}
+ "speed_bps":5452595,"remote_path":"/Root/mokuro-reader/My Manga",
+ "mega_path":"/Root/mokuro-reader/My Manga","method":"mega"}
 ```
 
 - `upload.file` — the file being uploaded (`.cbz`, `.mokuro` or `.webp`).
@@ -281,6 +352,9 @@ byte/percent/speed metrics:
 - `percent` — 0.0–100.0.
 - `speed_bps` — transfer rate in bytes/second (0 while throttled/unknown).
 - `speed_human` — human-readable rate (`5.2 MiB/s`).
+- `method` — which upload method (`mega`, `drive`, `onedrive`, `webdav`).
+- `remote_path` — the destination path on that provider. `mega_path` is kept
+  as a legacy alias (same value).
 
 The `upload` object and the top-level `current_bytes`/`total_bytes`/`percent`/
 `speed_bps` fields carry the same values (top-level is a convenience mirror).
@@ -290,7 +364,8 @@ the same `upload` schema plus `duration_s` (seconds) and `success`:
 
 ```json
 {"stage":"done","message":"Done! 132 pages → MEGA /Root/mokuro-reader/My Manga/",
- "status":"success","mega_path":"/Root/mokuro-reader/My Manga","pages":132,
+ "status":"success","method":"mega","remote_path":"/Root/mokuro-reader/My Manga",
+ "mega_path":"/Root/mokuro-reader/My Manga","pages":132,
  "uploads":[{"file":"My Manga 1巻.cbz","bytes":29125632,"total_bytes":29125632,
              "current_bytes":29125632,"percent":100.0,"speed_bps":5452595,
              "duration_s":5.3,"success":true},

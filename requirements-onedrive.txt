@@ -1,0 +1,8 @@
+# Optional OneDrive upload provider (Microsoft Graph upload sessions).
+#   pip install -r requirements-onedrive.txt
+# Then authenticate once: python server.py --setup-upload onedrive
+# (device-code flow — prints a URL + code to approve in your browser).
+msal>=1.24.0
+
+# requests is also required (WebDAV / Graph); it ships in requirements.txt.
+requests>=2.31

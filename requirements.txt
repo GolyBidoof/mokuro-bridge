@@ -9,6 +9,11 @@ python-multipart>=0.0.12
 # Without it, credentials are kept in a plain 0600 file instead.
 keyring>=23.13
 
+# ── WebDAV uploads (optional destination) ───────────────────────────────
+# Plain HTTP for WebDAV PUT (Nextcloud/ownCloud/Seafile) with a counting
+# body that streams byte progress. Also used by the OneDrive provider.
+requests>=2.31
+
 # ── OCR engine ─────────────────────────────────────────────────────────
 # Vanilla mokuro from PyPI. If you run a custom mokuro checkout instead,
 # set MOKURO_REPO=/path/to/checkout and this line is not needed.
