@@ -251,6 +251,65 @@ def _remember_upload_method(method: str) -> None:
         pass  # non-fatal
 
 
+# The local output directory is "sticky" the same way: an explicit `local_dir`
+# on a local finalize becomes the remembered default for later local finalizes.
+# It persists in this state file (under the work dir); OUTPUT_DIR is the
+# fallback when nothing has been remembered yet.
+_LOCAL_DIR_STATE_FILE = WORK_DIR / "local_dir_default.json"
+
+
+def _load_remembered_local_dir() -> Optional[str]:
+    """The persisted sticky local output dir, or None when unset/invalid."""
+    try:
+        data = json.loads(_LOCAL_DIR_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    raw = str(data.get("local_dir", "")).strip()
+    return raw or None
+
+
+def _remember_local_dir(path_str: str) -> None:
+    """Persist an explicit local_dir as the sticky default (non-fatal)."""
+    if not path_str:
+        return
+    try:
+        _LOCAL_DIR_STATE_FILE.write_text(
+            json.dumps({"local_dir": path_str}), encoding="utf-8"
+        )
+        _LOCAL_DIR_STATE_FILE.chmod(0o600)
+    except OSError:
+        pass  # non-fatal
+
+
+def _effective_local_output_base(explicit_local_dir: str) -> Optional[Path]:
+    """Resolve the local output base for a finalize (call only for "local").
+
+    - explicit local_dir → validated, used, and remembered as the sticky default
+    - otherwise a remembered sticky default → validated and used
+    - otherwise None (the caller falls back to OUTPUT_DIR)
+
+    An explicit disallowed path raises HTTP 400 (via _resolve_local_output_dir).
+    A remembered path that has since become disallowed (e.g. HOME changed) is
+    forgotten and ignored rather than erroring. Returns an absolute Path/None.
+    """
+    if str(explicit_local_dir).strip():
+        base = _resolve_local_output_dir(explicit_local_dir)
+        _remember_local_dir(str(base))
+        return base
+    remembered = _load_remembered_local_dir()
+    if not remembered:
+        return None
+    try:
+        return _resolve_local_output_dir(remembered)
+    except HTTPException:
+        # Remembered dir no longer usable — drop it and fall back to OUTPUT_DIR.
+        try:
+            _LOCAL_DIR_STATE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+
 def resolve_upload_method(value: Optional[str]) -> str:
     """Map a client-supplied upload target to a concrete method id.
 
@@ -2606,9 +2665,11 @@ async def session_finalize(
         _remember_upload_method(method)
     # Custom local output dir (only meaningful for the "local" method; the
     # validation below raises a proper HTTP 400 before the stream starts).
-    local_output_base = None
-    if method == "local" and local_dir.strip():
-        local_output_base = _resolve_local_output_dir(local_dir)
+    # Like the upload method, an explicit local_dir is sticky: it becomes the
+    # default local output for later local finalizes (persisted).
+    local_output_base = (
+        _effective_local_output_base(local_dir) if method == "local" else None
+    )
 
     async def generate():
         try:
@@ -2915,7 +2976,8 @@ async def session_finalize(
 def _method_current_folder(method_id: str) -> str:
     """Human-readable 'current folder' for an upload method (for clients)."""
     if method_id == "local":
-        return str(OUTPUT_DIR)
+        remembered = _load_remembered_local_dir()
+        return remembered if remembered else str(OUTPUT_DIR)
     if method_id == "mega":
         return MEGA_LIBRARY_ROOT
     if method_id == "drive":
