@@ -1,0 +1,5 @@
+# Optional WebDAV upload provider (Nextcloud / ownCloud / Seafile / …).
+# Install only if you want to upload finished volumes to WebDAV:
+#   pip install -r requirements-webdav.txt
+# Then authenticate once: python server.py --setup-upload webdav
+requests>=2.31

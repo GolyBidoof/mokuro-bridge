@@ -13,9 +13,10 @@ three files reader.mokuro.app reads, arranged per series:
   <volume>.webp      # cover
 ```
 
-Output stays on your machine by default; uploading to your own MEGA account is
-optional. Nothing about the OCR touches the cloud — it all runs locally, and
-it works on macOS, Windows and Linux.
+Output stays on your machine by default; uploading to your own cloud is
+optional — **MEGA, Google Drive, OneDrive or WebDAV** (Nextcloud/ownCloud/…).
+Nothing about the OCR touches the cloud — it all runs locally, and it works on
+macOS, Windows and Linux.
 
 It's built around **Japanese manga**: mokuro's OCR model reads Japanese text,
 and the input is ordinary page images (`.jpg`, `.png` or `.webp`).
@@ -40,8 +41,13 @@ pip install -r requirements.txt
 That one `pip install` brings in everything the server needs *and* the OCR
 engine: `fastapi`, `uvicorn`, `python-multipart`, `keyring` (for OS keychain
 support) and `mokuro` (pulls PyTorch — the big one; first install takes a
-while and a few GB of disk). Want Google Drive uploads too? Also run
-`pip install -r requirements-drive.txt`.
+while and a few GB of disk).
+
+**Cloud uploads are opt-in, including their dependencies.** The base install
+has none of the cloud libraries. Each provider's setup wizard will detect the
+missing packages and offer to `pip install` them for you when you run
+`python server.py --setup-upload <mega|drive|onedrive|webdav>` (or install
+them yourself with the matching `requirements-*.txt`).
 
 **You need Python 3.10+.** That's mokuro's floor, and the very newest Python
 release may not work yet — PyTorch wheels often lag new Python versions. If
@@ -98,9 +104,9 @@ There are two ways to get your volumes in:
   local-folder import in settings. This needs a folder-picker that only
   Chromium-based desktop browsers expose to websites — Safari and Firefox
   can't do it.
-- **MEGA import — any browser:** connect your MEGA account inside the reader
-  and open the `/mokuro-reader` folder (next section). This is also the way
-  to read on a phone or tablet.
+- **Cloud import — any browser:** connect the matching cloud account inside
+  the reader and open its `mokuro-reader` folder (see next section). This is
+  also the way to read on a phone or tablet.
 
 That's the whole loop. Prefer scripting your own capture? Jump to
 [Writing a capture client](#writing-a-capture-client) — four HTTP calls.
@@ -113,6 +119,13 @@ lists what's configured. `ocr_folder.py` accepts
 `--upload-method local|mega|drive|onedrive|webdav` (and `--list-methods` to
 print what the bridge reports); the HTTP API accepts `upload_method=` on
 `/session/{id}/finalize` (legacy `upload_to_mega=true` still means `mega`).
+
+**Sticky defaults.** Whichever method (and, for local, whichever `local_dir`)
+a client *explicitly* asks for on a finalize is remembered and becomes the
+default for later requests — until another explicit choice replaces it. The
+choice persists across restarts in `<work>/upload_method_default.json` and
+`<work>/local_dir_default.json` (0600). Requests that omit the field just use
+the current default and never change it.
 
 ### MEGA
 
@@ -135,9 +148,9 @@ print what the bridge reports); the HTTP API accepts `upload_method=` on
 
 ### Google Drive
 
-1. **Install the extra dependency** (Google's API client):
-   `pip install -r requirements-drive.txt`.
-2. **Give the bridge Google credentials**:
+1. **Give the bridge Google credentials** — the setup wizard installs the
+   Google client libraries for you when needed (or run
+   `pip install -r requirements-drive.txt` yourself):
    - **OAuth (recommended for a personal account):** create a Google Cloud
      project, enable the Drive API, and download an OAuth **Desktop**
      `client_secret.json`. Then run `python server.py --setup-upload drive`
@@ -148,30 +161,32 @@ print what the bridge reports); the HTTP API accepts `upload_method=` on
      `DRIVE_CREDS_FILE` path. Note: files land in the service account's own
      Drive, which you must share with your account (or use domain-wide
      delegation on Workspace).
-3. **Upload** with `--upload-method drive`.
+2. **Upload** with `--upload-method drive`.
 
 ### OneDrive
 
-1. **Install the extra dependency:** `pip install -r requirements-onedrive.txt`.
-2. **Register a small Azure app** (one time, ~2 min): [Azure portal → App
+1. **Register a small Azure app** (one time, ~2 min): [Azure portal → App
    registrations → New registration](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade)
    — name it anything; under **Authentication → Add platform → Mobile and
    desktop applications**, tick `https://login.microsoftonline.com/common/oauth2/nativeclient`; under
    **API permissions** add Microsoft Graph **delegated** `Files.ReadWrite`;
    set the app to allow public client flows. Copy the **Application (client) ID**.
-3. **Log in** — the easy headless way, no redirect URI or secret:
+2. **Log in** — the easy headless way, no redirect URI or secret. The wizard
+   installs `msal` + `requests` when needed (or run
+   `pip install -r requirements-onedrive.txt` yourself):
    ```bash
    export ONEDRIVE_CLIENT_ID=<your app client id>
    python server.py --setup-upload onedrive
    ```
    It prints a URL + code; open it, sign in, paste the code. The token is
    stored (0600) and auto-refreshes. Re-run only when it expires.
-4. **Upload** with `--upload-method onedrive`.
+3. **Upload** with `--upload-method onedrive`.
 
 ### WebDAV (Nextcloud / ownCloud / Seafile / …)
 
-1. **No extra pip install** (uses `requests`, in `requirements.txt`).
-2. **Give the bridge your WebDAV base URL + credentials** — one of:
+1. **Give the bridge your WebDAV base URL + credentials** — the wizard
+   installs `requests` when needed (or run
+   `pip install -r requirements-webdav.txt` yourself):
    - **Setup wizard:** `python server.py --setup-upload webdav` — prompts for
      the base URL, username and password, stores them in the OS keychain
      (username/password) and a 0600 file (URL).
@@ -179,7 +194,7 @@ print what the bridge reports); the HTTP API accepts `upload_method=` on
      `WEBDAV_PASSWORD`. The base URL is the DAV root the server exposes, e.g.
      Nextcloud: `https://host/remote.php/dav/files/<username>`. Use an **app
      password** if the account has 2FA on.
-3. **Upload** with `--upload-method webdav`.
+2. **Upload** with `--upload-method webdav`.
 
 ### Where things land
 
@@ -224,7 +239,7 @@ plus `upload_method_default`.
 │   2. chunked OCR via mokuro                        │
 │   3. assemble <volume>.mokuro                      │
 │   4. pack <volume>.cbz + cover .webp               │
-│   5. local output folder  and/or  MEGA upload      │
+│   5. keep locally and/or upload to a cloud method  │
 └────────────────────────────────────────────────────┘
 
                            ▼
