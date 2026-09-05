@@ -24,13 +24,14 @@ Everything else is configurable through environment variables — see
 MOKURO_BRIDGE_* / MEGA_* below and the README. MEGA upload is optional and
 off by default; without it results land under the local output directory.
 
-Requires: Python 3.10+, mokuro (pip) — a custom mokuro fork/clone can be
-enabled with MOKURO_REPO. Optional: megatools + MEGA credentials for uploads.
+Requires: Python 3.10+, the stock mokuro package (`pip install mokuro`).
+Optional: megatools + MEGA credentials for uploads.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import re
@@ -54,12 +55,15 @@ from fastapi.responses import JSONResponse, StreamingResponse
 APP_NAME = "mokuro-bridge"
 __version__ = "0.2.0"
 
-# ── mokuro backend ────────────────────────────────────────────────────
-# OCR engine resolution order:
-#   1. MOKURO_REPO env → path to a mokuro checkout (e.g. your optimized
-#      fork) whose repo root is inserted on sys.path;
-#   2. a `./mokuro/` checkout sitting next to this file (dev convenience);
-#   3. the installed `mokuro` package (vanilla `pip install mokuro`).
+# ── OCR engine ────────────────────────────────────────────────────────
+# By default the bridge uses the stock mokuro package from PyPI
+# (`pip install mokuro`), imported normally from the environment.
+#
+# Optional override: set MOKURO_REPO to a mokuro checkout (e.g. an optimized
+# fork) whose repo root is inserted on sys.path, so its `mokuro` package is
+# used instead. The server detects at runtime which OCR API that mokuro
+# instance supports and uses the matching code path (stock `mpocr(path)` vs
+# fork `detect_and_extract`/`recognize_text`).
 def _resolve_mokuro_repo() -> Optional[Path]:
     env_path = os.environ.get("MOKURO_REPO", "").strip()
     if env_path:
@@ -74,6 +78,21 @@ _MOKURO_REPO = _resolve_mokuro_repo()
 if _MOKURO_REPO is not None:
     # Repo root contains the `mokuro` package as <repo>/mokuro/
     sys.path.insert(0, str(_MOKURO_REPO))
+
+# Resolve the mokuro package ONCE, up front. Keeping this module object and
+# importing its submodules through it (instead of `import mokuro.X` by name)
+# makes the choice deterministic — an editable-install meta-path finder can
+# never swap in a different mokuro mid-process.
+try:
+    import mokuro as _mokuro_pkg
+except ImportError:  # pragma: no cover - health reports this
+    _mokuro_pkg = None
+
+
+def _mokuro_submodule(name: str):
+    """Import a submodule of the pinned mokuro package."""
+    return importlib.import_module(f"{_mokuro_pkg.__name__}.{name}")
+
 
 app = FastAPI(title=APP_NAME, version=__version__)
 
@@ -132,8 +151,8 @@ _MEGA_UPLOAD_DEFAULT = str(
 # whatever was captured.
 MIN_PAGES_FOR_MEGA = max(1, int(os.environ.get("MIN_PAGES_FOR_MEGA", "10")))
 
-# Chunked OCR flush: detect N pages, then one GPU recognize_text over all crops.
-# Tuned for the custom mokuro fork (batch_size ~48 crops). Override via env.
+# Chunked OCR flush: pages are grouped into batches so the queue drains in
+# controlled chunks. Override via env.
 _OCR_CHUNK_SIZE = max(1, int(os.environ.get("OCR_CHUNK_SIZE", "8")))
 _OCR_IDLE_FLUSH_S = float(os.environ.get("OCR_IDLE_FLUSH_S", "1.5"))
 
@@ -172,12 +191,32 @@ def _truthy(value: str | None) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _fork_supported() -> bool:
+    """Whether the loaded mokuro exposes the fork's batched OCR API.
+
+    A fork adds `detect_and_extract` / `recognize_text` to MangaPageOcr (plus
+    an `ocr_batch_size` instance attribute on the generator); stock mokuro
+    only offers `mpocr(path)`. We feature-detect so either install works.
+    """
+    try:
+        generator_mod = _mokuro_submodule("mokuro_generator")
+        page_ocr_mod = _mokuro_submodule("manga_page_ocr")
+    except (ImportError, AttributeError):
+        return False
+    page_ocr_has_fork_api = (
+        hasattr(page_ocr_mod.MangaPageOcr, "detect_and_extract")
+        and hasattr(page_ocr_mod.MangaPageOcr, "recognize_text")
+    )
+    generator_has_batch_size = hasattr(generator_mod.MokuroGenerator(), "ocr_batch_size")
+    return page_ocr_has_fork_api and generator_has_batch_size
+
+
 def _get_generator():
-    """Lazy-init custom MokuroGenerator (models stay warm across pages/sessions)."""
+    """Lazy-init the mokuro engine (models stay warm across pages/sessions)."""
     global _generator
     with _generator_lock:
         if _generator is None:
-            from mokuro import MokuroGenerator
+            MokuroGenerator = _mokuro_submodule("mokuro_generator").MokuroGenerator
 
             _generator = MokuroGenerator()
             _generator.init_models()
@@ -232,9 +271,20 @@ def _delete_persisted_session(session_id: str) -> None:
     path.unlink(missing_ok=True)
 
 
+def ocr_json_path(volume, img_name: str) -> Path:
+    """Per-page OCR JSON path in mokuro's cache layout.
+
+    mokuro keeps one JSON per page under <volume_parent>/_ocr/<volume_name>/
+    (same name as the image, .json extension). This matches what the stock
+    mokuro package writes and reads, so the bridge and mokuro interoperate.
+    """
+    return (volume.path_ocr_cache / img_name).with_suffix(".json")
+
+
 def _sync_ocr_cache_state(session: Session) -> None:
     """Mark pages that already have OCR JSON as done (supports resume after crash)."""
-    from mokuro.volume import Volume
+    volume_mod = _mokuro_submodule("volume")
+    Volume = volume_mod.Volume
 
     try:
         volume = Volume(session.vol_dir)
@@ -257,7 +307,7 @@ def _sync_ocr_cache_state(session: Session) -> None:
         session.pages_ocr_failed &= image_set
         for name in images:
             session.pages_received.add(name)
-            json_path = volume.get_ocr_path(name)
+            json_path = ocr_json_path(volume, name)
             if json_path.is_file():
                 session.pages_ocr_done.add(name)
                 session.pages_ocr_failed.discard(name)
@@ -786,27 +836,70 @@ def _take_idle_batch() -> list[tuple[str, str]]:
 
 
 def _process_ocr_batch(items: list[tuple[str, str]]) -> None:
-    """Detect text on each page, then one batched recognize_text over all crops."""
+    """OCR every page in the batch and write its per-page JSON.
+
+    Two OCR strategies are supported and picked at runtime based on what the
+    installed mokuro provides:
+
+    - stock:  `mpocr(img_path)` → complete page result (detect + recognize),
+              written to mokuro's per-page cache JSON
+              (<volume_parent>/_ocr/<volume>/<name>.json).
+    - fork:   if the mokuro instance exposes `detect_and_extract` /
+              `recognize_text` (MOKURO_REPO override), detection runs on all
+              pages first and recognition is batched in one call — faster on
+              GPU builds. Results are saved to the same JSON layout.
+
+    Both paths produce cache JSON that `generate_mokuro_file()` later reads.
+    """
     if not items:
         return
-
-    from mokuro.utils import dump_json, imread
-    from mokuro.volume import Title, Volume
 
     gen = _get_generator()
     gen.init_models()
     mpocr = gen.mpocr
-    ocr_batch_size = getattr(gen, "ocr_batch_size", 48) or 48
-
-    page_results: dict[tuple[str, str], tuple[dict, list, Session]] = {}
-    all_crops: list = []
-    crop_map: list[tuple[str, str, int]] = []
+    use_fork_api = _fork_supported()
 
     print(
-        f"[mokuro-bridge] OCR flush {len(items)} page(s): "
+        f"[mokuro-bridge] OCR flush {len(items)} page(s)"
+        f" (engine: {'fork batch' if use_fork_api else 'stock'}): "
         + ", ".join(f"{sid[:6]}/{fn}" for sid, fn in items[:6])
         + ("…" if len(items) > 6 else "")
     )
+
+    if use_fork_api:
+        _ocr_batch_fork(items, gen, mpocr)
+    else:
+        _ocr_batch_stock(items, gen, mpocr)
+
+
+def _ocr_batch_stock(items: list[tuple[str, str]], gen, mpocr) -> None:
+    """Stock mokuro: one full page OCR call per page (detect + recognize)."""
+    Volume = _mokuro_submodule("volume").Volume
+
+    for session_id, filename in items:
+        session = _session_or_none(session_id)
+        if not session:
+            continue
+        img_path = session.vol_dir / filename
+        try:
+            volume = Volume(session.vol_dir)
+            result = mpocr(str(img_path))
+            _save_page_result(session, volume, filename, result)
+        except Exception as e:
+            _mark_page_failed(session, filename, e)
+
+
+def _ocr_batch_fork(items: list[tuple[str, str]], gen, mpocr) -> None:
+    """Fork mokuro: detect all pages, then one batched recognize_text call."""
+    utils_mod = _mokuro_submodule("utils")
+    imread = utils_mod.imread
+    Volume = _mokuro_submodule("volume").Volume
+
+    ocr_batch_size = getattr(gen, "ocr_batch_size", 48) or 48
+    page_results: dict[tuple[str, str], dict] = {}
+    crop_meta_map: dict[tuple[str, str, int], tuple[int, int]] = {}
+    all_crops: list = []
+    crop_map: list[tuple[str, str, int]] = []
 
     for session_id, filename in items:
         session = _session_or_none(session_id)
@@ -817,56 +910,69 @@ def _process_ocr_batch(items: list[tuple[str, str]]) -> None:
             img = imread(str(img_path))
             if img is None:
                 raise RuntimeError(f"Could not read {img_path}")
-            result, crops, meta = mpocr.detect_and_extract(img)
-            page_results[(session_id, filename)] = (result, meta, session)
+            result, crops, metadata = mpocr.detect_and_extract(img)
+            page_results[(session_id, filename)] = result
             for j in range(len(crops)):
                 all_crops.append(crops[j])
                 crop_map.append((session_id, filename, j))
+                crop_meta_map[(session_id, filename, j)] = metadata[j]
         except Exception as e:
-            with session.lock:
-                session.pages_ocr_failed.add(filename)
-                session.message = f"OCR failed on {filename}: {e}"
-            print(f"[mokuro-bridge] OCR detect error on {filename}: {e}")
+            session = _session_or_none(session_id)
+            if session:
+                _mark_page_failed(session, filename, e)
 
-    if all_crops:
-        try:
-            texts = mpocr.recognize_text(
-                all_crops,
-                batch_size=ocr_batch_size,
-                num_beams=1,
-            )
-            for global_idx, text in enumerate(texts):
-                sid, fname, local_idx = crop_map[global_idx]
-                result, meta, _session = page_results[(sid, fname)]
-                blk_idx, line_idx = meta[local_idx]
-                result["blocks"][blk_idx]["lines"][line_idx] += text
-        except Exception as e:
-            print(f"[mokuro-bridge] OCR batch recognize error: {e}")
-            for (sid, fname), (_result, _meta, session) in page_results.items():
-                with session.lock:
-                    session.pages_ocr_failed.add(fname)
-                    session.message = f"OCR batch failed: {e}"
-            return
+    if not page_results:
+        return
 
-    for (sid, fname), (result, _meta, session) in page_results.items():
-        try:
-            volume = Volume(session.vol_dir)
-            volume.title = Title(session.vol_dir.parent)
-            json_path = volume.get_ocr_path(fname)
-            json_path.parent.mkdir(parents=True, exist_ok=True)
-            dump_json(result, json_path)
-            with session.lock:
-                session.pages_ocr_done.add(fname)
-                done = len(session.pages_ocr_done)
-                total = len(session.pages_received)
-                session.message = f"OCR {done}/{total} pages"
-            _persist_session(session)
-        except Exception as e:
-            with session.lock:
-                session.pages_ocr_failed.add(fname)
-                session.message = f"OCR save failed on {fname}: {e}"
-            print(f"[mokuro-bridge] OCR save error on {fname}: {e}")
-            _persist_session(session)
+    try:
+        texts = mpocr.recognize_text(
+            all_crops,
+            batch_size=ocr_batch_size,
+            num_beams=1,
+        )
+        for global_idx, text in enumerate(texts):
+            sid, fname, local_idx = crop_map[global_idx]
+            result = page_results.get((sid, fname))
+            if result is None:
+                continue
+            blk_idx, line_idx = crop_meta_map[(sid, fname, local_idx)]
+            result["blocks"][blk_idx]["lines"][line_idx] += text
+    except Exception as e:
+        for (sid, fname) in page_results:
+            session = _session_or_none(sid)
+            if session:
+                _mark_page_failed(session, fname, e)
+        return
+
+    for (sid, fname), result in page_results.items():
+        session = _session_or_none(sid)
+        if not session:
+            continue
+        volume = Volume(session.vol_dir)
+        _save_page_result(session, volume, fname, result)
+
+
+def _save_page_result(session: Session, volume, filename: str, result: dict) -> None:
+    """Write one page's OCR JSON into mokuro's cache layout and update state."""
+    dump_json = _mokuro_submodule("utils").dump_json
+
+    json_path = ocr_json_path(volume, filename)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    dump_json(result, json_path)
+    with session.lock:
+        session.pages_ocr_done.add(filename)
+        done = len(session.pages_ocr_done)
+        total = len(session.pages_received)
+        session.message = f"OCR {done}/{total} pages"
+    _persist_session(session)
+
+
+def _mark_page_failed(session: Session, filename: str, error: Exception) -> None:
+    with session.lock:
+        session.pages_ocr_failed.add(filename)
+        session.message = f"OCR failed on {filename}: {error}"
+    print(f"[mokuro-bridge] OCR error on {filename}: {error}")
+    _persist_session(session)
 
 
 def _ocr_worker_loop() -> None:
@@ -1227,8 +1333,11 @@ async def session_finalize(
             )
             await asyncio.sleep(0)
 
-            from mokuro.mokuro_generator import MokuroGenerator
-            from mokuro.volume import Title, Volume
+            volume_mod = _mokuro_submodule("volume")
+            generator_mod = _mokuro_submodule("mokuro_generator")
+            MokuroGenerator = generator_mod.MokuroGenerator
+            Title = volume_mod.Title
+            Volume = volume_mod.Volume
 
             def _assemble():
                 with _assemble_lock:
@@ -1446,6 +1555,7 @@ async def health():
         "mokuro_installed": False,
         "mokuro_custom_fork": _MOKURO_REPO is not None,
         "mokuro_repo": str(_MOKURO_REPO) if _MOKURO_REPO is not None else None,
+        "mokuro_fork_api": False,
         "megatools_installed": bool(shutil.which("megatools")),
         "mega_configured": False,
         "mega_creds_source": None,
@@ -1459,14 +1569,11 @@ async def health():
         "ocr_idle_flush_s": _OCR_IDLE_FLUSH_S,
         "ocr_queue_depth": len(_ocr_queue),
     }
-    try:
-        import mokuro as m
-
+    if _mokuro_pkg is not None:
         result["mokuro_installed"] = True
-        result["mokuro_version"] = getattr(m, "__version__", "?")
-        result["mokuro_path"] = getattr(m, "__file__", "?")
-    except ImportError:
-        pass
+        result["mokuro_version"] = getattr(_mokuro_pkg, "__version__", "?")
+        result["mokuro_path"] = getattr(_mokuro_pkg, "__file__", "?")
+        result["mokuro_fork_api"] = _fork_supported()
 
     source = _mega_creds_source()
     if source is not None:
@@ -1511,6 +1618,10 @@ def _main() -> None:
     print(f"  MEGA root:  {MEGA_LIBRARY_ROOT} (upload default: {_MEGA_UPLOAD_DEFAULT})")
     if _MOKURO_REPO is not None:
         print(f"  custom mokuro repo: {_MOKURO_REPO}")
+    if _mokuro_pkg is not None:
+        print(f"  mokuro: {getattr(_mokuro_pkg, '__file__', '?')} (fork API: {_fork_supported()})")
+    else:
+        print("  mokuro: NOT INSTALLED — run: pip install mokuro")
     print("=" * 60)
 
     uvicorn.run(
