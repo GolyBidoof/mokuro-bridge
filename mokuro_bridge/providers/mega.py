@@ -156,26 +156,52 @@ def mega_put(megarc_path: Path, local_path: Path, remote_path: str) -> subproces
     )
 
 # Progress lines from `megatools put` (progress bar disabled when stdout is not
-# a TTY — each update becomes a newline-terminated plain line, ~1/sec):
+# a TTY — each update becomes a newline-terminated plain line, ~1/sec).
+# NOTE: megatools uses the C locale's decimal separator — on a locale that
+# uses a comma (e.g. de_DE) lines look like "x: 42,50% - 12,4 MiB of 29,2 MiB
+# (5,2 MiB/s)". The regexes accept both "." and "," so progress is parsed
+# regardless of locale.
 #   My Manga 1巻.cbz: 42.50% - 12.4 MiB of 29.2 MiB (5.2 MiB/s)
 #   My Manga 1巻.cbz: 100.00% - done 29.2 MiB (avg. 5.2 MiB/s)
 # and the completion line:
 #   Uploaded My Manga 1巻.cbz
 _MEGATOOLS_PROGRESS_RE = re.compile(
-    r"^([^:]+):\s+(\d+(?:\.\d+)?)%\s*-\s*(.*?)(?:\s+\(([^)]+)\))?$"
+    r"^([^:]+):\s+(\d+(?:[.,]\d+)?)%\s*-\s*(.*?)(?:\s+\(([^)]+)\))?$"
 )
 _MEGATOOLS_UPLOADED_RE = re.compile(r"^Uploaded\s+(.+)$")
 
+
 def _parse_megatools_size(s: str) -> int:
-    """Parse a megatools human size ("29.2 MiB", "4.0 KiB", "1024 B") → bytes."""
+    """Parse a megatools human size ("29,2 MiB", "12.4 MiB", "1024 Bytes") → bytes.
+
+    Accepts "." or "," as the decimal separator (locale-dependent output), and
+    strips thousand-group separators ("1.406.482" → 1406482, "8,388,608" →
+    8388608).
+    """
     s = s.strip()
-    m = re.match(r"^([\d.]+)\s*([A-Za-z]*)$", s)
+    m = re.match(r"^([\d.,]+)\s*([A-Za-z]*)$", s)
     if not m:
         return 0
-    value, unit = float(m.group(1)), m.group(2).upper()
+    raw, unit = m.group(1), m.group(2).upper()
+    # Normalize the decimal separator: if both appear, the LAST one is the
+    # decimal point (e.g. "1.406.482" → 1406482, "8,388,608" → 8388608).
+    if "," in raw and "." in raw:
+        if raw.rfind(",") > raw.rfind("."):
+            raw = raw.replace(".", "").replace(",", ".")
+        else:
+            raw = raw.replace(",", "")
+    elif "," in raw:
+        raw = raw.replace(",", ".")
+    else:
+        raw = raw.replace(".", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 0
     factors = {
         "": 1,
         "B": 1,
+        "BYTES": 1,
         "KIB": 1024,
         "MIB": 1024**2,
         "GIB": 1024**3,
@@ -302,10 +328,13 @@ def _mega_upload_file(
             if m and on_progress:
                 rest = m.group(3)
                 speed_bps = _parse_megatools_speed(m.group(4) or "")
-                # "12.4 MiB of 29.2 MiB" → done/total
+                # "12.4 MiB of 29.2 MiB" → done/total. The done part may carry
+                # a parenthetical byte count: "1,3 MiB (1.406.482 Bytes) of
+                # 8,0 MiB" — strip the "(…)" before parsing.
                 size_match = re.match(r"^(.+?)\s+of\s+(.+)$", rest)
                 if size_match:
-                    bytes_done = min(_parse_megatools_size(size_match.group(1)), total_bytes)
+                    done_str = re.sub(r"\s*\([^)]*\)", "", size_match.group(1))
+                    bytes_done = min(_parse_megatools_size(done_str), total_bytes)
                     on_progress(bytes_done, total_bytes, speed_bps)
                 elif rest.startswith("done "):
                     on_progress(total_bytes, total_bytes, speed_bps)
