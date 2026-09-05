@@ -134,8 +134,18 @@ def upload_file(
     local_path: Path,
     remote_dir: str,
     on_progress: Optional[callable],
-) -> tuple[bool, Optional[str]]:
-    """Upload one file to `method`'s remote dir. Returns (success, error_msg).
+    overwrite: str = "fail",
+) -> tuple[bool, Optional[str], Optional[str]]:
+    """Upload one file to `method`'s remote dir. Returns
+    (success, error_msg, url).
+
+    url is a shareable/viewable link to the uploaded file when the provider
+    can produce one (best-effort; None when unavailable or on failure).
+
+    overwrite: "fail" (default) → an existing destination file errors with a
+    clear, method-agnostic message; "skip" → existing file is treated as
+    success (nothing uploaded); "overwrite" → delete-then-upload so the remote
+    copy is replaced. Applies uniformly to every provider.
 
     The MEGA branch manages its own megarc (created from _get_mega_creds()
     and deleted in a finally block), ensuring remote dirs exist first. The
@@ -159,6 +169,7 @@ def upload_file(
                     local_path,
                     f"{remote_dir}/{local_path.name}",
                     on_progress,
+                    overwrite,
                 )
         finally:
             megarc_path.unlink(missing_ok=True)
@@ -167,23 +178,23 @@ def upload_file(
             service = _drive_service()
             # remote_dir is like "mokuro-reader/<Series>"
             folder_id = _drive_series_folder_id(service, remote_dir)
-            return _drive_upload_file(service, folder_id, local_path, on_progress)
+            return _drive_upload_file(service, folder_id, local_path, on_progress, overwrite)
         except Exception as e:
-            return False, str(e)
+            return False, str(e), None
     if method == "webdav":
         try:
             username, password = _webdav_username(), _webdav_password()
             if not username or not password:
-                return False, "WebDAV credentials not configured. Run `python server.py --setup-upload webdav`."
-            return _webdav_upload_file(_webdav_base_url(), username, password, local_path, remote_dir, on_progress)
+                return False, "WebDAV credentials not configured. Run `python server.py --setup-upload webdav`.", None
+            return _webdav_upload_file(_webdav_base_url(), username, password, local_path, remote_dir, on_progress, overwrite)
         except Exception as e:
-            return False, str(e)
+            return False, str(e), None
     if method == "onedrive":
         try:
             token = _onedrive_token()
-            return _onedrive_upload_file(token, local_path, remote_dir, on_progress)
+            return _onedrive_upload_file(token, local_path, remote_dir, on_progress, overwrite)
         except Exception as e:
-            return False, str(e)
+            return False, str(e), None
     if method == "local":
         raise ValueError("local uploads are handled by the caller")
     raise ValueError(f"unknown upload method: {method}")

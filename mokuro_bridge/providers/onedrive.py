@@ -210,6 +210,26 @@ def _onedrive_ensure_folder(
         f"{(create_resp.text or '')[:300]}"
     )
 
+
+def _onedrive_item_by_name(
+    sess, headers: dict, parent_id: str, name: str
+) -> Optional[str]:
+    """Resolve a file id by name under parent_id (None when missing)."""
+    quoted = urllib.parse.quote(name, safe="")
+    check_url = f"{_GRAPH_BASE}/me/drive/items/{parent_id}:/{quoted}:"
+    resp = sess.get(check_url, headers=headers, timeout=30)
+    if resp.status_code == 200:
+        info = resp.json()
+        if info.get("folder") is None and info.get("id"):
+            return info["id"]
+        return None  # a folder with that name, not a file
+    if resp.status_code == 404:
+        return None
+    raise RuntimeError(
+        f"Graph GET {check_url} → {resp.status_code}: "
+        f"{(resp.text or '')[:300]}"
+    )
+
 def _onedrive_ensure_remote_dir(
     sess, headers: dict, remote_dir: str
 ) -> str:
@@ -231,6 +251,7 @@ def _onedrive_upload_file(
     local_path: Path,
     remote_dir: str,
     on_progress: Optional[callable],
+    overwrite: str = "fail",
 ) -> tuple[bool, Optional[str]]:
     """Upload one file to OneDrive via a chunked createUploadSession.
 
@@ -238,6 +259,10 @@ def _onedrive_upload_file(
     (a multiple of the required 320 KiB fragment size) through the session
     upload URL. Handles 202 continuation, 416 resume, 404 expiry, and
     429/5xx retries. Returns (success, error_message).
+
+    overwrite: "fail" → an existing file with the same name is an error;
+    "skip" → existing file counts as success (nothing uploaded);
+    "overwrite" → conflictBehavior replace (fresh copy replaces the old).
     """
     try:
         import requests
@@ -245,25 +270,38 @@ def _onedrive_upload_file(
         raise RuntimeError(_ONEDRIVE_IMPORT_HINT) from exc
     total = local_path.stat().st_size
     headers = {"Authorization": f"Bearer {token}"}
-    series_folder_id = _onedrive_ensure_remote_dir(
-        requests.Session(), headers, remote_dir
-    )
-
     sess = requests.Session()
+    series_folder_id = _onedrive_ensure_remote_dir(sess, headers, remote_dir)
     quoted_name = urllib.parse.quote(local_path.name, safe="")
+
+    # Existing-file policy: Graph resolve-by-name GET under the folder.
+    existing = _onedrive_item_by_name(sess, headers, series_folder_id, local_path.name)
+    if existing:
+        if overwrite == "skip":
+            return True, None, None
+        if overwrite != "overwrite":
+            return (
+                False,
+                f"destination already exists: {local_path.name} "
+                "(send overwrite=overwrite to replace it, or overwrite=skip "
+                "to keep the existing copy)",
+                None,
+            )
+
     create_url = (
         f"{_GRAPH_BASE}/me/drive/items/{series_folder_id}:/"
         f"{quoted_name}:/createUploadSession"
     )
+    conflict = "replace" if overwrite == "overwrite" else "fail"
     try:
         resp = sess.post(
             create_url,
             headers={**headers, "Content-Type": "application/json"},
-            json={"item": {"@microsoft.graph.conflictBehavior": "replace"}},
+            json={"item": {"@microsoft.graph.conflictBehavior": conflict}},
             timeout=30,
         )
     except Exception as exc:
-        return False, f"OneDrive createUploadSession failed: {exc}"
+        return False, f"OneDrive createUploadSession failed: {exc}", None
     if resp.status_code not in (200, 201):
         return (
             False,
@@ -272,7 +310,7 @@ def _onedrive_upload_file(
         )
     upload_url = resp.json().get("uploadUrl")
     if not upload_url:
-        return False, "OneDrive createUploadSession returned no uploadUrl"
+        return False, "OneDrive createUploadSession returned no uploadUrl", None
 
     CHUNK = 10 * 1024 * 1024  # multiple of 320 KiB (327680)
     start = 0
@@ -318,7 +356,12 @@ def _onedrive_upload_file(
                 if status in (200, 201):
                     if on_progress:
                         on_progress(total, total, 0)
-                    return True, None
+                    try:
+                        item = put_resp.json()
+                        url = item.get("webUrl")
+                    except Exception:
+                        url = None
+                    return True, None, url
                 if status == 416:
                     # Range not satisfiable — fetch the server's expected range.
                     get_resp = sess.get(upload_url, timeout=30)
@@ -329,14 +372,14 @@ def _onedrive_upload_file(
                             try:
                                 start = int(str(ranges[0]).split("-")[0])
                             except (ValueError, IndexError):
-                                return False, f"OneDrive upload 416 with unparseable ranges: {ranges}"
+                                return False, f"OneDrive upload 416 with unparseable ranges: {ranges}", None
                             continue
                     return False, (
                         f"OneDrive upload 416 and no resumable range: "
                         f"{(get_resp.text or put_resp.text or '')[:300]}"
-                    )
+                    ), None
                 if status == 404:
-                    return False, "OneDrive upload session expired — recreate & restart the upload"
+                    return False, "OneDrive upload session expired — recreate & restart the upload", None
                 if status in (429, 500, 502, 503, 504) and tries < 3:
                     tries += 1
                     retry_after = put_resp.headers.get("Retry-After")
@@ -348,10 +391,10 @@ def _onedrive_upload_file(
                     continue
                 return False, (
                     f"OneDrive chunk PUT → {status}: {(put_resp.text or '')[:300]}"
-                )
+                ), None
         # Loop ended with start >= total (or a server-side 202 finish).
         if on_progress:
             on_progress(total, total, 0)
-        return True, None
+        return True, None, None
     except Exception as exc:
-        return False, str(exc)
+        return False, str(exc), None

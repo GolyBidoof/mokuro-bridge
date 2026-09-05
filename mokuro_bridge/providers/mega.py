@@ -157,11 +157,27 @@ def _parse_megatools_speed(s: str) -> int:
     """Parse "5.2 MiB/s" → bytes per second (0 when unparseable)."""
     return _parse_megatools_size(s.rstrip("/s"))
 
+
+def _mega_remote_exists(megarc_path: Path, remote_path: str) -> bool:
+    """Whether a file already exists at remote_path (megatools ls)."""
+    try:
+        result = subprocess.run(
+            ["megatools", "ls", "--config", str(megarc_path), remote_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    # ls succeeds and lists the node when it exists; fails when missing.
+    return result.returncode == 0 and bool(result.stdout.strip())
+
 def _mega_upload_file(
     megarc_path: Path,
     local_path: Path,
     remote_path: str,
     on_progress: Optional[callable],
+    overwrite: str = "fail",
 ) -> tuple[bool, Optional[str]]:
     """Upload one file with `megatools put`, streaming progress.
 
@@ -170,8 +186,55 @@ def _mega_upload_file(
     line is flushed by glib, so `on_progress(bytes_done, total_bytes,
     speed_bps)` fires live (the caller derives the percent). Returns
     (success, error_message).
+
+    overwrite: "fail" → an existing remote file is an error (a clear,
+    method-agnostic message is returned); "skip" → existing file counts as
+    success (nothing uploaded); "overwrite" → the remote file is deleted
+    first, then uploaded fresh.
     """
     total_bytes = local_path.stat().st_size
+
+    # Existing-file policy. megatools put refuses to overwrite (exit code 2,
+    # "File already exists"), so implement skip/overwrite explicitly here.
+    exists = _mega_remote_exists(megarc_path, remote_path)
+    if exists:
+        if overwrite == "skip":
+            # Already there — treat as success; try to surface its link too.
+            url = None
+            try:
+                exp = subprocess.run(
+                    ["megatools", "export", "--config", str(megarc_path), remote_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                if exp.returncode == 0 and exp.stdout.strip():
+                    url = exp.stdout.strip().splitlines()[0]
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                url = None
+            return True, None, url
+        if overwrite != "overwrite":
+            return (
+                False,
+                f"destination already exists: {remote_path} "
+                "(send overwrite=overwrite to replace it, or overwrite=skip "
+                "to keep the existing copy)",
+                None,
+            )
+        rm = subprocess.run(
+            ["megatools", "rm", "--config", str(megarc_path), remote_path],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if rm.returncode != 0:
+            return (
+                False,
+                f"could not remove existing remote file {remote_path}: "
+                f"{(rm.stderr or rm.stdout or '').strip()}",
+                None,
+            )
+
     proc = subprocess.Popen(
         [
             "megatools",
@@ -222,4 +285,18 @@ def _mega_upload_file(
         proc.wait()
     if not success and error_msg is None:
         error_msg = f"megatools exited with code {proc.returncode}" if proc.returncode else "no completion line"
-    return success, error_msg
+    # Shareable link for the uploaded file (best-effort; None on failure).
+    url = None
+    if success:
+        try:
+            exp = subprocess.run(
+                ["megatools", "export", "--config", str(megarc_path), remote_path],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if exp.returncode == 0:
+                url = (exp.stdout or "").strip().splitlines()[0] if exp.stdout.strip() else None
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            url = None
+    return success, error_msg, url

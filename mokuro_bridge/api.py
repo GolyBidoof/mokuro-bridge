@@ -418,6 +418,7 @@ async def session_finalize(
     upload_to_mega: str = Form(""),
     upload_method: str = Form(""),
     local_dir: str = Form(""),
+    overwrite: str = Form("fail"),
 ):
     """
     Wait for OCR queue, assemble .mokuro, pack CBZ + cover, then either keep
@@ -635,7 +636,7 @@ async def session_finalize(
                                     )
                                 )
 
-                        ok, err = upload_file(method, local_path, remote_dir, _on_progress)
+                        ok, err, url = upload_file(method, local_path, remote_dir, _on_progress, overwrite)
                         duration_s = round(time.monotonic() - start, 2)
                         results.append(
                             {
@@ -643,6 +644,7 @@ async def session_finalize(
                                 "size": local_path.stat().st_size,
                                 "success": ok,
                                 "stderr": err if not ok else None,
+                                "url": url if ok else None,
                                 "duration_s": duration_s,
                             }
                         )

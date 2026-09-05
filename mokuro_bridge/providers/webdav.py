@@ -229,12 +229,17 @@ def _webdav_upload_file(
     local_path: Path,
     remote_dir: str,
     on_progress: Optional[callable],
+    overwrite: str = "fail",
 ) -> tuple[bool, Optional[str]]:
     """PUT one file over WebDAV under <base_url>/<remote_dir>/<name>.
 
     Ensures the parent collections exist (idempotent MKCOL per segment),
     then streams the PUT through a counting body so on_progress fires with
     live byte/speed deltas. Returns (success, error_message).
+
+    overwrite: "fail" → an existing file at the destination is an error;
+    "skip" → existing file counts as success (nothing uploaded);
+    "overwrite" → plain PUT replaces it (default WebDAV behavior).
     """
     try:
         import requests
@@ -254,6 +259,21 @@ def _webdav_upload_file(
     sess.auth = (username, password)  # preemptive Basic auth
     sess.headers["Content-Type"] = "application/octet-stream"
 
+    # Existing-file policy.
+    head = sess.request("HEAD", remote_url, timeout=30)
+    exists = head.status_code in (200, 204)
+    if exists:
+        if overwrite == "skip":
+            return True, None, remote_url
+        if overwrite != "overwrite":
+            return (
+                False,
+                f"destination already exists: {remote_url} "
+                "(send overwrite=overwrite to replace it, or overwrite=skip "
+                "to keep the existing copy)",
+                None,
+            )
+
     # Ensure parent collections exist (root, then each series segment).
     accumulated = base
     for seg in remote_dir.split("/"):
@@ -261,7 +281,7 @@ def _webdav_upload_file(
             continue
         accumulated = f"{accumulated}/{seg}"
         if not _webdav_mkcol(sess, accumulated):
-            return False, f"WebDAV MKCOL failed for {accumulated}"
+            return False, f"WebDAV MKCOL failed for {accumulated}", None
 
     body = None
     try:
@@ -274,11 +294,11 @@ def _webdav_upload_file(
         if resp.status_code in (200, 201, 204):
             if on_progress:
                 on_progress(total, total, 0)
-            return True, None
+            return True, None, remote_url
         text = (resp.text or "").strip()
-        return False, f"WebDAV PUT {resp.status_code}: {text[:300] or 'no detail'}"
+        return False, f"WebDAV PUT {resp.status_code}: {text[:300] or 'no detail'}", None
     except Exception as exc:
-        return False, str(exc)
+        return False, str(exc), None
     finally:
         if body is not None:
             body.close()
