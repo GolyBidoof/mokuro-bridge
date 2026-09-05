@@ -17,13 +17,20 @@ Output stays on your machine by default; uploading to your own MEGA account is
 optional. Nothing about the OCR touches the cloud — it all runs locally, and
 it works on macOS, Windows and Linux.
 
+It's built around **Japanese manga**: mokuro's OCR model reads Japanese text,
+and the input is ordinary page images (`.jpg`, `.png` or `.webp`).
+
 ---
 
 ## Quickstart — just get it running
 
-No architecture knowledge needed. Two terminals, five minutes.
+No architecture knowledge needed. Two terminals — one for the server
+(step 2), one for the OCR command (step 3).
 
 **1. Install (once)**
+
+Create the repo on GitHub first, then clone it (replace `<your-url>` with the
+repo's URL):
 
 ```bash
 git clone <your-url> mokuro-bridge
@@ -36,10 +43,20 @@ pip install -r requirements.txt
 That one `pip install` brings in everything the server needs *and* the OCR
 engine: `fastapi`, `uvicorn`, `python-multipart`, `keyring` (for OS keychain
 support) and `mokuro` (pulls PyTorch — the big one; first install takes a
-while).
+while and a few GB of disk).
 
-> Only if you run a **custom mokuro checkout** (e.g. an optimized fork):
-> skip the `mokuro` line or ignore it and export `MOKURO_REPO=/path/to/checkout`.
+**You need Python 3.10+.** That's mokuro's floor, and the very newest Python
+release may not work yet — PyTorch wheels often lag new Python versions. If
+`pip install` fails on `torch`, install a slightly older Python.
+
+> **Windows:** replace `python3` with `python` (or `py`) throughout, create
+> the venv with `py -m venv .venv`, and activate it with
+> `.venv\Scripts\activate` — in **every new terminal** you open.
+
+> Only if you run a **custom mokuro checkout** (e.g. an optimized fork)
+> instead of the PyPI package: skip the `mokuro` line and export
+> `MOKURO_REPO=/path/to/checkout` before starting the bridge. Everyone else —
+> nothing to do here; the install above already got mokuro.
 
 **2. Start the bridge**
 
@@ -54,18 +71,38 @@ You'll see `mokuro-bridge v0.2.0 on http://127.0.0.1:62642`.
 
 **3. OCR a folder of pages you already have**
 
+In a **second terminal** (the first is running the server), OCR a folder of
+page images as a single volume:
+
 ```bash
-python ocr_folder.py "/path/to/my/manga pages" --title "My Manga 1巻"
+# macOS / Linux:
+python3 ocr_folder.py "/path/to/my/manga pages" --title "My Manga 1巻"
+# Windows:
+python ocr_folder.py "C:\path\to\my manga pages" --title "My Manga 1巻"
 ```
 
-(`python3 ocr_folder.py` on macOS/Linux.) It streams progress and prints where
-the finished volume landed — by default `output/My Manga/My Manga 1巻.{cbz,mokuro,webp}`.
+All images in the folder (`.jpg`, `.png` or `.webp`) are treated as one
+volume; the folder name is the default title. `ocr_folder.py` only uses the
+standard library, so you don't need the venv active in this terminal. The
+first run downloads the OCR model and can look stalled for a few minutes; then
+it streams progress and prints where the finished volume landed — by default
+`output/My Manga/My Manga 1巻.{cbz,mokuro,webp}`.
 
 **4. Read it**
 
-Open [reader.mokuro.app](https://reader.mokuro.app/) and point it at that
-`output/` folder (via "Choose folder", or any folder reader), or upload to
-MEGA (next section) and open your `/mokuro-reader` folder there.
+[reader.mokuro.app](https://reader.mokuro.app/) is the web reader for mokuro
+output: it shows each page alongside its OCR text (selectable, copyable), and
+it understands the `.cbz` archives and `.mokuro` files this bridge produces.
+There are two ways to get your volumes in:
+
+- **Local import — desktop Chromium only** (Chrome, Edge, Brave, Opera):
+  drag a series folder from `output/` straight into the app, or use its
+  local-folder import in settings. This needs a folder-picker that only
+  Chromium-based desktop browsers expose to websites — Safari and Firefox
+  can't do it.
+- **MEGA import — any browser:** connect your MEGA account inside the reader
+  and open the `/mokuro-reader` folder (next section). This is also the way
+  to read on a phone or tablet.
 
 That's the whole loop. Prefer scripting your own capture? Jump to
 [Writing a capture client](#writing-a-capture-client) — four HTTP calls.
@@ -138,8 +175,15 @@ Open `/mokuro-reader` in [reader.mokuro.app](https://reader.mokuro.app/) to read
 
 ## Configuration
 
-Everything is environment variables. Copy `.env.example` and `source` it, or
-export in your shell/launcher.
+Everything is environment variables — the server does **not** read a `.env`
+file by itself. Copy `.env.example` to `.env`, uncomment what you need, then
+load it in the shell before starting the server:
+
+```bash
+set -a; source .env; set +a        # macOS / Linux
+```
+
+…or just `export` the variables in your shell/launcher.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -147,7 +191,7 @@ export in your shell/launcher.
 | `MOKURO_BRIDGE_WORK_DIR` | `~/mokuro-input` | Scratch space: page images + OCR JSON mid-session. |
 | `MOKURO_BRIDGE_OUTPUT_DIR` | `<repo>/output` | Where finished volumes land when not uploading to MEGA. |
 | `MOKURO_BRIDGE_UPLOAD_DEFAULT` | `false` | `true` = finalize uploads to MEGA unless told otherwise. |
-| `CORS_ORIGINS` | BookWalker viewer origins | Comma-separated origins allowed to POST from the browser (userscripts). |
+| `CORS_ORIGINS` | The four BookWalker web viewers — `viewer`, `viewer-trial`, `viewer-ptrial`, `viewer-subscription` (`*.bookwalker.jp`) | Comma-separated origins allowed to POST from the browser (userscripts). |
 | `MOKURO_REPO` | *(none)* | Path to a mokuro checkout to use instead of the installed package. |
 | `MEGA_LIBRARY_ROOT` | `/Root/mokuro-reader` | Remote MEGA folder that receives series folders. |
 | `MEGA_EMAIL` / `MEGA_PASSWORD` | *(none)* | MEGA credentials (alternative to the setup wizard). |
@@ -232,6 +276,12 @@ Another process holds the port. Stop it, or pick another port with
 `MOKURO_BRIDGE_PORT=62643 ./run.sh`. If an older auto-start agent from a
 previous install is running, unload it: `launchctl bootout
 gui/$(id -u)/com.mokuro-bridge` (macOS).
+
+**reader.mokuro.app can't see my `output/` folder**
+Local folder import only works in desktop Chromium browsers (Chrome, Edge,
+Brave, Opera). In Safari or Firefox, enable MEGA uploads (above) and open
+`/mokuro-reader` from inside the reader instead — or drag-and-drop a single
+series folder into the app.
 
 ## Development
 

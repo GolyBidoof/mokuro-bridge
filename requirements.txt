@@ -12,4 +12,4 @@ keyring>=23.13
 # ── OCR engine ─────────────────────────────────────────────────────────
 # Vanilla mokuro from PyPI. If you run a custom mokuro checkout instead,
 # set MOKURO_REPO=/path/to/checkout and this line is not needed.
-mokuro
+mokuro>=0.2.0   # 0.2+ emits the .mokuro format reader.mokuro.app reads
