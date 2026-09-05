@@ -41,3 +41,9 @@ _preview*
 # Custom mokuro fork checkout (kept local; use vanilla pip mokuro or point
 # MOKURO_REPO at your own fork elsewhere)
 /mokuro/
+
+# ── Store-specific capture clients (BookWalker/ebookjapan scrapers and
+#    userscripts) — kept out of the public repo; they stay local on disk ──
+/bookwalker/
+/ebookjapan.yahoo.co.jp/
+/*.user.js

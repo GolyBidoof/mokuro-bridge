@@ -595,10 +595,13 @@ def find_mokuro_output(vol_dir: Path) -> Optional[Path]:
 def cleanup_volume_artifacts(vol_dir: Path) -> None:
     sibling_mokuro = vol_dir.parent / f"{vol_dir.name}.mokuro"
     sibling_html = vol_dir.parent / f"{vol_dir.name}.html"
+    ocr_cache = vol_dir.parent / "_ocr" / vol_dir.name
     if vol_dir.exists():
         shutil.rmtree(vol_dir, ignore_errors=True)
     sibling_mokuro.unlink(missing_ok=True)
     sibling_html.unlink(missing_ok=True)
+    if ocr_cache.exists():
+        shutil.rmtree(ocr_cache, ignore_errors=True)
 
 
 def ndjson(stage: str, message: str, **extra) -> str:

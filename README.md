@@ -174,21 +174,19 @@ export in your shell/launcher.
   after a successful run (in MEGA mode that's everything; in local mode the
   finished trio in the output dir is kept).
 
-## Example clients in this repo
+## Writing a capture client
 
-The bridge is transport-agnostic; these are the two store-specific clients the
-project grew from, kept as reference implementations:
+The bridge is transport-agnostic — a client only needs to:
 
-- `bookwalker-downloader-mokuro.user.js` — Tampermonkey script: captures pages
-  from the BookWalker web viewer and POSTs them straight into a bridge session
-  (must stay `@grant none`; requires the storefront origin in `CORS_ORIGINS`).
-- `bookwalker/` + `ebookjapan.yahoo.co.jp/` — Puppeteer headless scrapers that
-  drive the same session protocol from Node (cookie-authenticated, see their
-  local READMEs).
+1. `POST /session/start` with a `title` (gets a `session_id`);
+2. `POST /session/{id}/page` once per captured page (multipart image + filename);
+3. optionally poll `GET /session/{id}/status`;
+4. `POST /session/{id}/finalize` when capture finishes.
 
-Both upload by default (`upload_to_mega=true`) to keep the old
-capture→OCR→MEGA behavior. The `bookwalker/README.md` files document their
-usage.
+Storefront-specific clients exist but are deliberately **not** part of this
+public repository (they embed account/session handling). In browsers, a
+userscript can POST straight from the storefront origin — just make sure that
+origin is in `CORS_ORIGINS`.
 
 ## Security notes
 
@@ -199,8 +197,9 @@ usage.
   written during uploads are deleted afterwards.
 - CORS is an allow-list, not `*`. `page-local` ingest is restricted to your
   home directory and system temp paths.
-- Session/persisted files under the work dir are removed on finalize
-  (`delete_after_upload=true`).
+- Session/persisted files under the work dir — page copies, `.mokuro`/`.html`
+  siblings and mokuro's per-volume OCR cache (`<work>/_ocr/<volume>/`) — are
+  removed after a successful finalize (`delete_after_upload=true`).
 
 ## Troubleshooting
 
