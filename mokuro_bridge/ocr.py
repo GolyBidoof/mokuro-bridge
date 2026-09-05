@@ -1,4 +1,5 @@
 from __future__ import annotations
+import contextlib
 import importlib
 import os
 import shutil
@@ -15,6 +16,58 @@ from . import log as _log
 # Dedup set for full-traceback dumps in _mark_page_failed (log each root
 # cause once per process so a failing batch doesn't spam 500 tracebacks).
 _ocr_error_tracebacks_seen: set = set()
+
+
+@contextlib.contextmanager
+def _quiet_model_load():
+    """Silence tqdm bars + the transformers 'LOAD REPORT' banner while mokuro
+    loads its OCR models, so the bridge console stays clean. tqdm is
+    redirected to devnull (not replaced — transformers iterates it), and the
+    transformers logger is raised to ERROR. Restored on exit."""
+    import logging
+    import os as _os
+
+    devnull = open(_os.devnull, "w")
+    tqdm_orig = None
+    try:
+        import tqdm.auto
+        tqdm_orig = tqdm.auto.tqdm
+
+        class _SilentTqdm(tqdm_orig):
+            def __init__(self, *args, **kwargs):
+                kwargs.setdefault("file", devnull)
+                super().__init__(*args, **kwargs)
+
+            def clear(self, *a, **k):
+                pass
+
+        tqdm.auto.tqdm = _SilentTqdm
+    except Exception:
+        pass
+    tf_logger = None
+    tf_logger_prev = None
+    try:
+        from transformers import logging as tf_logging
+        tf_logger = tf_logging.get_logger("transformers")
+        tf_logger_prev = tf_logger.level
+        tf_logger.setLevel(logging.ERROR)
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        if tqdm_orig is not None:
+            try:
+                import tqdm.auto
+                tqdm.auto.tqdm = tqdm_orig
+            except Exception:
+                pass
+        if tf_logger is not None and tf_logger_prev is not None:
+            tf_logger.setLevel(tf_logger_prev)
+        try:
+            devnull.close()
+        except Exception:
+            pass
 
 # ── OCR engine ────────────────────────────────────────────────────────
 # By default the bridge uses the stock mokuro package from PyPI
@@ -224,7 +277,8 @@ def _process_ocr_batch(items: list[tuple[str, str]]) -> None:
         return
 
     gen = _get_generator()
-    gen.init_models()
+    with _quiet_model_load():
+        gen.init_models()
     mpocr = gen.mpocr
     use_fork_api = _fork_supported()
 
