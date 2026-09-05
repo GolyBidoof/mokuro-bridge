@@ -28,6 +28,7 @@ else
 fi
 
 SERVER="$DIR/server.py"
+PORT="${MOKURO_BRIDGE_PORT:-62642}"   # 62642 spells "MANGA" on a phone keypad
 
 # Rewrite plist with absolute paths for this machine
 mkdir -p "$HOME/Library/LaunchAgents"
@@ -36,6 +37,7 @@ sed \
   -e "s|__SERVER__|${SERVER}|g" \
   -e "s|__WORKDIR__|${DIR}|g" \
   -e "s|__HOME__|${HOME}|g" \
+  -e "s|__PORT__|${PORT}|g" \
   "$PLIST_SRC" > "$PLIST_DST"
 
 # Unload any previous install of this label
@@ -53,7 +55,7 @@ launchctl kickstart -k "gui/$(id -u)/$LABEL"
 
 echo "mokuro-bridge started via launchd ($PYTHON3). Health check:"
 sleep 1
-curl -s http://127.0.0.1:8765/health | python3 -m json.tool || echo "(still starting — try again in a few seconds)"
+curl -s "http://127.0.0.1:${PORT}/health" | python3 -m json.tool || echo "(still starting — try again in a few seconds)"
 echo ""
 echo "Logs: tail -f ~/Library/Logs/mokuro-bridge.log"
 echo "Stop: launchctl bootout gui/\$(id -u)/$LABEL"

@@ -38,6 +38,6 @@ fi
 echo ""
 echo "Next: start the bridge and check health:"
 echo "  $DIR/run.sh"
-echo "  curl -s http://127.0.0.1:8765/health | python3 -m json.tool"
+echo "  curl -s http://127.0.0.1:${MOKURO_BRIDGE_PORT:-62642}/health | python3 -m json.tool"
 echo ""
 echo "Prefer env vars? Export MEGA_EMAIL and MEGA_PASSWORD instead."

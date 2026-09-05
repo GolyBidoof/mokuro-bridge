@@ -27,16 +27,30 @@ runs on your machine.
 ## How it works
 
 ```
-capture client (userscript / headless scraper / curl / …)
-        │  POST /session/start            ┌───────────────────────────┐
-        │  POST /session/{id}/page  ◄────►│  mokuro-bridge (local)    │
-        │  GET  /session/{id}/status      │  · page queue + chunked   │
-        │  POST /session/{id}/finalize    │    OCR (mokuro)           │
-        └─────────────────────────────────►│  · .mokuro assemble      │
-                                           │  · CBZ + cover pack      │
-                                           │  · local output folder   │
-                                           │    and/or MEGA upload    │
-                                           └───────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│   capture client                                   │
+│  (userscript / headless scraper / curl / …)        │
+│                                                    │
+└──────────────────────────┬─────────────────────────┘
+                           │
+                           │  POST /session/start — create a session
+                           │  POST /session/{id}/page — one per captured page
+                           │  GET  /session/{id}/status — poll progress
+                           │  POST /session/{id}/finalize — NDJSON progress stream
+                           ▼
+
+┌────────────────────────────────────────────────────┐
+│   mokuro-bridge  (http://127.0.0.1:62642)          │
+│                                                    │
+│   1. queue incoming pages                          │
+│   2. chunked OCR via mokuro                        │
+│   3. assemble <volume>.mokuro                      │
+│   4. pack <volume>.cbz + cover .webp               │
+│   5. local output folder  and/or  MEGA upload      │
+└────────────────────────────────────────────────────┘
+
+                           ▼
+   <output>/<series>/<volume>.{cbz,mokuro,webp}  →  reader.mokuro.app
 ```
 
 - Pages are OCR'd **as they arrive** (chunked batches, default 8 pages), so
@@ -55,8 +69,8 @@ capture client (userscript / headless scraper / curl / …)
   (macOS: `brew install megatools`) + MEGA credentials (see below).
 
 No GPU required — mokuro runs on CPU (slow but works). The bridge is agnostic
-to the storefront; built-in example clients for BookWalker/ebookjapan live in
-this repo for reference.
+to the storefront — any client that can capture pages can talk to it (see
+"Writing a capture client" below).
 
 ## Quickstart
 
@@ -72,7 +86,7 @@ python3 -m pip install mokuro          # OCR engine (or set MOKURO_REPO)
 #   or: python3 server.py
 
 # 3. Check health — all three flags should be true for the full pipeline:
-curl -s http://127.0.0.1:8765/health | python3 -m json.tool
+curl -s http://127.0.0.1:62642/health | python3 -m json.tool
 ```
 
 Health fields you care about: `mokuro_installed`, `megatools_installed`
@@ -82,16 +96,16 @@ Health fields you care about: `mokuro_installed`, `megatools_installed`
 
 ```bash
 # Start a session for a volume
-curl -s -F 'title=My Manga 1巻' http://127.0.0.1:8765/session/start
+curl -s -F 'title=My Manga 1巻' http://127.0.0.1:62642/session/start
 # → {"session_id": "ab12cd34ef56", ...}   (note it down)
 
 # POST each captured page (page_001.webp, page_002.webp, …)
 curl -s -F 'page=@page_001.webp' -F 'filename=page_001.webp' \
-     http://127.0.0.1:8765/session/ab12cd34ef56/page
+     http://127.0.0.1:62642/session/ab12cd34ef56/page
 
 # Wait for OCR + pack everything. Output lands in ./output/My Manga/
 curl -sN -F 'upload_to_mega=false' \
-     http://127.0.0.1:8765/session/ab12cd34ef56/finalize
+     http://127.0.0.1:62642/session/ab12cd34ef56/finalize
 ```
 
 The finalize call streams progress as NDJSON (`wait_ocr` → `assemble` →
@@ -140,7 +154,7 @@ export in your shell/launcher.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MOKURO_BRIDGE_HOST` / `MOKURO_BRIDGE_PORT` | `127.0.0.1` / `8765` | Bind address. Keep loopback unless you know why not. |
+| `MOKURO_BRIDGE_HOST` / `MOKURO_BRIDGE_PORT` | `127.0.0.1` / `62642` (spells "MANGA" on a phone keypad 🙂) | Bind address. Keep loopback unless you know why not. |
 | `MOKURO_BRIDGE_WORK_DIR` | `~/mokuro-input` | Scratch space: page images + OCR JSON mid-session. |
 | `MOKURO_BRIDGE_OUTPUT_DIR` | `<repo>/output` | Where finished volumes land when not uploading to MEGA. |
 | `MOKURO_BRIDGE_UPLOAD_DEFAULT` | `false` | `true` = finalize uploads to MEGA unless told otherwise. |
@@ -219,9 +233,12 @@ Check the `stderr` in the NDJSON error frame. Ensure `/mokuro-reader` (or your
 `MEGA_LIBRARY_ROOT`) is creatable by your account — the bridge tries to create
 it automatically.
 
-**Port 8765 already in use**
-Old launchd agent? See `install-launchd.sh` (it unloads the legacy
-`com.bw-mokuro-bridge` label automatically), or kill the stale process.
+**Port 62642 already in use**
+The bridge port changed from 8765 → 62642 in this release. If something still
+holds 62642, either change it with `MOKURO_BRIDGE_PORT` or stop the process.
+Also check for the old pre-rename agent: `launchctl print
+gui/$(id -u)/com.bw-mokuro-bridge` and boot it out — `install-launchd.sh`
+does this automatically when you re-run it.
 
 ## Development
 
@@ -234,3 +251,7 @@ UVICORN_RELOAD=1 python3 server.py       # dev auto-reload
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Credits
+
+Developed and refined with the help of **DeepSeek V4 Flash**.

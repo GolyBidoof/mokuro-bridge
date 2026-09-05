@@ -1442,7 +1442,7 @@ def _main() -> None:
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.environ.get("MOKURO_BRIDGE_PORT", "8765")),
+        default=int(os.environ.get("MOKURO_BRIDGE_PORT", "62642")),
     )
     args = parser.parse_args()
 
