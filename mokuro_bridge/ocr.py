@@ -463,10 +463,6 @@ def _mark_page_failed(session: Session, filename: str, error: Exception) -> None
 def _ocr_worker_loop() -> None:
     try:
         _get_generator()
-        _log.info(
-            "ocr",
-            f"OCR engine ready (chunk={_OCR_CHUNK_SIZE}, idle={_OCR_IDLE_FLUSH_S}s)",
-        )
     except Exception as e:
         _log.error("ocr", f"OCR engine model init error: {e}")
 

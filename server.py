@@ -40,12 +40,8 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 from mokuro_bridge import APP_NAME, __version__  # noqa: F401  (module-level compat)
 from mokuro_bridge.api import app
 from mokuro_bridge.config import (
-    DRIVE_ROOT_NAME,
-    MEGA_LIBRARY_ROOT,
-    ONEDRIVE_ROOT_NAME,
     OUTPUT_DIR,
     WORK_DIR,
-    _MEGA_UPLOAD_DEFAULT,
 )
 from mokuro_bridge.ocr import _MOKURO_REPO, _fork_supported, _mokuro_pkg
 from mokuro_bridge.providers import (
@@ -105,22 +101,21 @@ def _main() -> None:
 
     import uvicorn
 
-    mega_state = "yes" if _UPLOAD_METHODS["mega"].configured else "no"
+    configured = [m.id for m in _UPLOAD_METHODS.values() if m.configured]
+    upload_line = f"{_default_upload_method()} (default)"
+    if configured:
+        upload_line += ", " + ", ".join(c for c in configured if c != _default_upload_method())
     print("=" * 60)
     print(f"  {APP_NAME} v{__version__} on http://{args.host}:{args.port}")
     print(f"  work dir:   {WORK_DIR}")
-    print(f"  output dir: {OUTPUT_DIR} (local mode)")
-    print(f"  upload methods: {_default_upload_method()} (default), mega (configured: {mega_state})")
-    print(f"  MEGA root:  {MEGA_LIBRARY_ROOT} (upload default: {_MEGA_UPLOAD_DEFAULT})")
-    print(f"  drive root: {DRIVE_ROOT_NAME} (configured: {'yes' if _UPLOAD_METHODS['drive'].configured else 'no'})")
-    onedrive_state = "yes" if _UPLOAD_METHODS["onedrive"].configured else "no"
-    print(f"  onedrive root: {ONEDRIVE_ROOT_NAME} (configured: {onedrive_state})")
+    print(f"  output dir: {OUTPUT_DIR}")
+    print(f"  upload:     {upload_line}")
     if _MOKURO_REPO is not None:
-        print(f"  custom mokuro repo: {_MOKURO_REPO}")
-    if _mokuro_pkg is not None:
-        print(f"  mokuro: {getattr(_mokuro_pkg, '__file__', '?')} (fork API: {_fork_supported()})")
+        print(f"  mokuro:     {_MOKURO_REPO} (fork API: {_fork_supported()})")
+    elif _mokuro_pkg is not None:
+        print(f"  mokuro:     {getattr(_mokuro_pkg, '__file__', '?')} (fork API: {_fork_supported()})")
     else:
-        print("  mokuro: NOT INSTALLED — run: pip install mokuro")
+        print("  mokuro:     NOT INSTALLED — run: pip install mokuro")
     print("=" * 60)
 
     uvicorn.run(
