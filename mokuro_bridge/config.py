@@ -35,10 +35,11 @@ _MEGA_UPLOAD_DEFAULT = str(
     os.environ.get("MOKURO_BRIDGE_UPLOAD_DEFAULT", "false")
 ).lower() in ("1", "true", "yes", "on")
 
-# Refuse MEGA upload when a volume has fewer pages than this (guards against
-# free-viewer errors / premature end uploading junk CBZs). Local mode keeps
-# whatever was captured.
-MIN_PAGES_FOR_MEGA = max(1, int(os.environ.get("MIN_PAGES_FOR_MEGA", "10")))
+# Optional guard against failed scrapes: refuse remote upload when a volume
+# has fewer than this many pages (free-viewer errors can capture a handful of
+# junk pages). Default 1 = effectively off — a legit short volume (e.g. a
+# 9-page sampler) must still upload. Raise it if you want a stricter floor.
+MIN_PAGES_FOR_MEGA = max(1, int(os.environ.get("MIN_PAGES_FOR_MEGA", "1")))
 
 # Google Drive (optional destination via google-api-python-client).
 # Auth is OAuth2: creds live in DRIVE_CREDS_FILE (0600), created by
@@ -48,7 +49,13 @@ DRIVE_CREDS_FILE = _env_path(
     "DRIVE_CREDS_FILE", Path.home() / ".config" / "mokuro-bridge" / "drive_credentials.json"
 )
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+# The setup wizard needs a Google Cloud OAuth client ID. It can't ship one:
+# Google only lets a client run in the project that registered it (otherwise
+# the consent page fails with 401 invalid_client). So the wizard walks the
+# user through creating a free "Desktop app" OAuth client and pasting its ID.
+# DRIVE_CLIENT_ID / DRIVE_CLIENT_SECRET_FILE let advanced users preset it.
 _DRIVE_CLIENT_SECRET_ENV = "DRIVE_CLIENT_SECRET_FILE"
+_DRIVE_CLIENT_ID_ENV = "DRIVE_CLIENT_ID"
 
 # WebDAV (optional destination; works with Nextcloud, ownCloud, Seafile, ...).
 # Base URL is the DAV root the server exposes (e.g. Nextcloud:

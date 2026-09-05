@@ -57,10 +57,12 @@ release may not work yet — PyTorch wheels often lag new Python versions. If
 > the venv with `py -m venv .venv`, and activate it with
 > `.venv\Scripts\activate` — in **every new terminal** you open.
 
-> Only if you run a **custom mokuro checkout** (e.g. an optimized fork)
-> instead of the PyPI package: skip the `mokuro` line and export
-> `MOKURO_REPO=/path/to/checkout` before starting the bridge. Everyone else —
-> nothing to do here; the install above already got mokuro.
+> **Which mokuro engine?** The bridge works with either the stock PyPI
+> `mokuro` package or [a custom mokuro fork](https://github.com/GolyBidoof/mokuro)
+> with a faster batch OCR API. The fork is the **recommended** choice — see
+> [Choosing a mokuro engine](#choosing-a-mokuro-engine). For a quick start,
+> the stock package is fine: keep the `mokuro` line above and skip ahead.
+> To use the fork, leave the `mokuro` line out and follow that section.
 
 **2. Start the bridge**
 
@@ -148,15 +150,29 @@ the current default and never change it.
 
 ### Google Drive
 
-1. **Give the bridge Google credentials** — the setup wizard installs the
-   Google client libraries for you when needed (or run
-   `pip install -r requirements-drive.txt` yourself):
-   - **OAuth (recommended for a personal account):** create a Google Cloud
-     project, enable the Drive API, and download an OAuth **Desktop**
-     `client_secret.json`. Then run `python server.py --setup-upload drive`
-     (or set `DRIVE_CLIENT_SECRET_FILE=/path/to/client_secret.json` first) —
-     it opens a browser once, then stores the token at
-     `~/.config/mokuro-bridge/drive_credentials.json` (0600).
+1. **Create a free Google OAuth client (one time, ~2 min)** and then sign in —
+   the wizard does the rest:
+   ```bash
+   python server.py --setup-upload drive
+   ```
+   It prints the exact steps (Google Cloud Console → Credentials → create a
+   **Desktop app** OAuth client), you paste just the **Client ID** (no
+   `client_secret.json` needed), it verifies with Google that the client is
+   valid, opens your browser once so you can sign in to the account whose
+   Drive you want to use, and stores a refresh token at
+   `~/.config/mokuro-bridge/drive_credentials.json` (0600). It installs the
+   Google client libraries when needed (or run
+   `pip install -r requirements-drive.txt` yourself).
+
+   > **Why a one-time client?** Google only lets an OAuth client run in the
+   > project that registered it — a client shared across users fails with
+   > `401 invalid_client`. So each user needs their own (free, ~2 min). The
+   > wizard pre-checks your pasted ID so a typo gives a clear message instead
+   > of a raw Google error page.
+
+   - **Alternative:** set `DRIVE_CLIENT_ID=<your client id>` (or point
+     `DRIVE_CLIENT_SECRET_FILE` at a downloaded `client_secret.json`) to skip
+     the paste step.
    - **Service account:** save a service-account JSON at that same
      `DRIVE_CREDS_FILE` path. Note: files land in the service account's own
      Drive, which you must share with your account (or use domain-wide
@@ -216,6 +232,56 @@ mokuro-reader/<series>/
 `methods[]` (each with `id`, `name`, `configured`, `default`, provider info
 like `creds_source`, and `current_folder` — where that method writes),
 plus `upload_method_default`.
+
+## Choosing a mokuro engine
+
+The bridge's OCR is powered by [mokuro](https://github.com/kha-white/mokuro).
+There are two ways to get it, and they differ in speed:
+
+### 1. Recommended: the GolyBidoof mokuro fork
+
+[github.com/GolyBidoof/mokuro](https://github.com/GolyBidoof/mokuro) is a
+maintained fork of mokuro that adds a **batch OCR API**: instead of running
+page-by-page, it detects text across the whole volume first, then recognizes
+all crops in batched passes. The bridge detects this fork's API at runtime
+and uses it automatically.
+
+**Why the fork is worth it:**
+- **Faster volume OCR** — batching avoids per-page model round-trips and
+  keeps the GPU/CPU busy, which matters most for long volumes.
+- **Live per-page progress** — the fork exposes a `detect_and_extract` /
+  batched `recognize_text` flow that the bridge streams progress from, so you
+  see OCR advance page-by-page instead of a single long wait.
+- **Actively refined** — the fork includes optimizations that are not in the
+  PyPI release (see the fork's README for the full optimization summary).
+
+**Install (one time):**
+```bash
+git clone https://github.com/GolyBidoof/mokuro
+# skip the `mokuro` line in requirements.txt — the fork is used instead
+```
+Point the bridge at it:
+```bash
+# export this before starting the bridge (or set it in your .env)
+export MOKURO_REPO=/path/to/GolyBidoof/mokuro
+./run.sh
+```
+The startup banner prints the mokuro path and whether the fork API is in use;
+`/health` reports `mokuro_custom_fork: true` and `mokuro_fork_api: true`.
+
+### 2. Simpler: stock mokuro from PyPI
+
+Just keep `mokuro` in `requirements.txt`:
+```bash
+pip install mokuro
+```
+No `MOKURO_REPO` needed. This uses the upstream release — same output
+format, but OCR runs per-page without the fork's batching, so long volumes
+take longer. Use this if you want zero setup or prefer the upstream package.
+
+> **Both produce identical `.mokuro`/`.cbz`/`.webp` output** — the reader,
+> the upload providers and your capture scripts don't care which engine you
+> chose. You can switch at any time by changing `MOKURO_REPO` / reinstalling.
 
 ## How it works
 
@@ -279,7 +345,8 @@ set -a; source .env; set +a        # macOS / Linux
 | `MEGA_CREDS_FILE` | `~/.config/mokuro-bridge/credentials.env` | Credentials file used when env vars are absent and no OS keychain entry exists. |
 | `DRIVE_ROOT_NAME` | `mokuro-reader` | Google Drive folder (at My Drive root) that receives series folders. |
 | `DRIVE_CREDS_FILE` | `~/.config/mokuro-bridge/drive_credentials.json` | Google OAuth token or service-account JSON (0600). |
-| `DRIVE_CLIENT_SECRET_FILE` | *(none)* | Path to your Google OAuth `client_secret.json` for `--setup-upload drive`. |
+| `DRIVE_CLIENT_ID` | *(none)* | Your Google Cloud OAuth client ID (Desktop app) — used by `--setup-upload drive` instead of asking you to paste it. |
+| `DRIVE_CLIENT_SECRET_FILE` | *(none)* | Optional: path to your Google OAuth `client_secret.json` for `--setup-upload drive` (not needed — the wizard uses a PKCE flow). |
 | `ONEDRIVE_CLIENT_ID` | *(none)* | Azure app (public client) ID for OneDrive. |
 | `ONEDRIVE_ROOT_NAME` | `mokuro-reader` | OneDrive folder (at your OneDrive root) that receives series folders. |
 | `ONEDRIVE_TOKEN_FILE` | `~/.config/mokuro-bridge/onedrive_token.json` | msal token cache (0600). |
