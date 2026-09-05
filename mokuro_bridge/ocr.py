@@ -185,7 +185,8 @@ def _get_generator():
             MokuroGenerator = _mokuro_submodule("mokuro_generator").MokuroGenerator
 
             _generator = MokuroGenerator()
-            _generator.init_models()
+            with _quiet_model_load():
+                _generator.init_models()
         return _generator
 
 def ocr_json_path(volume, img_name: str) -> Path:
@@ -316,9 +317,7 @@ def _process_ocr_batch(items: list[tuple[str, str]]) -> None:
     if not items:
         return
 
-    gen = _get_generator()
-    with _quiet_model_load():
-        gen.init_models()
+    gen = _get_generator()  # lazily inits models (quietly) and keeps them warm
     mpocr = gen.mpocr
     use_fork_api = _fork_supported()
 
