@@ -67,6 +67,58 @@ from .util import sanitize_filename, series_title_from_volume, _truthy
 
 app = FastAPI(title=APP_NAME, version=__version__)
 
+# ── Activity tracker ───────────────────────────────────────────────────
+# A lightweight, thread-safe record of what the bridge is doing right now.
+# health() reads it to report `busy` + `busy_stage` so a polling client can
+# tell "idle" from "OCR running" from "uploading" without parsing sessions.
+import threading as _threading
+
+_activity_lock = _threading.Lock()
+_activity = {"stage": "idle", "detail": ""}
+
+
+def _set_activity(stage: str, detail: str = "") -> None:
+    with _activity_lock:
+        _activity["stage"] = stage
+        _activity["detail"] = detail
+
+
+def _clear_activity() -> None:
+    with _activity_lock:
+        _activity["stage"] = "idle"
+        _activity["detail"] = ""
+
+
+def _current_activity() -> tuple[str, str]:
+    with _activity_lock:
+        return _activity["stage"], _activity["detail"]
+
+
+def _set_upload_state(session, *, active, method=None, file=None, percent=None,
+                      current_bytes=None, total_bytes=None, speed_bps=None,
+                      speed_human=None, remote_path=None, url=None, error=None):
+    """Publish live per-session upload state for GET /session/{id}/status.
+
+    Called from the upload thread (already throttled to ~4 frames/sec by
+    _on_progress) and at per-file start/end. Writes under session.lock so the
+    snapshot sees a consistent dict.
+    """
+    with session.lock:
+        session.upload = {
+            "active": active,
+            "method": method,
+            "file": file,
+            "percent": percent,
+            "current_bytes": current_bytes,
+            "total_bytes": total_bytes,
+            "speed_bps": speed_bps,
+            "speed_human": speed_human,
+            "remote_path": remote_path,
+            "url": url,
+            "error": error,
+        }
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -454,6 +506,7 @@ async def session_finalize(
     async def generate():
         try:
             snap = session_snapshot(session)
+            _set_activity("ocr", f"waiting for OCR: {snap['pages_ocr_pending']} pending")
             yield ndjson(
                 "wait_ocr",
                 f"Waiting for OCR queue ({snap['pages_ocr_pending']} pending, "
@@ -594,6 +647,7 @@ async def session_finalize(
             all_success = True
 
             if method != "local":
+                _set_activity("uploading", f"{method_label} → {remote_dir}")
                 yield ndjson(
                     "upload",
                     f"Uploading to {method_label}… ({series_dir_name}/)",
@@ -615,6 +669,12 @@ async def session_finalize(
                     for local_path, remote_name in items:
                         start = time.monotonic()
                         last_progress = {"bytes": 0, "speed": 0, "emitted": 0.0}
+                        total = local_path.stat().st_size
+                        _set_upload_state(
+                            session, active=True, method=method, file=remote_name,
+                            current_bytes=0, total_bytes=total, percent=0.0,
+                            remote_path=remote_dir,
+                        )
 
                         def _on_progress(
                             bytes_done, total_bytes, speed_bps, _name=remote_name
@@ -643,6 +703,20 @@ async def session_finalize(
                                     f"Uploading {_name}: {pct:.0f}% "
                                     f"({bytes_done/1048576:.1f}/{total_bytes/1048576:.1f} MiB)",
                                 )
+                                # Live session state for GET /session/{id}/status.
+                                speed_human = (
+                                    f"{speed_bps / 1024 / 1024:.2f} MiB/s"
+                                    if speed_bps >= 1024**2
+                                    else f"{speed_bps / 1024:.1f} KiB/s"
+                                    if speed_bps else "—"
+                                )
+                                _set_upload_state(
+                                    session, active=True, method=method,
+                                    file=_name, percent=pct,
+                                    current_bytes=bytes_done, total_bytes=total_bytes,
+                                    speed_bps=speed_bps, speed_human=speed_human,
+                                    remote_path=remote_dir,
+                                )
 
                         ok, err, url = upload_file(method, local_path, remote_dir, _on_progress, overwrite)
                         duration_s = round(time.monotonic() - start, 2)
@@ -655,6 +729,16 @@ async def session_finalize(
                                 "url": url if ok else None,
                                 "duration_s": duration_s,
                             }
+                        )
+                        # Per-file end state: success keeps the URL for the
+                        # "Open stored file" action; failure marks the error.
+                        _set_upload_state(
+                            session, active=False, method=method, file=remote_name,
+                            percent=100.0 if ok else 0.0,
+                            current_bytes=total if ok else 0, total_bytes=total,
+                            speed_bps=0, speed_human="—", remote_path=remote_dir,
+                            url=url if ok else None,
+                            error=None if ok else (err or "unknown"),
                         )
                     return results, progress_events
 
@@ -766,7 +850,9 @@ async def session_finalize(
                 reader_url="https://reader.mokuro.app/" if method != "local" else None,
                 method=method,
             )
+            _clear_activity()
         except Exception as e:
+            _clear_activity()
             yield ndjson("error", f"Finalize failed: {e}")
 
     return StreamingResponse(
@@ -827,6 +913,22 @@ async def health():
         "ocr_idle_flush_s": _OCR_IDLE_FLUSH_S,
         "ocr_queue_depth": len(_ocr_queue),
     }
+    # Busy flag: derived from the activity tracker (what finalize is doing
+    # right now) plus any queued OCR work. A polling client can use this to
+    # wait for the bridge to go idle instead of racing finalize.
+    stage, detail = _current_activity()
+    if stage != "idle":
+        result["busy"] = True
+        result["busy_stage"] = stage  # "ocr" | "uploading"
+        result["busy_detail"] = detail
+    elif len(_ocr_queue) > 0:
+        result["busy"] = True
+        result["busy_stage"] = "ocr"
+        result["busy_detail"] = f"{len(_ocr_queue)} pages queued for OCR"
+    else:
+        result["busy"] = False
+        result["busy_stage"] = "idle"
+        result["busy_detail"] = ""
     if _mokuro_pkg is not None:
         result["mokuro_installed"] = True
         result["mokuro_version"] = getattr(_mokuro_pkg, "__version__", "?")

@@ -8,6 +8,7 @@ from typing import Optional
 
 from ..config import (
     DRIVE_CREDS_FILE,
+    DRIVE_ROOT_NAME,
     DRIVE_SCOPES,
     _DRIVE_CLIENT_ID_ENV,
     _DRIVE_CLIENT_SECRET_ENV,

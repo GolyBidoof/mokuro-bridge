@@ -400,6 +400,27 @@ set -a; source .env; set +a        # macOS / Linux
  ]}
 ```
 
+### Busy state
+
+`GET /health` includes a live **busy flag** so a client can tell whether the
+bridge is working on something, and what:
+
+| Field | Value | Meaning |
+|---|---|---|
+| `busy` | `true` / `false` | Something is in progress right now (OCR or upload). |
+| `busy_stage` | `"idle"`, `"ocr"`, `"uploading"` | What it's doing. |
+| `busy_detail` | free text | e.g. `waiting for OCR: 12 pending`, `MEGA → /Root/mokuro-reader/<Series>`, `5 pages queued for OCR`. |
+
+`busy_stage` is `"ocr"` while a finalize waits for/streams OCR, and
+`"uploading"` while a volume uploads to a remote method; it returns to
+`"idle"` when the finalize finishes (success or error). `busy` is also
+`true` when pages are queued for OCR outside of a finalize
+(`ocr_queue_depth > 0`).
+
+A polling client can wait for a volume to finish by looping on `/health`
+until `busy` is `false`, or by streaming the finalize NDJSON directly and
+waiting for the `done`/`error` stage — the two are complementary.
+
 ### Progress stream format
 
 `/session/{id}/finalize` streams **NDJSON** — one JSON object per line. Every
