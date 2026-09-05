@@ -199,23 +199,73 @@ class UploadMethod:
     extra: dict = field(default_factory=dict)  # provider-specific info for /health
 
 
-_DEFAULT_UPLOAD_METHOD = "mega" if _MEGA_UPLOAD_DEFAULT else "local"
+# Static list of every method id this build can target. Kept separate from the
+# runtime `_UPLOAD_METHODS` snapshot (below) so validation/state helpers can run
+# at import time without ordering hazards.
+_KNOWN_UPLOAD_METHODS = ("local", "mega", "drive", "onedrive", "webdav")
+
+# The default upload method is "sticky": once a client explicitly asks for a
+# method (upload_method=… / upload_to_mega=…), that choice is remembered and
+# becomes the default for later requests until another explicit choice replaces
+# it. It persists across restarts in this state file (under the work dir).
+# Before any explicit choice, the MOKURO_BRIDGE_UPLOAD_DEFAULT env seeds the
+# initial default (default "false" → local).
+_UPLOAD_METHOD_STATE_FILE = WORK_DIR / "upload_method_default.json"
+
+
+def _load_remembered_upload_method() -> Optional[str]:
+    """The persisted sticky default method, or None when unset/invalid."""
+    try:
+        data = json.loads(_UPLOAD_METHOD_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    method = str(data.get("method", "")).strip()
+    return method if method in _KNOWN_UPLOAD_METHODS else None
+
+
+def _default_upload_method() -> str:
+    """Effective default: the remembered (sticky) method if any, else env."""
+    remembered = _load_remembered_upload_method()
+    if remembered:
+        return remembered
+    return "mega" if _MEGA_UPLOAD_DEFAULT else "local"
+
+
+def _remember_upload_method(method: str) -> None:
+    """Persist an explicitly-requested method as the new sticky default.
+
+    Only real, usable targets are remembered (local, or a configured remote) —
+    an unconfigured provider is never made the default. Failures are non-fatal:
+    the default simply falls back to the env seed on the next start.
+    """
+    if method not in _KNOWN_UPLOAD_METHODS:
+        return
+    if method != "local" and not _UPLOAD_METHODS[method].configured:
+        return
+    try:
+        _UPLOAD_METHOD_STATE_FILE.write_text(
+            json.dumps({"method": method}), encoding="utf-8"
+        )
+        _UPLOAD_METHOD_STATE_FILE.chmod(0o600)
+    except OSError:
+        pass  # non-fatal
 
 
 def resolve_upload_method(value: Optional[str]) -> str:
     """Map a client-supplied upload target to a concrete method id.
 
-    Accepts: None/"" (env default), "local", "mega", and legacy booleans
-    ("true"→mega, "false"→local) for backward compat with upload_to_mega.
+    Accepts: None/"" (current default), "local", "mega", "drive", "onedrive",
+    "webdav", and legacy booleans ("true"→mega, "false"→local) for backward
+    compatibility with upload_to_mega.
     """
     raw = str(value).strip().lower() if value is not None else ""
     if not raw:
-        return _DEFAULT_UPLOAD_METHOD
+        return _default_upload_method()
     if raw in ("true", "yes", "on", "1"):
         return "mega"
     if raw in ("false", "no", "off", "0"):
         return "local"
-    if raw in _UPLOAD_METHODS:
+    if raw in _KNOWN_UPLOAD_METHODS:
         return raw
     raise ValueError(f"unknown upload method: {value}")
 
@@ -739,13 +789,13 @@ def _build_upload_methods() -> dict[str, UploadMethod]:
             id="local",
             name="Local output directory",
             configured=True,
-            default=(_DEFAULT_UPLOAD_METHOD == "local"),
+            default=(_default_upload_method() == "local"),
         ),
         "mega": UploadMethod(
             id="mega",
             name="MEGA (megatools)",
             configured=_mega_configured(),
-            default=(_DEFAULT_UPLOAD_METHOD == "mega"),
+            default=(_default_upload_method() == "mega"),
             extra={
                 "creds_source": _mega_creds_source(),
                 "library_root": MEGA_LIBRARY_ROOT,
@@ -755,14 +805,14 @@ def _build_upload_methods() -> dict[str, UploadMethod]:
             id="drive",
             name="Google Drive",
             configured=_drive_configured(),
-            default=False,
+            default=(_default_upload_method() == "drive"),
             extra={"creds_source": _drive_creds_source(), "root": DRIVE_ROOT_NAME},
         ),
         "onedrive": UploadMethod(
             id="onedrive",
             name="OneDrive",
             configured=_onedrive_configured(),
-            default=False,
+            default=(_default_upload_method() == "onedrive"),
             extra={
                 "creds_source": "token" if _onedrive_configured() else None,
                 "root": ONEDRIVE_ROOT_NAME,
@@ -772,7 +822,7 @@ def _build_upload_methods() -> dict[str, UploadMethod]:
             id="webdav",
             name="WebDAV",
             configured=_webdav_configured(),
-            default=False,
+            default=(_default_upload_method() == "webdav"),
             extra={
                 "creds_source": "keyring/file" if _webdav_configured() else None,
                 "base_url": WEBDAV_BASE_URL,
@@ -2549,6 +2599,11 @@ async def session_finalize(
     do_delete = _truthy(delete_after_upload)
     raw_target = str(upload_method).strip() or str(upload_to_mega).strip() or None
     method = resolve_upload_method(raw_target)
+    # Sticky default: an EXPLICIT method choice becomes the new default for
+    # later requests (persisted). Plain finalizes that rely on the default
+    # leave it untouched.
+    if raw_target is not None:
+        _remember_upload_method(method)
     # Custom local output dir (only meaningful for the "local" method; the
     # validation below raises a proper HTTP 400 before the stream starts).
     local_output_base = None
@@ -2889,7 +2944,7 @@ async def upload_methods():
         methods.append(entry)
     return JSONResponse(
         {
-            "upload_method_default": _DEFAULT_UPLOAD_METHOD,
+            "upload_method_default": _default_upload_method(),
             "upload_method_selected": None,
             "methods": methods,
         }
@@ -2916,7 +2971,7 @@ async def health():
              "default": m.default, **m.extra}
             for m in _build_upload_methods().values()
         ],
-        "upload_method_default": _DEFAULT_UPLOAD_METHOD,
+        "upload_method_default": _default_upload_method(),
         "upload_method_selected": None,
         "work_dir": str(WORK_DIR),
         "output_dir": str(OUTPUT_DIR),
@@ -2998,7 +3053,7 @@ def _main() -> None:
     print(f"  {APP_NAME} v{__version__} on http://{args.host}:{args.port}")
     print(f"  work dir:   {WORK_DIR}")
     print(f"  output dir: {OUTPUT_DIR} (local mode)")
-    print(f"  upload methods: local (default), mega (configured: {mega_state})")
+    print(f"  upload methods: {_default_upload_method()} (default), mega (configured: {mega_state})")
     print(f"  MEGA root:  {MEGA_LIBRARY_ROOT} (upload default: {_MEGA_UPLOAD_DEFAULT})")
     print(f"  drive root: {DRIVE_ROOT_NAME} (configured: {'yes' if _UPLOAD_METHODS['drive'].configured else 'no'})")
     onedrive_state = "yes" if _UPLOAD_METHODS["onedrive"].configured else "no"

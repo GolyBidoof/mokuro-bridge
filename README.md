@@ -457,4 +457,5 @@ MIT — see [LICENSE](LICENSE).
 
 ## Credits
 
-Developed and refined with the help of **DeepSeek V4 Flash**.
+Maintained by **GolyBidoof**. Developed and refined with the help of
+**DeepSeek V4 Flash**.
