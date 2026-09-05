@@ -75,6 +75,13 @@ def _run_setup_mega() -> None:
         return
     password = getpass.getpass("MEGA password: ")
 
+    # Verify the credentials against MEGA BEFORE storing anything. megatools ls
+    # on the root succeeds only with valid login.
+    ok, verify_err = _mega_verify_creds(email, password)
+    if not ok:
+        print(f"error: MEGA login failed — credentials not stored. {verify_err or ''}".strip())
+        return
+
     try:
         backend = _store_mega_creds_os(email, password)
     except RuntimeError as exc:
@@ -88,6 +95,33 @@ def _run_setup_mega() -> None:
         "Tip: you can also use environment variables MEGA_EMAIL / MEGA_PASSWORD "
         "instead of storing anything."
     )
+
+
+def _mega_verify_creds(email: str, password: str) -> tuple[bool, Optional[str]]:
+    """Check MEGA credentials by listing the account root with a temp megarc.
+
+    Returns (True, None) on success, or (False, error_message) when the login
+    is rejected (wrong email/password). The temporary megarc is deleted even
+    on failure.
+    """
+    megarc_path = create_megarc(email, password)
+    try:
+        result = subprocess.run(
+            ["megatools", "ls", "--config", str(megarc_path), "/"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode == 0:
+            return True, None
+        err = (result.stderr or result.stdout or "").strip()
+        if not err:
+            err = f"megatools exited with code {result.returncode}"
+        return False, err
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        return False, str(exc)
+    finally:
+        megarc_path.unlink(missing_ok=True)
 
 def create_megarc(email: str, password: str) -> Path:
     # megatools requires a [Login] section (not [DEFAULT]) with Username=
