@@ -132,7 +132,8 @@ def _main() -> None:
         "server:app",
         host=args.host,
         port=args.port,
-        log_level="info",
+        log_level="warning",
+        access_log=False,  # keep the console clean — mokuro-bridge logs its own progress
         # Reload wipes in-memory sessions mid-scrape. Opt in with UVICORN_RELOAD=1.
         reload=os.environ.get("UVICORN_RELOAD", "0").lower() in ("1", "true", "yes"),
         reload_excludes=["mokuro/*", "**/mokuro/**", "**/__pycache__/**"],

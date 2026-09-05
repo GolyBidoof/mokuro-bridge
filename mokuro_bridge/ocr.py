@@ -12,6 +12,10 @@ from .config import IMAGE_EXTENSIONS, _OCR_CHUNK_SIZE, _OCR_IDLE_FLUSH_S
 from .sessions import Session, _persist_session, _session_or_none, session_snapshot
 from . import log as _log
 
+# Dedup set for full-traceback dumps in _mark_page_failed (log each root
+# cause once per process so a failing batch doesn't spam 500 tracebacks).
+_ocr_error_tracebacks_seen: set = set()
+
 # ── OCR engine ────────────────────────────────────────────────────────
 # By default the bridge uses the stock mokuro package from PyPI
 # (`pip install mokuro`), imported normally from the environment.
@@ -357,6 +361,14 @@ def _mark_page_failed(session: Session, filename: str, error: Exception) -> None
         session.pages_ocr_failed.add(filename)
         session.message = f"OCR failed on {filename}: {error}"
     _log.error("ocr", f"{session.safe_title}: page {filename} failed: {error}")
+    # Dump the full traceback once per unique error so root causes (e.g. an
+    # int leaking into a str-method deep in transformers) are visible in the
+    # console instead of only the final message.
+    import traceback
+    key = f"{type(error).__name__}: {error}"
+    if key not in _ocr_error_tracebacks_seen:
+        _ocr_error_tracebacks_seen.add(key)
+        _log.error("ocr", f"first occurrence of {key!r} — traceback:\n{traceback.format_exc()}")
     _persist_session(session)
 
 def _ocr_worker_loop() -> None:
