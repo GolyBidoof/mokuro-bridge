@@ -41,11 +41,13 @@ def post_form(url: str, fields: dict):
         return json.loads(resp.read().decode())
 
 
-def finalize(url: str, session_id: str, upload_mega: bool, delete: bool) -> dict:
+def finalize(url: str, session_id: str, upload_method: str, delete: bool) -> dict:
     """POST finalize and stream the NDJSON progress to stdout."""
     body = urllib.parse.urlencode(
         {
-            "upload_to_mega": "true" if upload_mega else "false",
+            "upload_method": upload_method,
+            # Legacy alias kept for older bridges that don't know upload_method yet.
+            "upload_to_mega": "true" if upload_method == "mega" else "false",
             "delete_after_upload": "true" if delete else "false",
         }
     ).encode()
@@ -77,10 +79,23 @@ def main() -> int:
     )
     parser.add_argument("source_dir", help="folder containing the page images")
     parser.add_argument("--title", default=None, help="volume title (default: folder name)")
-    parser.add_argument("--upload-mega", action="store_true", help="upload to MEGA when done")
+    parser.add_argument(
+        "--upload-method",
+        default=None,
+        help="upload destination: local (default) or mega",
+    )
+    parser.add_argument(
+        "--upload-mega",
+        action="store_true",
+        help="[legacy alias] upload to MEGA when done (same as --upload-method mega)",
+    )
     parser.add_argument("--keep-files", action="store_true", help="keep bridge working files")
     parser.add_argument("--url", default=DEFAULT_URL, help=f"bridge base URL (default: {DEFAULT_URL})")
     args = parser.parse_args()
+
+    method = args.upload_method or ("mega" if args.upload_mega else "local")
+    if method not in ("local", "mega"):
+        sys.exit(f"unknown upload method: {method}")
 
     source = os.path.abspath(os.path.expanduser(args.source_dir))
     if not os.path.isdir(source):
@@ -109,12 +124,12 @@ def main() -> int:
     )
 
     result = finalize(
-        args.url, session_id, upload_mega=args.upload_mega, delete=not args.keep_files
+        args.url, session_id, upload_method=method, delete=not args.keep_files
     )
-    where = result.get("mega_path") if args.upload_mega else result.get("output_dir")
+    where = result.get("mega_path") if method == "mega" else result.get("output_dir")
     print(f"\nDone — {result.get('pages')} page(s) OCR'd.")
     print(f"Files are in: {where}")
-    if args.upload_mega:
+    if method == "mega":
         print("Open /mokuro-reader in reader.mokuro.app to read.")
     else:
         print("Point reader.mokuro.app at that folder to read.")

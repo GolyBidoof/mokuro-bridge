@@ -106,23 +106,33 @@ That's the whole loop. Prefer scripting your own capture? Jump to
 
 ## Uploading to MEGA (optional)
 
-MEGA upload is **off by default**. Enable it in three steps:
+MEGA upload is **off by default**. The bridge has a generic *upload method*
+system — `local` (default) or a configured remote like `mega` — and `/health`
+reports which methods are configured. Enable MEGA in three steps:
 
 1. **Install megatools** for your OS: macOS `brew install megatools`,
    Debian/Ubuntu `apt install megatools`, others see
    [megatools.megous.com](https://megatools.megous.com/).
 2. **Give the bridge your MEGA credentials** — one of these (first wins):
-   - **Setup wizard (all platforms):** `python server.py --setup-mega` — asks
-     once, then stores in your **OS keychain / credential store**: macOS
-     Keychain, Windows Credential Manager, or Linux Secret Service
-     (gnome-keyring). If no keychain is available it falls back to a
-     permissions-restricted file (`~/.config/mokuro-bridge/credentials.env`).
+   - **Setup wizard (all platforms):** `python server.py --setup-upload mega`
+     (the older `--setup-mega` still works) — asks once, then stores in your
+     **OS keychain / credential store**: macOS Keychain, Windows Credential
+     Manager, or Linux Secret Service (gnome-keyring). If no keychain is
+     available it falls back to a permissions-restricted file
+     (`~/.config/mokuro-bridge/credentials.env`).
    - **Environment variables:** `MEGA_EMAIL=you@example.com MEGA_PASSWORD=…`
      before starting the bridge.
    - **macOS-only helper script:** `./setup-keychain.sh` (writes the macOS
      Keychain directly).
-3. **Turn uploads on**: export `MOKURO_BRIDGE_UPLOAD_DEFAULT=true` so every
-   finished volume uploads, or pass `upload_to_mega=true` per request.
+3. **Choose where finished volumes go** — per request `upload_method=mega` on
+   `/session/{id}/finalize` (or `--upload-method mega` in `ocr_folder.py`),
+   or globally by exporting `MOKURO_BRIDGE_UPLOAD_DEFAULT=true` so every
+   finished volume uploads. The legacy `upload_to_mega=true` param still
+   means the same as `upload_method=mega`.
+
+`/health` reports all of this: `upload_methods` (each method's `id`, `name`,
+`configured`, `default` and provider info like `creds_source` /
+`library_root`), plus `upload_method_default` and `upload_method_selected`.
 
 Uploaded layout mirrors the local one:
 
@@ -202,20 +212,23 @@ set -a; source .env; set +a        # macOS / Linux
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Dependency/config status (mokuro, megatools, MEGA creds…). |
+| `GET` | `/health` | Dependency/config status (mokuro, megatools, MEGA creds, configured upload methods…). |
 | `POST` | `/session/start` | `title`, `reuse_existing` → new session id. |
 | `POST` | `/session/resume` | `title`, `source_dir` — OCR a folder on disk (what `ocr_folder.py` uses). |
 | `POST` | `/session/{id}/page` | Multipart `page` image + `filename` (browser capture). |
 | `POST` | `/session/{id}/page-local` | `path` — ingest an image already on this machine (headless scrapers). |
 | `GET` | `/session/{id}/status` | Capture/OCR progress snapshot. |
 | `GET` | `/sessions` | All live sessions. |
-| `POST` | `/session/{id}/finalize` | `upload_to_mega`, `delete_after_upload` → NDJSON progress stream. |
+| `POST` | `/session/{id}/finalize` | `upload_method`, `delete_after_upload` → NDJSON progress stream. |
 
 `finalize` form fields:
 
-- `upload_to_mega` — `true` → MEGA; `false` → local output; unset → env default.
+- `upload_method` — destination for the finished volume: `local` (default)
+  or `mega`. Unset → falls back to the legacy `upload_to_mega`, then the
+  `MOKURO_BRIDGE_UPLOAD_DEFAULT` env var.
+- `upload_to_mega` — legacy alias; `true` → MEGA, `false` → local.
 - `delete_after_upload` — `true` (default) removes the session's working files
-  after a successful run (in MEGA mode that's everything; in local mode the
+  after a successful run (in remote mode that's everything; in local mode the
   finished trio in the output dir is kept).
 
 ### Progress stream format
@@ -301,7 +314,7 @@ origin as long as that origin is in `CORS_ORIGINS`.
 `pip install mokuro` or set `MOKURO_REPO` to a checkout.
 
 **`mega_configured: false`**
-Run `python server.py --setup-mega` (stores in your OS keychain/credential
+Run `python server.py --setup-upload mega` (stores in your OS keychain/credential
 store or a file), export `MEGA_EMAIL`/`MEGA_PASSWORD`, or on macOS run
 `./setup-keychain.sh`. On headless Linux, keychain storage needs a Secret
 Service daemon (gnome-keyring); the wizard then falls back to a 0600 file.

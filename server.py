@@ -152,6 +152,43 @@ _MEGA_UPLOAD_DEFAULT = str(
 # whatever was captured.
 MIN_PAGES_FOR_MEGA = max(1, int(os.environ.get("MIN_PAGES_FOR_MEGA", "10")))
 
+# ── Upload methods ─────────────────────────────────────────────────────
+# Multi-destination ("upload method") architecture: every destination — the
+# no-upload `local` method or a remote provider like MEGA — is described by
+# an UploadMethod entry. Future providers (drive, onedrive, webdav) register
+# here the same way. The registry dict itself is built lazily by
+# _build_upload_methods() (defined with the MEGA helpers below) so that
+# resolved-at-runtime values (tool availability, credentials) stay current.
+
+@dataclass
+class UploadMethod:
+    id: str            # "local" | "mega" | (future) "drive" | ...
+    name: str          # human label
+    configured: bool   # is it usable right now?
+    default: bool      # is it the default target?
+    extra: dict = field(default_factory=dict)  # provider-specific info for /health
+
+
+_DEFAULT_UPLOAD_METHOD = "mega" if _MEGA_UPLOAD_DEFAULT else "local"
+
+
+def resolve_upload_method(value: Optional[str]) -> str:
+    """Map a client-supplied upload target to a concrete method id.
+
+    Accepts: None/"" (env default), "local", "mega", and legacy booleans
+    ("true"→mega, "false"→local) for backward compat with upload_to_mega.
+    """
+    raw = str(value).strip().lower() if value is not None else ""
+    if not raw:
+        return _DEFAULT_UPLOAD_METHOD
+    if raw in ("true", "yes", "on", "1"):
+        return "mega"
+    if raw in ("false", "no", "off", "0"):
+        return "local"
+    if raw in _UPLOAD_METHODS:
+        return raw
+    raise ValueError(f"unknown upload method: {value}")
+
 # Chunked OCR flush: pages are grouped into batches so the queue drains in
 # controlled chunks. Override via env.
 _OCR_CHUNK_SIZE = max(1, int(os.environ.get("OCR_CHUNK_SIZE", "8")))
@@ -550,6 +587,11 @@ def _mega_creds_source() -> Optional[str]:
     return None
 
 
+def _mega_configured() -> bool:
+    """Whether the MEGA upload method is usable right now."""
+    return bool(shutil.which("megatools")) and _mega_creds_source() is not None
+
+
 def _get_mega_creds() -> tuple[str, str]:
     env_email = os.environ.get("MEGA_EMAIL", "").strip()
     env_password = os.environ.get("MEGA_PASSWORD", "").strip()
@@ -656,6 +698,37 @@ def mega_series_dir(volume_title: str) -> str:
     return f"{MEGA_LIBRARY_ROOT}/{series}"
 
 
+def _build_upload_methods() -> dict[str, UploadMethod]:
+    """Build the live upload-method registry (fresh per call).
+
+    Computed on demand so availability (credential source, megatools binary)
+    reflects the current environment — health calls this per request.
+    """
+    return {
+        "local": UploadMethod(
+            id="local",
+            name="Local output directory",
+            configured=True,
+            default=(_DEFAULT_UPLOAD_METHOD == "local"),
+        ),
+        "mega": UploadMethod(
+            id="mega",
+            name="MEGA (megatools)",
+            configured=_mega_configured(),
+            default=(_DEFAULT_UPLOAD_METHOD == "mega"),
+            extra={
+                "creds_source": _mega_creds_source(),
+                "library_root": MEGA_LIBRARY_ROOT,
+            },
+        ),
+    }
+
+
+# Registry snapshot taken once at startup (used by the banner + fallback lookups
+# in resolve_upload_method); health() rebuilds it live per request.
+_UPLOAD_METHODS = _build_upload_methods()
+
+
 def create_megarc(email: str, password: str) -> Path:
     # megatools requires a [Login] section (not [DEFAULT]) with Username=
     megarc = WORK_DIR / f".megarc_{uuid.uuid4().hex[:8]}"
@@ -740,8 +813,9 @@ def _mega_upload_file(
 
     Runs megatools with stdout piped (stderr still goes to the process's
     stderr). Progress is throttled by megatools to ~1 update/second and each
-    line is flushed by glib, so `on_progress(percent, bytes_done, total_bytes,
-    speed_bps)` fires live. Returns (success, error_message).
+    line is flushed by glib, so `on_progress(bytes_done, total_bytes,
+    speed_bps)` fires live (the caller derives the percent). Returns
+    (success, error_message).
     """
     total_bytes = local_path.stat().st_size
     proc = subprocess.Popen(
@@ -771,20 +845,19 @@ def _mega_upload_file(
             if m:
                 success = True
                 if on_progress:
-                    on_progress(100.0, total_bytes, total_bytes, 0)
+                    on_progress(total_bytes, total_bytes, 0)
                 continue
             m = _MEGATOOLS_PROGRESS_RE.match(line)
             if m and on_progress:
-                percent = float(m.group(2))
                 rest = m.group(3)
                 speed_bps = _parse_megatools_speed(m.group(4) or "")
                 # "12.4 MiB of 29.2 MiB" → done/total
                 size_match = re.match(r"^(.+?)\s+of\s+(.+)$", rest)
                 if size_match:
                     bytes_done = min(_parse_megatools_size(size_match.group(1)), total_bytes)
-                    on_progress(percent, bytes_done, total_bytes, speed_bps)
+                    on_progress(bytes_done, total_bytes, speed_bps)
                 elif rest.startswith("done "):
-                    on_progress(100.0, total_bytes, total_bytes, speed_bps)
+                    on_progress(total_bytes, total_bytes, speed_bps)
         proc.wait(timeout=300)
     except Exception as e:
         error_msg = str(e)
@@ -796,6 +869,44 @@ def _mega_upload_file(
     if not success and error_msg is None:
         error_msg = f"megatools exited with code {proc.returncode}" if proc.returncode else "no completion line"
     return success, error_msg
+
+
+def upload_file(
+    method: str,
+    local_path: Path,
+    remote_dir: str,
+    on_progress: Optional[callable],
+) -> tuple[bool, Optional[str]]:
+    """Upload one file to `method`'s remote dir. Returns (success, error_msg).
+
+    The MEGA branch manages its own megarc (created from _get_mega_creds()
+    and deleted in a finally block), ensuring remote dirs exist first. The
+    megatools run is serialized under `_mega_lock` exactly like the previous
+    inline batch logic. `method == "local"` is handled by the caller, which
+    keeps artifacts on disk instead of uploading.
+    """
+    if method == "mega":
+        email, password = _get_mega_creds()
+        megarc_path = create_megarc(email, password)
+        try:
+            with _mega_lock:
+                for dir_to_make in (MEGA_LIBRARY_ROOT, remote_dir):
+                    mkdir_result = mega_mkdir(megarc_path, dir_to_make)
+                    if mkdir_result.returncode != 0:
+                        err = (mkdir_result.stderr or mkdir_result.stdout or "").strip()
+                        if "exist" not in err.lower():
+                            print(f"[mokuro-bridge] mkdir {dir_to_make}: {err}")
+                return _mega_upload_file(
+                    megarc_path,
+                    local_path,
+                    f"{remote_dir}/{local_path.name}",
+                    on_progress,
+                )
+        finally:
+            megarc_path.unlink(missing_ok=True)
+    if method == "local":
+        raise ValueError("local uploads are handled by the caller")
+    raise ValueError(f"unknown upload method: {method}")
 
 
 def find_mokuro_output(vol_dir: Path) -> Optional[Path]:
@@ -831,14 +942,17 @@ def _upload_progress_event(
     bytes_done: int,
     total_bytes: int,
     speed_bps: int,
-    mega_path: str,
+    remote_path: str,
+    method: str,
 ) -> str:
     """Standardized per-file upload progress event (shared for every remote dir).
 
-    Schema (stable across all MEGA targets):
+    Schema (stable across all upload methods):
       {"stage":"upload_progress","message":"<file>: 42.5%",
        "upload":{"file","bytes","total_bytes","current_bytes","percent","speed_bps","speed_human"},
-       "mega_path":"<remote dir>"}
+       "mega_path":"<remote dir>","method":"mega"}
+    "mega_path" keeps its historical name for backward compatibility even
+    though it now holds `remote_path` for any method.
     """
     percent = 100.0 if total_bytes <= 0 else round(bytes_done * 100.0 / total_bytes, 2)
     speed_human = f"{speed_bps / 1024 / 1024:.2f} MiB/s" if speed_bps >= 1024**2 else f"{speed_bps / 1024:.1f} KiB/s" if speed_bps else "—"
@@ -850,6 +964,7 @@ def _upload_progress_event(
         "percent": percent,
         "speed_bps": speed_bps,
         "speed_human": speed_human,
+        "method": method,
     }
     return ndjson(
         "upload_progress",
@@ -859,7 +974,8 @@ def _upload_progress_event(
         total_bytes=total_bytes,
         percent=percent,
         speed_bps=speed_bps,
-        mega_path=mega_path,
+        mega_path=remote_path,
+        method=method,
     )
 
 
@@ -1425,22 +1541,25 @@ async def session_finalize(
     session_id: str,
     delete_after_upload: str = Form("true"),
     upload_to_mega: str = Form(""),
+    upload_method: str = Form(""),
 ):
     """
     Wait for OCR queue, assemble .mokuro, pack CBZ + cover, then either keep
-    the artifacts locally (default) or upload them to MEGA. NDJSON stream.
+    the artifacts locally (default) or upload them to a remote method (MEGA).
+    NDJSON stream.
 
-    upload_to_mega: "true" → MEGA upload; "false" → local OUTPUT_DIR; unset →
-    falls back to MOKURO_BRIDGE_UPLOAD_DEFAULT env (default "false", i.e. local).
+    upload_method: "local" → OUTPUT_DIR; "mega" → MEGA; unset → falls back to
+    upload_to_mega, then to the MOKURO_BRIDGE_UPLOAD_DEFAULT env (default
+    "false", i.e. local).
+    upload_to_mega: legacy alias — "true" → MEGA; "false" → local; unset →
+    env default. New clients should prefer upload_method.
     """
     session = _get_session(session_id)
     do_delete = _truthy(delete_after_upload)
-    do_mega = (
-        _truthy(upload_to_mega) if str(upload_to_mega).strip() else _MEGA_UPLOAD_DEFAULT
-    )
+    raw_target = str(upload_method).strip() or str(upload_to_mega).strip() or None
+    method = resolve_upload_method(raw_target)
 
     async def generate():
-        megarc_path = None
         try:
             snap = session_snapshot(session)
             yield ndjson(
@@ -1514,7 +1633,7 @@ async def session_finalize(
                 yield ndjson("error", "No images in volume directory")
                 return
 
-            if do_mega and len(image_files) < MIN_PAGES_FOR_MEGA:
+            if method == "mega" and len(image_files) < MIN_PAGES_FOR_MEGA:
                 yield ndjson(
                     "error",
                     f"Refusing MEGA upload: only {len(image_files)} page(s) "
@@ -1535,7 +1654,7 @@ async def session_finalize(
             file_base = session.safe_title
             staging = (
                 session.vol_dir / "_mega_upload"
-                if do_mega
+                if method == "mega"
                 else OUTPUT_DIR / series_dir_name
             )
             staging.mkdir(parents=True, exist_ok=True)
@@ -1552,7 +1671,7 @@ async def session_finalize(
             webp_pages = [p for p in image_files if p.suffix.lower() == ".webp"]
             shutil.copy2(webp_pages[0] if webp_pages else image_files[0], titled_cover)
 
-            if not do_mega:
+            if method == "local":
                 yield ndjson(
                     "pack",
                     f"Saved local pack → {staging}",
@@ -1561,92 +1680,84 @@ async def session_finalize(
                 )
                 await asyncio.sleep(0)
 
-            mega_remote_dir = mega_series_dir(session.safe_title)
+            remote_dir = mega_series_dir(session.safe_title)
             upload_results = []
             all_success = True
 
-            if do_mega:
+            if method == "mega":
                 yield ndjson(
                     "upload",
                     f"Uploading to MEGA… ({series_dir_name}/)",
                     series=series_dir_name,
-                    mega_path=mega_remote_dir,
+                    mega_path=remote_dir,
+                    method=method,
                 )
                 await asyncio.sleep(0)
 
-                try:
-                    email, password = _get_mega_creds()
-                except RuntimeError as e:
-                    yield ndjson("error", str(e))
-                    return
-
-                megarc_path = create_megarc(email, password)
-
-                def _mega_upload_batch():
+                def _upload_batch():
+                    progress_events = []
                     results = []
-                    with _mega_lock:
-                        for remote_dir in (MEGA_LIBRARY_ROOT, mega_remote_dir):
-                            mkdir_result = mega_mkdir(megarc_path, remote_dir)
-                            if mkdir_result.returncode != 0:
-                                err = (mkdir_result.stderr or mkdir_result.stdout or "").strip()
-                                if "exist" not in err.lower():
-                                    print(f"[mokuro-bridge] mkdir {remote_dir}: {err}")
+                    items = [
+                        (titled_cbz, f"{file_base}.cbz"),
+                        (titled_mokuro, f"{file_base}.mokuro"),
+                        (titled_cover, f"{file_base}.webp"),
+                    ]
+                    for local_path, remote_name in items:
+                        start = time.monotonic()
+                        last_progress = {"bytes": 0, "speed": 0, "emitted": 0.0}
 
-                        items = [
-                            (titled_cbz, f"{file_base}.cbz"),
-                            (titled_mokuro, f"{file_base}.mokuro"),
-                            (titled_cover, f"{file_base}.webp"),
-                        ]
-                        for local_path, remote_name in items:
-                            start = time.monotonic()
-                            last_progress = {"bytes": 0, "speed": 0, "emitted": 0.0}
-
-                            def _on_progress(percent, bytes_done, total_bytes, speed_bps, _name=remote_name):
-                                # Throttle upstream NDJSON events to ~4/sec so
-                                # megatools' 1/sec lines stay live without flooding.
-                                now = time.monotonic()
-                                if (
-                                    percent >= 100.0
-                                    or bytes_done <= 0
-                                    or now - last_progress["emitted"] >= 0.25
-                                ):
-                                    last_progress["bytes"] = bytes_done
-                                    last_progress["speed"] = speed_bps
-                                    last_progress["emitted"] = now
-                                    progress_events.append(
-                                        _upload_progress_event(
-                                            _name, bytes_done, total_bytes, speed_bps, mega_remote_dir
-                                        )
+                        def _on_progress(
+                            bytes_done, total_bytes, speed_bps, _name=remote_name
+                        ):
+                            # Throttle upstream NDJSON events to ~4/sec so
+                            # megatools' 1/sec lines stay live without flooding.
+                            now = time.monotonic()
+                            if (
+                                bytes_done >= total_bytes
+                                or bytes_done <= 0
+                                or now - last_progress["emitted"] >= 0.25
+                            ):
+                                last_progress["bytes"] = bytes_done
+                                last_progress["speed"] = speed_bps
+                                last_progress["emitted"] = now
+                                progress_events.append(
+                                    _upload_progress_event(
+                                        _name, bytes_done, total_bytes, speed_bps,
+                                        remote_dir, method,
                                     )
+                                )
 
-                            progress_events = []
-                            ok, err = _mega_upload_file(
-                                megarc_path, local_path, f"{mega_remote_dir}/{remote_name}", _on_progress
-                            )
-                            duration_s = round(time.monotonic() - start, 2)
-                            results.append(
-                                {
-                                    "file": remote_name,
-                                    "size": local_path.stat().st_size,
-                                    "success": ok,
-                                    "stderr": err if not ok else None,
-                                    "duration_s": duration_s,
-                                }
-                            )
+                        ok, err = upload_file(method, local_path, remote_dir, _on_progress)
+                        duration_s = round(time.monotonic() - start, 2)
+                        results.append(
+                            {
+                                "file": remote_name,
+                                "size": local_path.stat().st_size,
+                                "success": ok,
+                                "stderr": err if not ok else None,
+                                "duration_s": duration_s,
+                            }
+                        )
                     return results, progress_events
 
-                upload_results, progress_events = await asyncio.to_thread(_mega_upload_batch)
+                upload_results, progress_events = await asyncio.to_thread(_upload_batch)
                 for ev in progress_events:
                     yield ev
                     await asyncio.sleep(0)
                 for r in upload_results:
                     if r["success"]:
-                        yield ndjson("upload", f"Uploaded {r['file']}", file=r["file"])
+                        yield ndjson(
+                            "upload",
+                            f"Uploaded {r['file']}",
+                            file=r["file"],
+                            method=method,
+                        )
                     else:
                         yield ndjson(
                             "upload",
                             f"Upload failed for {r['file']}: {r.get('stderr') or 'unknown'}",
                             file=r["file"],
+                            method=method,
                         )
                     await asyncio.sleep(0)
 
@@ -1663,7 +1774,7 @@ async def session_finalize(
                 _sessions.pop(session_id, None)
             _delete_persisted_session(session_id)
 
-            if do_mega and not all_success:
+            if method == "mega" and not all_success:
                 failed = [r for r in upload_results if not r["success"]]
                 yield ndjson(
                     "error",
@@ -1672,21 +1783,22 @@ async def session_finalize(
                     status="partial_upload",
                     title=session.safe_title,
                     pages=len(image_files),
-                    mega_path=mega_remote_dir,
+                    mega_path=remote_dir,
                     uploads=upload_results,
+                    method=method,
                 )
                 return
 
             done_msg = (
-                f"Done! {len(image_files)} pages → MEGA {mega_remote_dir}/"
+                f"Done! {len(image_files)} pages → MEGA {remote_dir}/"
                 f"{file_base}.{{cbz,mokuro,webp}}"
-                if do_mega
+                if method == "mega"
                 else f"Done! {len(image_files)} pages OCR'd → {staging}"
             )
             # Standardized per-file upload summary for the "done" event (only
             # in MEGA mode); each entry mirrors the "upload_progress" schema.
             uploads_summary = []
-            if do_mega:
+            if method == "mega":
                 for r in upload_results:
                     total = r.get("size", 0)
                     dur = r.get("duration_s") or 0
@@ -1710,17 +1822,15 @@ async def session_finalize(
                 series=series_dir_name,
                 pages=len(image_files),
                 pages_ocr_done=snap["pages_ocr_done"],
-                mega_path=mega_remote_dir if do_mega else None,
-                output_dir=str(staging) if not do_mega else None,
+                mega_path=remote_dir if method == "mega" else None,
+                output_dir=str(staging) if method == "local" else None,
                 staging=str(staging),
-                uploads=uploads_summary if do_mega else upload_results,
-                reader_url="https://reader.mokuro.app/" if do_mega else None,
+                uploads=uploads_summary if method == "mega" else upload_results,
+                reader_url="https://reader.mokuro.app/" if method == "mega" else None,
+                method=method,
             )
         except Exception as e:
             yield ndjson("error", f"Finalize failed: {e}")
-        finally:
-            if megarc_path and Path(megarc_path).exists():
-                Path(megarc_path).unlink(missing_ok=True)
 
     return StreamingResponse(
         generate(),
@@ -1747,6 +1857,13 @@ async def health():
         "mega_creds_source": None,
         "mega_library_root": MEGA_LIBRARY_ROOT,
         "upload_default": _MEGA_UPLOAD_DEFAULT,
+        "upload_methods": [
+            {"id": m.id, "name": m.name, "configured": m.configured,
+             "default": m.default, **m.extra}
+            for m in _build_upload_methods().values()
+        ],
+        "upload_method_default": _DEFAULT_UPLOAD_METHOD,
+        "upload_method_selected": None,
         "work_dir": str(WORK_DIR),
         "output_dir": str(OUTPUT_DIR),
         "cors_origins": CORS_ORIGINS,
@@ -1777,11 +1894,19 @@ def _main() -> None:
 
     parser = argparse.ArgumentParser(prog=APP_NAME, description=__doc__.splitlines()[0])
     parser.add_argument(
+        "--setup-upload",
+        metavar="METHOD",
+        default=None,
+        help="Interactively configure/authenticate an upload method "
+        "(currently: mega). e.g. --setup-upload mega",
+    )
+    parser.add_argument(
         "--setup-mega",
         action="store_true",
-        help="Interactively store MEGA credentials in the OS keychain / "
-        "credential store (macOS Keychain, Windows Credential Manager, Linux "
-        "Secret Service) or, failing that, a 0600 credentials file.",
+        help="[alias for --setup-upload mega] Interactively store MEGA "
+        "credentials in the OS keychain / credential store (macOS Keychain, "
+        "Windows Credential Manager, Linux Secret Service) or, failing that, "
+        "a 0600 credentials file.",
     )
     parser.add_argument("--host", default=os.environ.get("MOKURO_BRIDGE_HOST", "127.0.0.1"))
     parser.add_argument(
@@ -1791,16 +1916,29 @@ def _main() -> None:
     )
     args = parser.parse_args()
 
-    if args.setup_mega:
-        _run_setup_mega()
+    setup_method = args.setup_upload or ("mega" if args.setup_mega else None)
+    if setup_method:
+        if setup_method == "mega":
+            _run_setup_mega()
+        elif setup_method in _UPLOAD_METHODS:
+            print(f"error: upload method '{setup_method}' has no setup wizard yet")
+            raise SystemExit(2)
+        else:
+            print(
+                f"error: unknown upload method '{setup_method}' "
+                f"(available: {', '.join(_UPLOAD_METHODS)})"
+            )
+            raise SystemExit(2)
         return
 
     import uvicorn
 
+    mega_state = "yes" if _UPLOAD_METHODS["mega"].configured else "no"
     print("=" * 60)
     print(f"  {APP_NAME} v{__version__} on http://{args.host}:{args.port}")
     print(f"  work dir:   {WORK_DIR}")
     print(f"  output dir: {OUTPUT_DIR} (local mode)")
+    print(f"  upload methods: local (default), mega (configured: {mega_state})")
     print(f"  MEGA root:  {MEGA_LIBRARY_ROOT} (upload default: {_MEGA_UPLOAD_DEFAULT})")
     if _MOKURO_REPO is not None:
         print(f"  custom mokuro repo: {_MOKURO_REPO}")
