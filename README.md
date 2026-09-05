@@ -29,11 +29,8 @@ No architecture knowledge needed. Two terminals — one for the server
 
 **1. Install (once)**
 
-Create the repo on GitHub first, then clone it (replace `<your-url>` with the
-repo's URL):
-
 ```bash
-git clone <your-url> mokuro-bridge
+git clone https://github.com/GolyBidoof/mokuro-bridge
 cd mokuro-bridge
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
