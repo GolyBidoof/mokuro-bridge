@@ -40,7 +40,8 @@ pip install -r requirements.txt
 That one `pip install` brings in everything the server needs *and* the OCR
 engine: `fastapi`, `uvicorn`, `python-multipart`, `keyring` (for OS keychain
 support) and `mokuro` (pulls PyTorch — the big one; first install takes a
-while and a few GB of disk).
+while and a few GB of disk). Want Google Drive uploads too? Also run
+`pip install -r requirements-drive.txt`.
 
 **You need Python 3.10+.** That's mokuro's floor, and the very newest Python
 release may not work yet — PyTorch wheels often lag new Python versions. If
@@ -104,11 +105,15 @@ There are two ways to get your volumes in:
 That's the whole loop. Prefer scripting your own capture? Jump to
 [Writing a capture client](#writing-a-capture-client) — four HTTP calls.
 
-## Uploading to MEGA (optional)
+## Uploading to a cloud drive (optional)
 
-MEGA upload is **off by default**. The bridge has a generic *upload method*
-system — `local` (default) or a configured remote like `mega` — and `/health`
-reports which methods are configured. Enable MEGA in three steps:
+Remote upload is **off by default**. The bridge has a generic *upload method*
+system — `local` (default) or a configured remote like `mega` / `drive` — and
+`/health` reports which methods are configured. `ocr_folder.py` accepts
+`--upload-method local|mega|drive`; the HTTP API accepts `upload_method=` on
+`/session/{id}/finalize` (legacy `upload_to_mega=true` still means `mega`).
+
+### MEGA
 
 1. **Install megatools** for your OS: macOS `brew install megatools`,
    Debian/Ubuntu `apt install megatools`, others see
@@ -124,24 +129,43 @@ reports which methods are configured. Enable MEGA in three steps:
      before starting the bridge.
    - **macOS-only helper script:** `./setup-keychain.sh` (writes the macOS
      Keychain directly).
-3. **Choose where finished volumes go** — per request `upload_method=mega` on
-   `/session/{id}/finalize` (or `--upload-method mega` in `ocr_folder.py`),
-   or globally by exporting `MOKURO_BRIDGE_UPLOAD_DEFAULT=true` so every
-   finished volume uploads. The legacy `upload_to_mega=true` param still
-   means the same as `upload_method=mega`.
+3. **Upload** with `--upload-method mega` (or `MOKURO_BRIDGE_UPLOAD_DEFAULT=true`
+   to make it the default).
 
-`/health` reports all of this: `upload_methods` (each method's `id`, `name`,
-`configured`, `default` and provider info like `creds_source` /
-`library_root`), plus `upload_method_default` and `upload_method_selected`.
-
-Uploaded layout mirrors the local one:
+Uploaded layout mirrors the local one — every provider stores under a
+`mokuro-reader` library folder:
 
 ```
 /Root/mokuro-reader/<series>/
   <volume>.cbz  <volume>.mokuro  <volume>.webp
 ```
 
-Open `/mokuro-reader` in [reader.mokuro.app](https://reader.mokuro.app/) to read.
+### Google Drive
+
+1. **Install the extra dependency** (Google's API client):
+   `pip install -r requirements-drive.txt`.
+2. **Give the bridge Google credentials**:
+   - **OAuth (recommended for a personal account):** create a Google Cloud
+     project, enable the Drive API, and download an OAuth **Desktop**
+     `client_secret.json`. Then run `python server.py --setup-upload drive`
+     (or set `DRIVE_CLIENT_SECRET_FILE=/path/to/client_secret.json` first) —
+     it opens a browser once, then stores the token at
+     `~/.config/mokuro-bridge/drive_credentials.json` (0600).
+   - **Service account:** save a service-account JSON at that same
+     `DRIVE_CREDS_FILE` path. Note: files land in the service account's own
+     Drive, which you must share with your account (or use domain-wide
+     delegation on Workspace).
+3. **Upload** with `--upload-method drive`.
+
+The bridge auto-creates a `mokuro-reader` folder at the top of your My Drive
+and uploads `<series>/<volume>.{cbz,mokuro,webp}` under it — the layout
+reader.mokuro.app expects.
+
+### Where things land
+
+`/health` reports all of this: `upload_methods` (each method's `id`, `name`,
+`configured`, `default` and provider info like `creds_source` /
+`library_root`), plus `upload_method_default` and `upload_method_selected`.
 
 ## How it works
 
@@ -203,9 +227,12 @@ set -a; source .env; set +a        # macOS / Linux
 | `MEGA_LIBRARY_ROOT` | `/Root/mokuro-reader` | Remote MEGA folder that receives series folders. |
 | `MEGA_EMAIL` / `MEGA_PASSWORD` | *(none)* | MEGA credentials (alternative to the setup wizard). |
 | `MEGA_CREDS_FILE` | `~/.config/mokuro-bridge/credentials.env` | Credentials file used when env vars are absent and no OS keychain entry exists. |
+| `DRIVE_ROOT_NAME` | `mokuro-reader` | Google Drive folder (at My Drive root) that receives series folders. |
+| `DRIVE_CREDS_FILE` | `~/.config/mokuro-bridge/drive_credentials.json` | Google OAuth token or service-account JSON (0600). |
+| `DRIVE_CLIENT_SECRET_FILE` | *(none)* | Path to your Google OAuth `client_secret.json` for `--setup-upload drive`. |
 | `OCR_CHUNK_SIZE` | `8` | Pages per OCR batch (tune for your GPU/CPU). |
 | `OCR_IDLE_FLUSH_S` | `1.5` | Seconds to wait for a fuller batch before flushing. |
-| `MIN_PAGES_FOR_MEGA` | `10` | Refuse MEGA upload below this many pages (failed-scrape guard). |
+| `MIN_PAGES_FOR_MEGA` | `10` | Refuse remote upload below this many pages (failed-scrape guard). |
 | `UVICORN_RELOAD` | `0` | Dev auto-reload (wipes in-memory sessions on change). |
 
 ## HTTP API

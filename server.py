@@ -152,6 +152,16 @@ _MEGA_UPLOAD_DEFAULT = str(
 # whatever was captured.
 MIN_PAGES_FOR_MEGA = max(1, int(os.environ.get("MIN_PAGES_FOR_MEGA", "10")))
 
+# Google Drive (optional destination via google-api-python-client).
+# Auth is OAuth2: creds live in DRIVE_CREDS_FILE (0600), created by
+# `python server.py --setup-upload drive`. A service-account JSON also works.
+DRIVE_ROOT_NAME = os.environ.get("DRIVE_ROOT_NAME", "mokuro-reader")  # folder at My Drive root
+DRIVE_CREDS_FILE = _env_path(
+    "DRIVE_CREDS_FILE", Path.home() / ".config" / "mokuro-bridge" / "drive_credentials.json"
+)
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+_DRIVE_CLIENT_SECRET_ENV = "DRIVE_CLIENT_SECRET_FILE"
+
 # ── Upload methods ─────────────────────────────────────────────────────
 # Multi-destination ("upload method") architecture: every destination — the
 # no-upload `local` method or a remote provider like MEGA — is described by
@@ -721,12 +731,14 @@ def _build_upload_methods() -> dict[str, UploadMethod]:
                 "library_root": MEGA_LIBRARY_ROOT,
             },
         ),
+        "drive": UploadMethod(
+            id="drive",
+            name="Google Drive",
+            configured=_drive_configured(),
+            default=False,
+            extra={"creds_source": _drive_creds_source(), "root": DRIVE_ROOT_NAME},
+        ),
     }
-
-
-# Registry snapshot taken once at startup (used by the banner + fallback lookups
-# in resolve_upload_method); health() rebuilds it live per request.
-_UPLOAD_METHODS = _build_upload_methods()
 
 
 def create_megarc(email: str, password: str) -> Path:
@@ -904,9 +916,269 @@ def upload_file(
                 )
         finally:
             megarc_path.unlink(missing_ok=True)
+    if method == "drive":
+        try:
+            service = _drive_service()
+            # remote_dir is like "mokuro-reader/<Series>"
+            folder_id = _drive_series_folder_id(service, remote_dir)
+            return _drive_upload_file(service, folder_id, local_path, on_progress)
+        except Exception as e:
+            return False, str(e)
     if method == "local":
         raise ValueError("local uploads are handled by the caller")
     raise ValueError(f"unknown upload method: {method}")
+
+
+# ── Google Drive helpers (optional destination) ────────────────────────
+# All google imports below are LAZY (inside functions) so server.py imports
+# cleanly without the libraries; each function raises a clear RuntimeError
+# telling the user how to install them.
+_DRIVE_IMPORT_HINT = (
+    "Google Drive upload needs the google client libraries. "
+    "Install them with: pip install -r requirements-drive.txt"
+)
+
+
+def _drive_creds_source() -> Optional[str]:
+    """Where Drive creds come from: 'oauth', 'service_account', or None.
+
+    Pure file inspection (NO google imports): reads DRIVE_CREDS_FILE and
+    classifies by content — OAuth user creds carry a "refresh_token", a
+    service-account key carries "type": "service_account".
+    """
+    if not DRIVE_CREDS_FILE.is_file():
+        return None
+    try:
+        info = json.loads(DRIVE_CREDS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if info.get("refresh_token"):
+        return "oauth"
+    if info.get("type") == "service_account":
+        return "service_account"
+    return None
+
+
+def _drive_configured() -> bool:
+    """Whether the Drive method is usable right now (creds + client lib)."""
+    return (
+        _drive_creds_source() is not None
+        and importlib.util.find_spec("googleapiclient") is not None
+    )
+
+
+def _drive_creds():
+    """Load OAuth / service-account credentials from DRIVE_CREDS_FILE."""
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2 import service_account
+        from google.oauth2.credentials import Credentials
+    except ImportError as exc:
+        raise RuntimeError(_DRIVE_IMPORT_HINT) from exc
+    if not DRIVE_CREDS_FILE.is_file():
+        raise RuntimeError(
+            "Google Drive not configured. Run `python server.py "
+            "--setup-upload drive` to authorize, then retry the upload."
+        )
+    try:
+        info = json.loads(DRIVE_CREDS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"could not read Drive credentials from {DRIVE_CREDS_FILE}: {exc}"
+        ) from exc
+    if info.get("type") == "service_account":
+        return service_account.Credentials.from_service_account_info(
+            info, scopes=DRIVE_SCOPES
+        )
+    creds = Credentials.from_authorized_user_info(info, scopes=DRIVE_SCOPES)
+    if creds.expired:
+        try:
+            creds.refresh(Request())
+        except Exception as exc:  # e.g. revoked/expired refresh token
+            raise RuntimeError(
+                f"Drive OAuth token refresh failed ({exc}). Re-run `python "
+                "server.py --setup-upload drive` to re-authorize."
+            ) from exc
+    return creds
+
+
+def _drive_service():
+    """Build a Drive API v3 service handle (lazy import)."""
+    try:
+        from googleapiclient.discovery import build
+    except ImportError as exc:
+        raise RuntimeError(_DRIVE_IMPORT_HINT) from exc
+    return build("drive", "v3", credentials=_drive_creds(), cache_discovery=False)
+
+
+def _drive_find_folder(service, name, parent_id) -> Optional[str]:
+    """Look up a Drive folder by name directly under parent_id (or None)."""
+    escaped = name.replace("'", "\\'")
+    resp = (
+        service.files()
+        .list(
+            q=(
+                f"name='{escaped}' and '{parent_id}' in parents "
+                "and mimeType='application/vnd.google-apps.folder' "
+                "and trashed=false"
+            ),
+            spaces="drive",
+            fields="files(id,name)",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
+    files = resp.get("files", [])
+    return files[0]["id"] if files else None
+
+
+def _drive_ensure_folder(service, name, parent_id) -> str:
+    """Find a Drive folder under parent_id, creating it when missing."""
+    existing = _drive_find_folder(service, name, parent_id)
+    if existing:
+        return existing
+    created = (
+        service.files()
+        .create(
+            body={
+                "name": name,
+                "parents": [parent_id],
+                "mimeType": "application/vnd.google-apps.folder",
+            },
+            fields="id",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
+    return created["id"]
+
+
+def _drive_series_folder_id(service, drive_path: str) -> str:
+    """Ensure the Drive folder chain for a "/"-separated remote path.
+
+    remote_dir arrives as e.g. "mokuro-reader/<Series>": the first segment
+    must be the configured root folder (DRIVE_ROOT_NAME, created under
+    "root"/My Drive) and each remaining segment is a folder nested under
+    the previous one. Handles 1-2+ segments generically. Returns the id of
+    the deepest folder.
+    """
+    segments = [seg for seg in str(drive_path).strip("/").split("/") if seg]
+    if not segments:
+        raise ValueError(f"empty Google Drive remote path: {drive_path!r}")
+    if segments[0] != DRIVE_ROOT_NAME:
+        raise ValueError(
+            f"Google Drive remote path must start with '{DRIVE_ROOT_NAME}' "
+            f"(got {drive_path!r})"
+        )
+    parent_id = "root"
+    for seg in segments:
+        parent_id = _drive_ensure_folder(service, seg, parent_id)
+    return parent_id
+
+
+def _drive_upload_file(
+    service,
+    folder_id: str,
+    local_path: Path,
+    on_progress: Optional[callable],
+) -> tuple[bool, Optional[str]]:
+    """Resumable-upload one file into a Drive folder, streaming progress.
+
+    on_progress(bytes_done, total_bytes, speed_bps) fires per 8 MiB chunk
+    (the caller throttles upstream NDJSON emission). Returns
+    (success, error_message).
+    """
+    try:
+        from googleapiclient.http import MediaFileUpload
+    except ImportError as exc:
+        raise RuntimeError(_DRIVE_IMPORT_HINT) from exc
+    total = local_path.stat().st_size
+    media = MediaFileUpload(
+        str(local_path),
+        mimetype="application/octet-stream",
+        chunksize=8 * 1024 * 1024,
+        resumable=True,
+    )
+    request = service.files().create(
+        body={"name": local_path.name, "parents": [folder_id]},
+        media_body=media,
+        fields="id,name,size",
+        supportsAllDrives=True,
+    )
+    last_bytes = 0
+    last_time = time.monotonic()
+    try:
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status is not None and on_progress:
+                now = time.monotonic()
+                bytes_done = int(status.resumable_progress)
+                dt = now - last_time
+                speed = int((bytes_done - last_bytes) / dt) if dt > 0 else 0
+                last_bytes, last_time = bytes_done, now
+                on_progress(bytes_done, total, speed)
+        if on_progress:
+            on_progress(total, total, 0)
+        return True, None
+    except Exception as exc:  # HttpError / ResumableUploadError / network…
+        return False, str(exc)
+
+
+def _run_setup_drive() -> None:
+    """Interactive first-run wizard: OAuth-authorize and store Drive creds."""
+    try:
+        from google_auth_oauthlib.flow import InstalledAppFlow
+    except ImportError:
+        print(
+            "Google Drive setup needs google_auth_oauthlib. Install it with:\n"
+            "  pip install -r requirements-drive.txt"
+        )
+        return
+
+    print("Google Drive upload setup for mokuro-bridge")
+    print("-" * 40)
+    secret_path = os.environ.get(_DRIVE_CLIENT_SECRET_ENV, "").strip()
+    if not secret_path:
+        secret_path = input(
+            "Path to your Google client_secret.json "
+            f"(or set {_DRIVE_CLIENT_SECRET_ENV}): "
+        ).strip()
+    secret_file = Path(secret_path).expanduser() if secret_path else None
+    if secret_file is None or not secret_file.is_file():
+        print(
+            "No client_secret.json found. Download one from the Google Cloud "
+            "Console (APIs & Services → Credentials → Create credentials → "
+            "OAuth client ID → Desktop app) and re-run."
+        )
+        return
+
+    flow = InstalledAppFlow.from_client_secrets_file(str(secret_file), DRIVE_SCOPES)
+    creds = None
+    last_error = None
+    try:
+        creds = flow.run_local_server(port=0)
+    except Exception as exc:  # e.g. no browser on this machine
+        last_error = exc
+    if creds is None:
+        try:
+            creds = flow.run_console()
+        except Exception as exc:
+            last_error = exc
+    if creds is None:
+        print(f"error: OAuth authorization failed: {last_error}")
+        return
+
+    DRIVE_CREDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DRIVE_CREDS_FILE.write_text(creds.to_json(), encoding="utf-8")
+    os.chmod(DRIVE_CREDS_FILE, 0o600)
+    print(f"Stored Drive credentials in {DRIVE_CREDS_FILE} (permissions 0600).")
+
+
+# Registry snapshot taken once at startup (used by the banner + fallback lookups
+# in resolve_upload_method); health() rebuilds it live per request. Built here,
+# after the drive helpers above, so the snapshot includes the drive method.
+_UPLOAD_METHODS = _build_upload_methods()
 
 
 def find_mokuro_output(vol_dir: Path) -> Optional[Path]:
@@ -974,7 +1246,8 @@ def _upload_progress_event(
         total_bytes=total_bytes,
         percent=percent,
         speed_bps=speed_bps,
-        mega_path=remote_path,
+        remote_path=remote_path,
+        mega_path=remote_path,  # legacy name kept for backward compatibility
         method=method,
     )
 
@@ -1633,10 +1906,10 @@ async def session_finalize(
                 yield ndjson("error", "No images in volume directory")
                 return
 
-            if method == "mega" and len(image_files) < MIN_PAGES_FOR_MEGA:
+            if method != "local" and len(image_files) < MIN_PAGES_FOR_MEGA:
                 yield ndjson(
                     "error",
-                    f"Refusing MEGA upload: only {len(image_files)} page(s) "
+                    f"Refusing upload: only {len(image_files)} page(s) "
                     f"(minimum {MIN_PAGES_FOR_MEGA}). "
                     "Likely a failed scrape / free-viewer error — local files kept.",
                     status="too_few_pages",
@@ -1680,16 +1953,24 @@ async def session_finalize(
                 )
                 await asyncio.sleep(0)
 
-            remote_dir = mega_series_dir(session.safe_title)
+            series = series_title_from_volume(session.safe_title)
+            if method == "mega":
+                remote_dir = f"{MEGA_LIBRARY_ROOT}/{series}"
+            elif method == "drive":
+                remote_dir = f"{DRIVE_ROOT_NAME}/{series}"
+            else:
+                remote_dir = ""  # local — not used
+            method_label = {"mega": "MEGA", "drive": "Google Drive"}.get(method, method)
             upload_results = []
             all_success = True
 
-            if method == "mega":
+            if method != "local":
                 yield ndjson(
                     "upload",
-                    f"Uploading to MEGA… ({series_dir_name}/)",
+                    f"Uploading to {method_label}… ({series_dir_name}/)",
                     series=series_dir_name,
-                    mega_path=remote_dir,
+                    remote_path=remote_dir,
+                    mega_path=remote_dir if method == "mega" else None,
                     method=method,
                 )
                 await asyncio.sleep(0)
@@ -1774,31 +2055,32 @@ async def session_finalize(
                 _sessions.pop(session_id, None)
             _delete_persisted_session(session_id)
 
-            if method == "mega" and not all_success:
+            if method != "local" and not all_success:
                 failed = [r for r in upload_results if not r["success"]]
                 yield ndjson(
                     "error",
-                    "MEGA upload failed: "
+                    f"{method_label} upload failed: "
                     + "; ".join(f"{r['file']}: {r.get('stderr') or 'unknown'}" for r in failed),
                     status="partial_upload",
                     title=session.safe_title,
                     pages=len(image_files),
-                    mega_path=remote_dir,
+                    remote_path=remote_dir,
+                    mega_path=remote_dir if method == "mega" else None,
                     uploads=upload_results,
                     method=method,
                 )
                 return
 
             done_msg = (
-                f"Done! {len(image_files)} pages → MEGA {remote_dir}/"
+                f"Done! {len(image_files)} pages → {method_label} {remote_dir}/"
                 f"{file_base}.{{cbz,mokuro,webp}}"
-                if method == "mega"
+                if method != "local"
                 else f"Done! {len(image_files)} pages OCR'd → {staging}"
             )
             # Standardized per-file upload summary for the "done" event (only
-            # in MEGA mode); each entry mirrors the "upload_progress" schema.
+            # in remote mode); each entry mirrors the "upload_progress" schema.
             uploads_summary = []
-            if method == "mega":
+            if method != "local":
                 for r in upload_results:
                     total = r.get("size", 0)
                     dur = r.get("duration_s") or 0
@@ -1822,11 +2104,12 @@ async def session_finalize(
                 series=series_dir_name,
                 pages=len(image_files),
                 pages_ocr_done=snap["pages_ocr_done"],
+                remote_path=remote_dir if method != "local" else None,
                 mega_path=remote_dir if method == "mega" else None,
                 output_dir=str(staging) if method == "local" else None,
                 staging=str(staging),
-                uploads=uploads_summary if method == "mega" else upload_results,
-                reader_url="https://reader.mokuro.app/" if method == "mega" else None,
+                uploads=uploads_summary if method != "local" else upload_results,
+                reader_url="https://reader.mokuro.app/" if method != "local" else None,
                 method=method,
             )
         except Exception as e:
@@ -1898,7 +2181,7 @@ def _main() -> None:
         metavar="METHOD",
         default=None,
         help="Interactively configure/authenticate an upload method "
-        "(currently: mega). e.g. --setup-upload mega",
+        "(currently: mega, drive). e.g. --setup-upload drive",
     )
     parser.add_argument(
         "--setup-mega",
@@ -1920,6 +2203,8 @@ def _main() -> None:
     if setup_method:
         if setup_method == "mega":
             _run_setup_mega()
+        elif setup_method == "drive":
+            _run_setup_drive()
         elif setup_method in _UPLOAD_METHODS:
             print(f"error: upload method '{setup_method}' has no setup wizard yet")
             raise SystemExit(2)
@@ -1940,6 +2225,7 @@ def _main() -> None:
     print(f"  output dir: {OUTPUT_DIR} (local mode)")
     print(f"  upload methods: local (default), mega (configured: {mega_state})")
     print(f"  MEGA root:  {MEGA_LIBRARY_ROOT} (upload default: {_MEGA_UPLOAD_DEFAULT})")
+    print(f"  drive root: {DRIVE_ROOT_NAME} (configured: {'yes' if _UPLOAD_METHODS['drive'].configured else 'no'})")
     if _MOKURO_REPO is not None:
         print(f"  custom mokuro repo: {_MOKURO_REPO}")
     if _mokuro_pkg is not None:

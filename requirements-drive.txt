@@ -1,0 +1,9 @@
+# Optional Google Drive upload provider.
+# Install only if you want to upload finished volumes to Google Drive:
+#   pip install -r requirements-drive.txt
+# Then authenticate once: python server.py --setup-upload drive
+# (needs a Google Cloud OAuth client_secret.json, or a service-account JSON
+# saved as the drive credentials file).
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.0.0
+google-auth>=2.0.0

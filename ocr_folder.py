@@ -82,7 +82,7 @@ def main() -> int:
     parser.add_argument(
         "--upload-method",
         default=None,
-        help="upload destination: local (default) or mega",
+        help="upload destination: local (default), mega, or drive",
     )
     parser.add_argument(
         "--upload-mega",
@@ -94,8 +94,8 @@ def main() -> int:
     args = parser.parse_args()
 
     method = args.upload_method or ("mega" if args.upload_mega else "local")
-    if method not in ("local", "mega"):
-        sys.exit(f"unknown upload method: {method}")
+    if method not in ("local", "mega", "drive"):
+        sys.exit(f"unknown upload method: {method} (expected local, mega, or drive)")
 
     source = os.path.abspath(os.path.expanduser(args.source_dir))
     if not os.path.isdir(source):
