@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import json
+import queue as _queue
 import shutil
 import time
 import uuid
@@ -658,8 +659,13 @@ async def session_finalize(
                 )
                 await asyncio.sleep(0)
 
+                # Thread-safe queue the upload worker fills with NDJSON
+                # progress frames; drained and yielded live by this generator
+                # so clients see real-time upload progress, not a burst after
+                # every file finishes.
+                ev_queue = _queue.Queue()
+
                 def _upload_batch():
-                    progress_events = []
                     results = []
                     items = [
                         (titled_cbz, f"{file_base}.cbz"),
@@ -690,7 +696,7 @@ async def session_finalize(
                                 last_progress["bytes"] = bytes_done
                                 last_progress["speed"] = speed_bps
                                 last_progress["emitted"] = now
-                                progress_events.append(
+                                ev_queue.put(
                                     _upload_progress_event(
                                         _name, bytes_done, total_bytes, speed_bps,
                                         remote_dir, method,
@@ -740,12 +746,26 @@ async def session_finalize(
                             url=url if ok else None,
                             error=None if ok else (err or "unknown"),
                         )
-                    return results, progress_events
+                    return results
 
-                upload_results, progress_events = await asyncio.to_thread(_upload_batch)
-                for ev in progress_events:
-                    yield ev
-                    await asyncio.sleep(0)
+                upload_task = asyncio.create_task(asyncio.to_thread(_upload_batch))
+                while not upload_task.done():
+                    while True:
+                        try:
+                            ev = ev_queue.get_nowait()
+                        except _queue.Empty:
+                            break
+                        yield ev
+                        await asyncio.sleep(0)
+                    await asyncio.sleep(0.02)
+                upload_results = await upload_task
+                # Drain any frames emitted right at completion.
+                while True:
+                    try:
+                        yield ev_queue.get_nowait()
+                        await asyncio.sleep(0)
+                    except _queue.Empty:
+                        break
                 for r in upload_results:
                     if r["success"]:
                         _log.info(
@@ -780,6 +800,22 @@ async def session_finalize(
                         "upload",
                         f"{session.safe_title}: upload complete ({method_label})",
                     )
+                # Terminal upload state: all files done. The last per-file
+                # entry already carries the final URL; mark the batch finished.
+                _set_upload_state(
+                    session, active=False, method=method,
+                    file=upload_results[-1]["file"] if upload_results else None,
+                    percent=100.0 if all_success else 0.0,
+                    current_bytes=(
+                        sum(r["size"] for r in upload_results if r["success"])
+                        if all_success else 0
+                    ),
+                    total_bytes=sum(r["size"] for r in upload_results),
+                    speed_bps=0, speed_human="—",
+                    remote_path=remote_dir,
+                    url=upload_results[-1].get("url") if upload_results and all_success else None,
+                    error=None if all_success else "one or more files failed",
+                )
 
             session.finalized = True
 

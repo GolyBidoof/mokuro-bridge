@@ -421,13 +421,30 @@ A polling client can wait for a volume to finish by looping on `/health`
 until `busy` is `false`, or by streaming the finalize NDJSON directly and
 waiting for the `done`/`error` stage — the two are complementary.
 
+**Polling cadence.** `/health` is cheap; while the bridge reports `busy:
+true`, poll it fast (e.g. once a second) so a UI notices the instant the
+bridge goes idle — then back off (e.g. 10 s) once `busy: false` returns.
+While *you* are the one running the finalize, streaming its NDJSON (or
+polling `/session/{id}/status`, below) is the tighter loop; `/health` is the
+right way to watch background work started by another client (e.g.
+`ocr_folder.py`).
+
+While a remote upload runs, `GET /session/{id}/status` also carries a live
+`upload` object (same schema as the `upload` field of `upload_progress`
+events below) with the in-flight file's bytes/percent/speed plus the final
+per-file `url` when it completes — handy for clients that poll instead of
+streaming.
+
 ### Progress stream format
 
 `/session/{id}/finalize` streams **NDJSON** — one JSON object per line. Every
 line has a `stage` and `message`; `stage` is one of: `wait_ocr`, `ocr`,
 `assemble`, `pack`, `upload`, `upload_progress`, `cleanup`, `done`, `error`.
 
-`upload_progress` events (per file, every remote method) look like:
+`upload_progress` events are emitted **live** while bytes are actually
+uploading (each file, every remote method) — the stream is not buffered until
+the end, so a client reading the response body gets a smooth 0→100% walk per
+file as the transfer progresses. They look like:
 
 ```json
 {"stage":"upload_progress","message":"My Manga 1巻.cbz: 42.5%",

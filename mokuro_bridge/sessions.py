@@ -22,6 +22,7 @@ class Session:
     lock: threading.Lock = field(default_factory=threading.Lock)
     message: str = "Session started"
     finalized: bool = False
+    upload: Optional[dict] = None   # live upload progress during finalize
 
 _sessions: dict[str, Session] = {}
 _sessions_lock = threading.Lock()
@@ -136,4 +137,5 @@ def session_snapshot(session: Session) -> dict:
             "pages_ocr_pending": max(0, pending),
             "message": session.message,
             "finalized": session.finalized,
+            "upload": session.upload,
         }
