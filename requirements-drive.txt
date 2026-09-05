@@ -3,10 +3,11 @@
 #   pip install -r requirements-drive.txt
 # Then authenticate once: python server.py --setup-upload drive
 # The wizard walks you through creating a free Google Cloud "Desktop app"
-# OAuth client and pasting its Client ID (PKCE flow — no client_secret.json
-# needed). Set DRIVE_CLIENT_ID to preset the client ID, or
-# DRIVE_CLIENT_SECRET_FILE for a full client_secrets.json, or save a
-# service-account JSON as the drive credentials file.
+# OAuth client and pasting its Client ID + Client secret (Google requires
+# the secret at token exchange; it is never stored). Set DRIVE_CLIENT_ID /
+# DRIVE_CLIENT_SECRET to preset them, or DRIVE_CLIENT_SECRET_FILE for a full
+# client_secrets.json, or save a service-account JSON as the drive
+# credentials file.
 google-api-python-client>=2.100.0
 google-auth-oauthlib>=1.0.0
 google-auth>=2.0.0

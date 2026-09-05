@@ -32,28 +32,31 @@ _DRIVE_CONSOLE_GUIDE = (
     "3. If asked, configure the consent screen first:\n"
     "   'User type: External' → name it anything → Save.\n"
     "4. Application type: 'Desktop app'  →  Create.\n"
-    "5. Copy the 'Client ID' (looks like\n"
-    "   xxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com)\n"
-    "   and paste it below. The 'Client secret' is NOT needed."
+    "5. Copy the 'Client ID' and the 'Client secret' from the dialog\n"
+    "   (both look like random strings ending in\n"
+    "   .apps.googleusercontent.com / a short code) and paste them below.\n"
+    "   The dialog closes after you leave it, so copy both before clicking OK."
 )
 
 def _drive_client_id_from_env() -> str:
     """Client ID preset via DRIVE_CLIENT_ID, or '' when unset."""
     return os.environ.get(_DRIVE_CLIENT_ID_ENV, "").strip()
 
-def _drive_flow_config(client_id: str) -> dict:
-    """Build a Google-format client config for the OAuth flow from a client ID.
+def _drive_flow_config(client_id: str, client_secret: str = "") -> dict:
+    """Build a Google-format client config for the OAuth flow.
 
-    PKCE secures the exchange, so no client secret is required for installed
-    apps. client_id may be '' only when a full client_secrets.json was given
-    via DRIVE_CLIENT_SECRET_FILE (handled by the caller before this is called).
+    Google's token endpoint requires the client secret even for installed
+    ("Desktop app") clients — both omitting it and sending an empty string
+    fail with `invalid_request: client_secret is missing`. So the wizard
+    collects the secret too and embeds it here; the library sends it (as
+    HTTP Basic auth) during the code exchange. PKCE still protects the flow.
     """
     return {
         "installed": {
             "client_id": client_id,
             "auth_uri": _DRIVE_AUTH_URI,
             "token_uri": _DRIVE_TOKEN_URI,
-            "client_secret": "",  # installed-app PKCE flow — not required
+            "client_secret": client_secret,
             "redirect_uris": ["http://localhost"],
         }
     }
@@ -88,20 +91,22 @@ def _client_id_is_plausible(client_id: str) -> bool:
         and len(client_id) > 20
     )
 
-def _client_id_exists(client_id: str) -> bool:
-    """Pre-flight: does Google recognize this OAuth client?
+def _drive_client_valid(client_id: str, client_secret: str) -> bool:
+    """Pre-flight: does Google recognize this OAuth client + secret?
 
-    POSTs a deliberately bogus authorization code to the token endpoint.
-    An *unregistered* client is rejected with invalid_client (before the code
-    is ever considered); a *registered* client is rejected with invalid_grant
-    (the code is just wrong — which is expected, we never really exchange one).
-    Network errors raise so the caller can say something useful.
+    POSTs a deliberately bogus authorization code to the token endpoint with
+    the real client_id and client_secret. An *unregistered* client or a wrong
+    secret is rejected with invalid_client; a *valid* client+secret is
+    rejected with invalid_grant (the code is just wrong — which is expected,
+    we never really exchange one). Network errors raise so the caller can say
+    something useful.
     """
     import requests
     resp = requests.post(
         _DRIVE_TOKEN_URI,
         data={
             "client_id": client_id,
+            "client_secret": client_secret,
             "code": "mokuro-bridge-preflight-invalid-code",
             "grant_type": "authorization_code",
             "redirect_uri": "http://localhost",
@@ -113,11 +118,11 @@ def _client_id_exists(client_id: str) -> bool:
     except ValueError:
         err = ""
     if resp.status_code == 200:
-        # Shouldn't happen (bogus code), but treat as "exists" anyway.
+        # Shouldn't happen (bogus code), but treat as "valid" anyway.
         return True
     if err == "invalid_client":
         return False
-    # invalid_grant (real client, bad code) and anything else → client exists.
+    # invalid_grant (valid client, bad code) and anything else → client valid.
     return True
 
 def _drive_creds_source() -> Optional[str]:
@@ -343,20 +348,24 @@ def _drive_upload_file(
         return False, str(exc), None
 
 def _run_setup_drive() -> None:
-    """Guided first-run wizard: create/paste an OAuth client ID, sign in.
+    """Guided first-run wizard: create/paste an OAuth client, sign in.
 
     Google won't let the bridge ship a usable OAuth client — a client only
     works in the project that registered it (anything else fails on Google's
-    consent page with 401 invalid_client). So the wizard:
+    consent page with 401 invalid_client). And Google requires the client
+    secret even for "Desktop app" clients (empty/missing secret →
+    invalid_request: client_secret is missing). So the wizard:
       1. walks you through creating a free "Desktop app" OAuth client in
          Google Cloud Console (with exact links/steps),
-      2. lets you paste just the client ID (no client_secret.json needed —
-         PKCE secures the flow),
-      3. verifies Google actually recognizes the client *before* opening the
-         browser, so a typo/mis-click gives a helpful message instead of a raw
-         Google error page,
-      4. stores the refresh token in DRIVE_CREDS_FILE (0600).
-    DRIVE_CLIENT_ID or DRIVE_CLIENT_SECRET_FILE can preset the client instead.
+      2. lets you paste the Client ID **and** Client secret (no
+         client_secrets.json file needed),
+      3. verifies with Google that the client+secret are valid *before*
+         opening the browser, so a typo/mis-click gives a helpful message
+         instead of a raw Google error page,
+      4. stores the refresh token in DRIVE_CREDS_FILE (0600) — the client
+         secret itself is never persisted.
+    DRIVE_CLIENT_ID / DRIVE_CLIENT_SECRET or DRIVE_CLIENT_SECRET_FILE can
+    preset the client instead.
     """
     from ..util import _ensure_python_deps
 
@@ -389,9 +398,8 @@ def _run_setup_drive() -> None:
         print("Using the client_secrets.json from DRIVE_CLIENT_SECRET_FILE.")
     else:
         client_id = _drive_client_id_from_env()
-        if client_id:
-            print("Using the OAuth client ID from DRIVE_CLIENT_ID.")
-        else:
+        client_secret = os.environ.get("DRIVE_CLIENT_SECRET", "").strip()
+        if not client_id:
             print(_DRIVE_CONSOLE_GUIDE)
             while True:
                 try:
@@ -410,30 +418,40 @@ def _run_setup_drive() -> None:
                         "your OAuth 2.0 Client.\n"
                     )
                     continue
-                print("\nChecking with Google that this client exists…")
-                try:
-                    if not _client_id_exists(client_id):
-                        print(
-                            "\nGoogle doesn't recognize that client ID "
-                            "(error: invalid_client).\n"
-                            "Most likely causes:\n"
-                            "  - the ID was copied wrong (check for spaces or "
-                            "truncation)\n"
-                            "  - it belongs to a different Google Cloud project\n"
-                            "  - the 'OAuth client ID' was created as Web app "
-                            "or another type, not 'Desktop app'\n\n"
-                            "Fix it in Google Cloud Console and paste the ID "
-                            "again."
-                        )
-                        continue
-                except Exception as exc:
-                    print(
-                        f"\nnote: could not reach Google to verify the client "
-                        f"({exc}). Proceeding anyway — if the browser shows "
-                        "'invalid_client', re-run and paste the ID again."
-                    )
                 break
-        client_config = _drive_flow_config(client_id)
+        if not client_secret:
+            try:
+                client_secret = input(
+                    "Paste your OAuth Client secret (from the same "
+                    "Credentials page; leave empty only if your client "
+                    "truly has none): "
+                ).strip()
+            except EOFError:
+                print("\nSetup aborted.")
+                return
+
+        print("\nChecking with Google that this client exists…")
+        try:
+            if not _drive_client_valid(client_id, client_secret):
+                print(
+                    "\nGoogle doesn't recognize that client ID + secret "
+                    "(error: invalid_client).\n"
+                    "Most likely causes:\n"
+                    "  - the ID or secret was copied wrong (check for spaces "
+                    "or truncation)\n"
+                    "  - they belong to a different Google Cloud project\n"
+                    "  - the 'OAuth client ID' was created as Web app or "
+                    "another type, not 'Desktop app'\n\n"
+                    "Fix it in Google Cloud Console and re-run the setup."
+                )
+                return
+        except Exception as exc:
+            print(
+                f"\nnote: could not reach Google to verify the client "
+                f"({exc}). Proceeding anyway — if the browser shows "
+                "'invalid_client', re-run and paste the ID again."
+            )
+        client_config = _drive_flow_config(client_id, client_secret)
 
     flow = InstalledAppFlow.from_client_config(client_config, DRIVE_SCOPES)
     # run_local_server opens the browser, prints "Please visit this URL…",

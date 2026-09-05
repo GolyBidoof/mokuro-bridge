@@ -68,12 +68,14 @@ WEBDAV_CREDS_FILE = _env_path(
 )
 
 # OneDrive (optional destination via MS Graph, msal device-code auth).
+# NOTE: msal reserves 'offline_access' — it's added automatically, so it must
+# NOT appear in the scopes list (msal raises ValueError otherwise).
 ONEDRIVE_ROOT_NAME = os.environ.get("ONEDRIVE_ROOT_NAME", "mokuro-reader")
 ONEDRIVE_CLIENT_ID = os.environ.get("ONEDRIVE_CLIENT_ID", "").strip()
 ONEDRIVE_TOKEN_FILE = _env_path(
     "ONEDRIVE_TOKEN_FILE", Path.home() / ".config" / "mokuro-bridge" / "onedrive_token.json"
 )
-_ONEDRIVE_SCOPES = ["https://graph.microsoft.com/Files.ReadWrite", "offline_access"]
+_ONEDRIVE_SCOPES = ["https://graph.microsoft.com/Files.ReadWrite"]
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 # Chunked OCR flush: pages are grouped into batches so the queue drains in

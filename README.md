@@ -156,22 +156,25 @@ the current default and never change it.
    python server.py --setup-upload drive
    ```
    It prints the exact steps (Google Cloud Console → Credentials → create a
-   **Desktop app** OAuth client), you paste just the **Client ID** (no
-   `client_secret.json` needed), it verifies with Google that the client is
-   valid, opens your browser once so you can sign in to the account whose
-   Drive you want to use, and stores a refresh token at
-   `~/.config/mokuro-bridge/drive_credentials.json` (0600). It installs the
-   Google client libraries when needed (or run
-   `pip install -r requirements-drive.txt` yourself).
+   **Desktop app** OAuth client). You paste the **Client ID** and **Client
+   secret** (no `client_secrets.json` file needed — PKCE still protects the
+   flow, but Google requires the secret at token exchange). The wizard
+   verifies with Google that the client is valid, opens your browser once so
+   you can sign in to the account whose Drive you want to use, and stores a
+   refresh token at `~/.config/mokuro-bridge/drive_credentials.json` (0600) —
+   the client secret itself is never saved. It installs the Google client
+   libraries when needed (or run `pip install -r requirements-drive.txt`
+   yourself).
 
    > **Why a one-time client?** Google only lets an OAuth client run in the
    > project that registered it — a client shared across users fails with
    > `401 invalid_client`. So each user needs their own (free, ~2 min). The
-   > wizard pre-checks your pasted ID so a typo gives a clear message instead
-   > of a raw Google error page.
+   > wizard pre-checks your pasted ID+secret so a typo gives a clear message
+   > instead of a raw Google error page.
 
-   - **Alternative:** set `DRIVE_CLIENT_ID=<your client id>` (or point
-     `DRIVE_CLIENT_SECRET_FILE` at a downloaded `client_secret.json`) to skip
+   - **Alternative:** set `DRIVE_CLIENT_ID=<your client id>` and
+     `DRIVE_CLIENT_SECRET=<your client secret>` (or point
+     `DRIVE_CLIENT_SECRET_FILE` at a downloaded `client_secrets.json`) to skip
      the paste step.
    - **Service account:** save a service-account JSON at that same
      `DRIVE_CREDS_FILE` path. Note: files land in the service account's own
@@ -346,7 +349,8 @@ set -a; source .env; set +a        # macOS / Linux
 | `DRIVE_ROOT_NAME` | `mokuro-reader` | Google Drive folder (at My Drive root) that receives series folders. |
 | `DRIVE_CREDS_FILE` | `~/.config/mokuro-bridge/drive_credentials.json` | Google OAuth token or service-account JSON (0600). |
 | `DRIVE_CLIENT_ID` | *(none)* | Your Google Cloud OAuth client ID (Desktop app) — used by `--setup-upload drive` instead of asking you to paste it. |
-| `DRIVE_CLIENT_SECRET_FILE` | *(none)* | Optional: path to your Google OAuth `client_secret.json` for `--setup-upload drive` (not needed — the wizard uses a PKCE flow). |
+| `DRIVE_CLIENT_SECRET` | *(none)* | Client secret for the above (required by Google's token endpoint; never stored). |
+| `DRIVE_CLIENT_SECRET_FILE` | *(none)* | Optional: path to a downloaded Google OAuth `client_secrets.json` (takes precedence over the ID/secret env vars). |
 | `ONEDRIVE_CLIENT_ID` | *(none)* | Azure app (public client) ID for OneDrive. |
 | `ONEDRIVE_ROOT_NAME` | `mokuro-reader` | OneDrive folder (at your OneDrive root) that receives series folders. |
 | `ONEDRIVE_TOKEN_FILE` | `~/.config/mokuro-bridge/onedrive_token.json` | msal token cache (0600). |
