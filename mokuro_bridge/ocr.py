@@ -10,6 +10,7 @@ from typing import Optional
 
 from .config import IMAGE_EXTENSIONS, _OCR_CHUNK_SIZE, _OCR_IDLE_FLUSH_S
 from .sessions import Session, _persist_session, _session_or_none, session_snapshot
+from . import log as _log
 
 # ── OCR engine ────────────────────────────────────────────────────────
 # By default the bridge uses the stock mokuro package from PyPI
@@ -223,15 +224,15 @@ def _process_ocr_batch(items: list[tuple[str, str]]) -> None:
     mpocr = gen.mpocr
     use_fork_api = _fork_supported()
 
-    print(
-        f"[mokuro-bridge] OCR flush {len(items)} page(s)"
-        f" (engine: {'fork batch' if use_fork_api else 'stock'}): "
+    _log.info(
+        "ocr",
+        f"OCR flush {len(items)} page(s) (engine: {'fork batch' if use_fork_api else 'stock'}): "
         + ", ".join(f"{sid[:6]}/{fn}" for sid, fn in items[:6])
-        + ("…" if len(items) > 6 else "")
+        + ("…" if len(items) > 6 else ""),
     )
 
     if use_fork_api:
-        _ocr_batch_fork(items, gen, mpocr)
+        _ocr_batch_fork(items, gen, mpocr, on_progress_cb=_log.progress)
     else:
         _ocr_batch_stock(items, gen, mpocr)
 
@@ -251,8 +252,13 @@ def _ocr_batch_stock(items: list[tuple[str, str]], gen, mpocr) -> None:
         except Exception as e:
             _mark_page_failed(session, filename, e)
 
-def _ocr_batch_fork(items: list[tuple[str, str]], gen, mpocr) -> None:
-    """Fork mokuro: detect all pages, then one batched recognize_text call."""
+def _ocr_batch_fork(
+    items: list[tuple[str, str]],
+    gen,
+    mpocr,
+    on_progress_cb=None,
+) -> None:
+    """Fork mokuro: detect all pages, then batched recognize_text calls."""
     utils_mod = _mokuro_submodule("utils")
     imread = utils_mod.imread
     Volume = _mokuro_submodule("volume").Volume
@@ -286,19 +292,34 @@ def _ocr_batch_fork(items: list[tuple[str, str]], gen, mpocr) -> None:
     if not page_results:
         return
 
+    # Recognize crops in sub-batches of ocr_batch_size. A single giant
+    # recognize_text(all_crops) call over hundreds of crops stalls on MPS
+    # (one enormous tensor→list decode, no progress) — chunking keeps each
+    # call bounded and lets us report progress per sub-batch.
+    ocr_batch_size = max(1, int(ocr_batch_size))
     try:
-        texts = mpocr.recognize_text(
-            all_crops,
-            batch_size=ocr_batch_size,
-            num_beams=1,
-        )
-        for global_idx, text in enumerate(texts):
-            sid, fname, local_idx = crop_map[global_idx]
-            result = page_results.get((sid, fname))
-            if result is None:
-                continue
-            blk_idx, line_idx = crop_meta_map[(sid, fname, local_idx)]
-            result["blocks"][blk_idx]["lines"][line_idx] += text
+        for sub_start in range(0, len(all_crops), ocr_batch_size):
+            sub_crops = all_crops[sub_start : sub_start + ocr_batch_size]
+            sub_map = crop_map[sub_start : sub_start + ocr_batch_size]
+            _log.progress(
+                "ocr",
+                f"Recognizing crops {sub_start + 1}–{min(sub_start + len(sub_crops), len(all_crops))}"
+                f" of {len(all_crops)}…",
+            )
+            texts = mpocr.recognize_text(
+                sub_crops,
+                batch_size=ocr_batch_size,
+                num_beams=1,
+            )
+            for local_idx, text in enumerate(texts):
+                sid, fname, crop_idx = sub_map[local_idx]
+                result = page_results.get((sid, fname))
+                if result is None:
+                    continue
+                blk_idx, line_idx = crop_meta_map[(sid, fname, crop_idx)]
+                result["blocks"][blk_idx]["lines"][line_idx] += text
+            if on_progress_cb is not None:
+                on_progress_cb(min(sub_start + len(sub_crops), len(all_crops)), len(all_crops))
     except Exception as e:
         for (sid, fname) in page_results:
             session = _session_or_none(sid)
@@ -326,23 +347,27 @@ def _save_page_result(session: Session, volume, filename: str, result: dict) -> 
         total = len(session.pages_received)
         session.message = f"OCR {done}/{total} pages"
     _persist_session(session)
+    _log.progress(
+        "ocr",
+        f"{session.safe_title}: OCR {done}/{total} pages",
+    )
 
 def _mark_page_failed(session: Session, filename: str, error: Exception) -> None:
     with session.lock:
         session.pages_ocr_failed.add(filename)
         session.message = f"OCR failed on {filename}: {error}"
-    print(f"[mokuro-bridge] OCR error on {filename}: {error}")
+    _log.error("ocr", f"{session.safe_title}: page {filename} failed: {error}")
     _persist_session(session)
 
 def _ocr_worker_loop() -> None:
     try:
         _get_generator()
-        print(
-            f"[mokuro-bridge] OCR flusher ready (chunk={_OCR_CHUNK_SIZE}, "
-            f"idle={_OCR_IDLE_FLUSH_S}s)"
+        _log.info(
+            "ocr",
+            f"OCR engine ready (chunk={_OCR_CHUNK_SIZE}, idle={_OCR_IDLE_FLUSH_S}s)",
         )
     except Exception as e:
-        print(f"[mokuro-bridge] OCR flusher model init error: {e}")
+        _log.error("ocr", f"OCR engine model init error: {e}")
 
     while True:
         batch: list[tuple[str, str]] = []
@@ -368,6 +393,7 @@ def _ocr_worker_loop() -> None:
                 _ocr_processing.add(item)
 
         try:
+            _log.progress("ocr", f"Dispatching OCR batch of {len(batch)} page(s)…")
             _process_ocr_batch(batch)
         finally:
             with _ocr_cv:
