@@ -455,10 +455,13 @@ of discovering each file's size only when that file starts:
 {"stage":"upload","message":"Uploading to MEGA… (My Manga/)",
  "remote_path":"/Root/mokuro-reader/My Manga","method":"mega",
  "files":[
+   {"file":"My Manga 1巻.webp","total_bytes":512000},
    {"file":"My Manga 1巻.cbz","total_bytes":29125632},
-   {"file":"My Manga 1巻.mokuro","total_bytes":4128768},
-   {"file":"My Manga 1巻.webp","total_bytes":512000}]}
+   {"file":"My Manga 1巻.mokuro","total_bytes":4128768}]}
 ```
+The cover `.webp` is listed (and uploaded) first: it is a small copy of the
+first page, so it completes almost instantly — giving immediate visible
+progress and an early file URL before the large archive transfers.
 
 ```json
 {"stage":"upload_progress","message":"My Manga 1巻.cbz: 42.5%",
