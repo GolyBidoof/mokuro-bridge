@@ -453,6 +453,86 @@ async def session_page_local(
     snap["copied"] = copied
     return JSONResponse(snap)
 
+@app.post("/session/{session_id}/cover")
+async def session_cover(
+    session_id: str,
+    cover: UploadFile = File(...),
+    upload_method: str = Form(""),
+    local_dir: str = Form(""),
+):
+    """Early cover upload: store/upload <title>.webp (the cover — a copy of
+    the volume's first page) *before* OCR finishes, so the destination
+    receives something immediately and the client can show upload progress
+    early. Records session.cover_uploaded so a later finalize skips
+    re-uploading the cover to the same destination. Returns JSON (not NDJSON):
+    {ok, method, file, remote_path|path, url|None, size}.
+    """
+    session = _get_session(session_id)
+    if session.finalized:
+        raise HTTPException(status_code=400, detail="Session already finalized")
+    method = resolve_upload_method(str(upload_method).strip() or None)
+    data = await cover.read()
+    file_base = session.safe_title
+    remote_name = f"{file_base}.webp"
+    series = series_title_from_volume(session.safe_title)
+    size = len(data)
+
+    if method == "local":
+        base = _effective_local_output_base(local_dir) or OUTPUT_DIR
+        dest_dir = base / series
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / remote_name
+        dest.write_bytes(data)
+        rec = {"method": "local", "file": remote_name, "path": str(dest), "size": size}
+        with session.lock:
+            session.cover_uploaded = rec
+        return JSONResponse({"ok": True, **rec})
+
+    # Remote upload: reuse upload_file so the URL/session-state plumbing is
+    # identical to finalize. The temp file uses a .uploadpart suffix so it can
+    # never be mistaken for a page by OCR or finalize's image scan.
+    if method == "mega":
+        remote_dir = f"{MEGA_LIBRARY_ROOT}/{series}"
+    elif method == "drive":
+        remote_dir = f"{DRIVE_ROOT_NAME}/{series}"
+    elif method == "onedrive":
+        remote_dir = f"{ONEDRIVE_ROOT_NAME}/{series}"
+    else:
+        raise HTTPException(status_code=400, detail=f"unknown upload method: {method}")
+
+    session.vol_dir.mkdir(parents=True, exist_ok=True)
+    tmp = session.vol_dir / f"{remote_name}.uploadpart"
+    tmp.write_bytes(data)
+
+    def _prog(bytes_done, total_bytes, speed_bps):
+        pct = round(bytes_done * 100.0 / total_bytes, 2) if total_bytes else 100.0
+        speed_human = (
+            f"{speed_bps / 1048576:.2f} MiB/s" if speed_bps >= 1048576
+            else f"{speed_bps / 1024:.1f} KiB/s" if speed_bps else "—"
+        )
+        _set_upload_state(
+            session, active=True, method=method, file=remote_name,
+            current_bytes=bytes_done, total_bytes=total_bytes, percent=pct,
+            speed_bps=speed_bps, speed_human=speed_human, remote_path=remote_dir,
+        )
+
+    try:
+        ok, err, url = await asyncio.to_thread(upload_file, method, tmp, remote_dir, _prog, "overwrite")
+        if not ok:
+            raise HTTPException(status_code=502, detail=f"cover upload failed: {err or 'unknown'}")
+        rec = {
+            "method": method, "file": remote_name,
+            "remote_path": remote_dir, "url": url, "size": size,
+        }
+        with session.lock:
+            session.cover_uploaded = rec
+        return JSONResponse({"ok": True, **rec})
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
 @app.get("/sessions")
 async def list_sessions():
     """Active pipelined sessions (useful when several capture clients run at once)."""
@@ -687,6 +767,23 @@ async def session_finalize(
                         (titled_cbz, f"{file_base}.cbz"),
                         (titled_mokuro, f"{file_base}.mokuro"),
                     ]
+                    # The cover may already have been pushed early via
+                    # POST /session/{id}/cover — don't upload it again.
+                    cover_pre = None
+                    with session.lock:
+                        if session.cover_uploaded and session.cover_uploaded.get("method") == method:
+                            cover_pre = dict(session.cover_uploaded)
+                    if cover_pre:
+                        items = [it for it in items if not it[1].endswith(".webp")]
+                        results.append({
+                            "file": cover_pre.get("file") or f"{file_base}.webp",
+                            "size": cover_pre.get("size") or titled_cover.stat().st_size,
+                            "success": True,
+                            "stderr": None,
+                            "url": cover_pre.get("url"),
+                            "duration_s": 0.0,
+                            "early": True,
+                        })
                     for local_path, remote_name in items:
                         start = time.monotonic()
                         last_progress = {"bytes": 0, "speed": 0, "emitted": 0.0}

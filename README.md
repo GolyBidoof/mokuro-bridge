@@ -363,7 +363,8 @@ set -a; source .env; set +a        # macOS / Linux
 | `POST` | `/session/resume` | `title`, `source_dir` — OCR a folder on disk (what `ocr_folder.py` uses). |
 | `POST` | `/session/{id}/page` | Multipart `page` image + `filename` (browser capture). |
 | `POST` | `/session/{id}/page-local` | `path` — ingest an image already on this machine (headless scrapers). |
-| `GET` | `/session/{id}/status` | Capture/OCR progress snapshot. |
+| `POST` | `/session/{id}/cover` | Multipart `cover` image + `upload_method`, `local_dir` — **early cover upload**: store/upload `<title>.webp` (a copy of the first page) to the destination before OCR finishes. Finalize then skips re-uploading the cover to the same destination. Returns JSON `{ok, method, file, path|remote_path, url, size}`. |
+| `GET` | `/session/{id}/status` | Capture/OCR progress snapshot (includes live `upload` and `cover_uploaded` state). |
 | `GET` | `/sessions` | All live sessions. |
 | `POST` | `/session/{id}/finalize` | `upload_method`, `local_dir`, `delete_after_upload` → NDJSON progress stream. |
 

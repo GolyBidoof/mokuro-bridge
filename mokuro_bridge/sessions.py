@@ -23,6 +23,7 @@ class Session:
     message: str = "Session started"
     finalized: bool = False
     upload: Optional[dict] = None   # live upload progress during finalize
+    cover_uploaded: Optional[dict] = None  # {method, url?, path?} once the cover .webp was pushed early
 
 _sessions: dict[str, Session] = {}
 _sessions_lock = threading.Lock()
@@ -138,4 +139,5 @@ def session_snapshot(session: Session) -> dict:
             "message": session.message,
             "finalized": session.finalized,
             "upload": session.upload,
+            "cover_uploaded": session.cover_uploaded,
         }
