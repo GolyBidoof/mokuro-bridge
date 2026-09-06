@@ -72,7 +72,7 @@ release may not work yet — PyTorch wheels often lag new Python versions. If
 python server.py
 ```
 
-You'll see `mokuro-bridge v0.3.0 on http://127.0.0.1:62642`.
+You'll see `mokuro-bridge v0.4.0 on http://127.0.0.1:62642`.
 
 **3. OCR a folder of pages you already have**
 
