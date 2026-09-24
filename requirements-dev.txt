@@ -1,0 +1,4 @@
+# Test-only dependencies. The suite never needs mokuro, torch or any upload
+# provider: it exercises the bridge itself against local stub servers.
+-r requirements.txt
+pytest>=8.0

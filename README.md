@@ -72,7 +72,7 @@ release may not work yet — PyTorch wheels often lag new Python versions. If
 python server.py
 ```
 
-You'll see `mokuro-bridge v0.4.0 on http://127.0.0.1:62642`.
+You'll see `mokuro-bridge v0.5.0 on http://127.0.0.1:62642`.
 
 **3. OCR a folder of pages you already have**
 
@@ -315,6 +315,33 @@ take longer. Use this if you want zero setup or prefer the upstream package.
 
 ---
 
+## Page-fetch accelerator
+
+Chrome allows only 6 concurrent HTTP/1.1 connections per *origin*, and an origin
+is scheme + host + **port**. BookWalker's page CDN is a single host and refuses to
+negotiate HTTP/2, so a viewer download is pinned to 6 sockets however fast the
+connection is.
+
+Because the port is part of the origin, the bridge opens a range of extra
+localhost ports that each serve the same small proxy. The browser treats every
+port as a fresh origin, so each is worth 6 more sockets, while the bridge does
+the fetching under no browser limit at all.
+
+Nothing needs configuring. The bridge advertises whichever ports it managed to
+bind on `/health` as `fetchProxyPorts`, and the userscript picks them up on its
+own. The startup banner reports the range:
+
+```
+  fetch proxy: 48 extra port(s) 63443-63490  ->  288 browser sockets for the downloader
+```
+
+Downloading never depends on the bridge. With it stopped, the userscript falls
+back to its own page and background-context lanes. Set
+`MOKURO_BRIDGE_FETCH_PORTS=0` to turn the feature off, or lower it if something
+else wants those ports.
+
+---
+
 ## Configuration
 
 Everything is environment variables — the server does **not** read a `.env`
@@ -357,7 +384,7 @@ set -a; source .env; set +a        # macOS / Linux
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Dependency/config status (mokuro, engines, creds, upload methods…). |
+| `GET` | `/health` | Dependency/config status (mokuro, engines, creds, upload methods…), including `fetchProxyPorts` for the [page-fetch accelerator](#page-fetch-accelerator). |
 | `GET` | `/upload-methods` | Configured upload methods + their current folder (JSON). |
 | `POST` | `/session/start` | `title`, `reuse_existing` → new session id. |
 | `POST` | `/session/resume` | `title`, `source_dir` — OCR a folder on disk (what `ocr_folder.py` uses). |
@@ -554,10 +581,19 @@ origin as long as that origin is in `CORS_ORIGINS`.
 ## Development
 
 ```bash
+python3 -m pytest                      # tests; no mokuro, torch or network needed
 python3 -m py_compile server.py        # syntax check
 ./run.sh                               # run with default config
 UVICORN_RELOAD=1 python3 server.py     # dev auto-reload
 ```
+
+The test suite covers the fetch accelerator end to end against a local stub CDN,
+plus port binding, the allow-list guard and the environment defaults. Install
+`requirements-dev.txt` to run it.
+
+Note that `UVICORN_RELOAD=1` and the fetch proxy are mutually exclusive: the
+reloader spawns a second process that would fight over the extra ports, so the
+proxy stays off when reload is on.
 
 ## License
 

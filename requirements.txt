@@ -2,6 +2,10 @@
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 python-multipart>=0.0.12
+# Page-fetch accelerator: serves the CDN proxy on extra localhost ports
+# (mokuro_bridge/fetchproxy.py). Usually already present via FastAPI's
+# ecosystem, but relied on directly now.
+httpx>=0.27.0
 
 # ── OS credential store (optional but recommended) ─────────────────────
 # Enables storing MEGA credentials in the system keychain / credential

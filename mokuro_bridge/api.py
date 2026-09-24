@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import APP_NAME, __version__
+from . import fetchproxy as _fetchproxy
 from . import log as _log
 from .config import (
     CORS_ORIGINS,
@@ -1056,6 +1057,9 @@ async def health():
         "work_dir": str(WORK_DIR),
         "output_dir": str(OUTPUT_DIR),
         "cors_origins": CORS_ORIGINS,
+        # Extra ports the downloader can fetch pages through — each is a separate
+        # browser origin worth 6 more sockets. See mokuro_bridge/fetchproxy.py.
+        "fetchProxyPorts": list(_fetchproxy.ACTIVE_PORTS),
         "active_sessions": len(_sessions),
         "ocr_chunk_size": _OCR_CHUNK_SIZE,
         "ocr_idle_flush_s": _OCR_IDLE_FLUSH_S,
