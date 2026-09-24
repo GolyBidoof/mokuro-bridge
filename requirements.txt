@@ -13,7 +13,11 @@ httpx>=0.27.0
 # Without it, credentials are kept in a plain 0600 file instead.
 keyring>=23.13
 
-# ── OCR engine ─────────────────────────────────────────────────────────
-# Vanilla mokuro from PyPI. If you run a custom mokuro checkout instead,
-# set MOKURO_REPO=/path/to/checkout and this line is not needed.
-mokuro>=0.2.0   # 0.2+ emits the .mokuro format reader.mokuro.app reads
+# ── OCR engine: NOT installed here ─────────────────────────────────────
+# mokuro pulls in PyTorch, which is several GB, and the bridge runs fine
+# without it: page capture, the fetch accelerator and every upload provider
+# work, and /health reports mokuro_installed:false. OCR needs an engine, so
+# install one when you want it:
+#
+#   pip install -r requirements-ocr.txt     # stock mokuro from PyPI
+#   export MOKURO_REPO=/path/to/checkout    # or a faster fork checkout

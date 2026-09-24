@@ -1,0 +1,12 @@
+# Optional OCR engine. Kept out of requirements.txt because mokuro depends on
+# PyTorch, which is several GB and unnecessary for capture, the fetch
+# accelerator or uploading.
+#
+#   pip install -r requirements-ocr.txt
+#
+# Or use a custom mokuro checkout instead and skip this file entirely:
+#   export MOKURO_REPO=/path/to/mokuro
+#
+# 0.2+ emits the .mokuro format reader.mokuro.app reads.
+-r requirements.txt
+mokuro>=0.2.0

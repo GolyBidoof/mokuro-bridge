@@ -37,10 +37,21 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-That one `pip install` brings in everything the server needs *and* the OCR
-engine: `fastapi`, `uvicorn`, `python-multipart`, `keyring` (for OS keychain
-support) and `mokuro` (pulls PyTorch — the big one; first install takes a
-while and a few GB of disk).
+The base install is small: `fastapi`, `uvicorn`, `python-multipart`, `httpx`
+and `keyring` (for OS keychain support). That runs the server, page capture,
+the fetch accelerator and every upload provider.
+
+**The OCR engine is a separate install.** `mokuro` depends on PyTorch, which is
+several GB, so it is not in the base requirements. The bridge runs without it —
+`/health` simply reports `mokuro_installed: false` and only OCR is unavailable.
+When you want OCR, install an engine:
+
+```bash
+pip install -r requirements-ocr.txt     # stock mokuro from PyPI
+```
+
+or point the bridge at a fork checkout with `MOKURO_REPO` (see
+[Choosing a mokuro engine](#choosing-a-mokuro-engine)).
 
 **Cloud uploads are opt-in, including their dependencies.** The base install
 has none of the cloud libraries. Each provider's setup wizard will detect the
@@ -60,8 +71,8 @@ release may not work yet — PyTorch wheels often lag new Python versions. If
 > `mokuro` package or [a custom mokuro fork](https://github.com/GolyBidoof/mokuro)
 > with a faster batch OCR API. The fork is the **recommended** choice — see
 > [Choosing a mokuro engine](#choosing-a-mokuro-engine). For a quick start,
-> the stock package is fine: keep the `mokuro` line above and skip ahead.
-> To use the fork, leave the `mokuro` line out and follow that section.
+> the stock package is fine: install `requirements-ocr.txt` and skip ahead.
+> To use the fork, skip that file and follow that section instead.
 
 **2. Start the bridge**
 
@@ -72,7 +83,7 @@ release may not work yet — PyTorch wheels often lag new Python versions. If
 python server.py
 ```
 
-You'll see `mokuro-bridge v0.5.0 on http://127.0.0.1:62642`.
+You'll see `mokuro-bridge v0.5.1 on http://127.0.0.1:62642`.
 
 **3. OCR a folder of pages you already have**
 
@@ -577,7 +588,7 @@ origin as long as that origin is in `CORS_ORIGINS`.
 
 | Symptom | Fix |
 |---|---|
-| `mokuro_installed: false` in `/health` | `pip install -r requirements.txt` should have installed mokuro. Otherwise `pip install mokuro` or set `MOKURO_REPO` to a checkout. |
+| `mokuro_installed: false` in `/health` | Expected on a base install: the OCR engine is a separate step. Run `pip install -r requirements-ocr.txt`, or set `MOKURO_REPO` to a fork checkout. Capture, the fetch accelerator and uploads all work without it. |
 | `mega_configured: false` | Run `python server.py --setup-upload mega` (stores in your OS keychain/credential store or a 0600 file), export `MEGA_EMAIL`/`MEGA_PASSWORD`, or use `./setup-keychain.sh` (macOS). On headless Linux, keychain storage needs a Secret Service daemon (gnome-keyring). |
 | Upload fails with `partial_upload` | Check the `stderr` in the NDJSON error frame. Make sure the destination is creatable by your account — the bridge creates the `mokuro-reader` folder automatically. |
 | OCR is slow | Normal without a GPU. Raise `OCR_CHUNK_SIZE` / `OCR_IDLE_FLUSH_S`, or use the batch-OCR fork via `MOKURO_REPO`. First run downloads the model. |

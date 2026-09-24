@@ -1,4 +1,5 @@
-# Test-only dependencies. The suite never needs mokuro, torch or any upload
+# Test-only dependencies. Deliberately builds on the base requirements, which no
+# longer include the OCR engine: the suite is meant to pass with no mokuro. The suite never needs mokuro, torch or any upload
 # provider: it exercises the bridge itself against local stub servers.
 -r requirements.txt
 pytest>=8.0
