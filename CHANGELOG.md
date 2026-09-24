@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.5.2
+
+Two install failures reported from the field. Both are diagnosed in the README
+now, and one is handled by the server itself.
+
+### Added
+
+- `server.py` prints an actionable message when a base dependency is missing,
+  instead of a bare traceback. It names the interpreter that failed, gives the
+  matching `-m pip install` line, and points at the usual cause: installing into
+  one Python and running another.
+
+### Documented
+
+- `No space left on device` while pip builds a wheel is normally `$TMPDIR`, not
+  the disk. Many distros mount `/tmp` as a small tmpfs, so `df -h /` reports a
+  different filesystem and the machine genuinely has free space. Building
+  `unidic-lite`, which ships an sdist and no wheel, unpacks about 45 MB of
+  dictionary into it. The fix is `TMPDIR=~/.cache/pip-tmp pip install ...`.
+- `ModuleNotFoundError: No module named 'fastapi'` means pip targeted a
+  different Python. Use `python3 -m pip` rather than a bare `pip`, and activate
+  the virtualenv in every new terminal.
+
+### Notes
+
+- Both failures come from the OCR engine's dependency tree, which the base
+  install no longer contains as of v0.5.1. Installing the bridge on its own now
+  builds nothing from source.
+
 ## v0.5.1
 
 The OCR engine is no longer a base dependency.

@@ -83,7 +83,7 @@ release may not work yet — PyTorch wheels often lag new Python versions. If
 python server.py
 ```
 
-You'll see `mokuro-bridge v0.5.1 on http://127.0.0.1:62642`.
+You'll see `mokuro-bridge v0.5.2 on http://127.0.0.1:62642`.
 
 **3. OCR a folder of pages you already have**
 
@@ -594,7 +594,9 @@ origin as long as that origin is in `CORS_ORIGINS`.
 | OCR is slow | Normal without a GPU. Raise `OCR_CHUNK_SIZE` / `OCR_IDLE_FLUSH_S`, or use the batch-OCR fork via `MOKURO_REPO`. First run downloads the model. |
 | Port `62642` already in use | Another process holds it. Stop it, or pick another port with `MOKURO_BRIDGE_PORT=62643 ./run.sh`. If an older launchd auto-start agent is running: `launchctl bootout gui/$(id -u)/com.mokuro-bridge` (macOS). |
 | `OSError: Too many open files` on accept(), or ECONNRESET mid-download | Each page in flight holds a descriptor on both sides of the proxy, so the bridge raises `RLIMIT_NOFILE` at startup (see [Page-fetch accelerator](#page-fetch-accelerator)). If it still happens, raise the limit in your shell before starting (`ulimit -n 8192`), or lower `MOKURO_BRIDGE_FETCH_PORTS`. |
-| reader can't see your `output/` folder | Local import only works in desktop Chromium (Chrome, Edge, Brave, Opera). In Safari/Firefox, upload to a cloud provider and connect it inside the reader, or drag a single series folder into the app. |
+| `ModuleNotFoundError: No module named 'fastapi'` (or `uvicorn`, `httpx`) | The install went to a different Python than the one running `server.py`. Confirm `python3 -c "import sys; print(sys.executable)"` matches `python3 -m pip -V`, then install with `python3 -m pip install -r requirements.txt` rather than a bare `pip`. Activate the virtualenv in **every** new terminal. |
+| `error: could not write to 'build/...'` / `No space left on device` while pip builds a wheel | This is almost always `$TMPDIR` rather than your disk. Many distros mount `/tmp` as a small tmpfs, and `df -h /` reports a different filesystem, so the machine really does have free space. Building `unidic-lite`, which ships no wheel, unpacks ~45 MB of dictionary there. Give pip real storage: `mkdir -p ~/.cache/pip-tmp && TMPDIR=~/.cache/pip-tmp pip install -r requirements-ocr.txt`. Also check `df -i` for inode exhaustion. Note that a tiny package failing the same way means the filesystem was already full before it started. |
+| | reader can't see your `output/` folder | Local import only works in desktop Chromium (Chrome, Edge, Brave, Opera). In Safari/Firefox, upload to a cloud provider and connect it inside the reader, or drag a single series folder into the app. |
 
 ---
 

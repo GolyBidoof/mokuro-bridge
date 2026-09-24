@@ -31,6 +31,7 @@ Optional: megatools + MEGA credentials for uploads.
 from __future__ import annotations
 
 import os
+import sys
 
 # Quiet transformers (model-load banners, "generation flags not valid", …)
 # before anything imports it — must be set before transformers is imported.
@@ -38,7 +39,21 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 from mokuro_bridge import APP_NAME, __version__  # noqa: F401  (module-level compat)
-from mokuro_bridge.api import app
+
+try:
+    from mokuro_bridge.api import app
+except ModuleNotFoundError as exc:
+    # The commonest first-run failure is installing into one Python and running
+    # another, which a bare "No module named 'fastapi'" hides completely.
+    _missing = getattr(exc, "name", None) or "a dependency"
+    raise SystemExit(
+        f"\n  {APP_NAME} cannot start: {_missing} is not installed for this Python.\n"
+        f"\n  interpreter: {sys.executable}\n"
+        f"  install with: {sys.executable} -m pip install -r requirements.txt\n"
+        "\n  If you already installed the requirements, pip targeted a different\n"
+        "  Python. Prefer `python3 -m pip` over a bare `pip`, and activate the\n"
+        "  virtualenv in every new terminal.\n"
+    ) from None
 from mokuro_bridge.config import (
     OUTPUT_DIR,
     WORK_DIR,
