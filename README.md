@@ -335,6 +335,14 @@ own. The startup banner reports the range:
   fetch proxy: 48 extra port(s) 63443-63490  ->  288 browser sockets for the downloader
 ```
 
+The proxy needs a file descriptor on each side of the bridge for every page in
+flight, so 48 ports at 6 sockets is roughly 600 descriptors at peak. The bridge
+raises its `RLIMIT_NOFILE` at startup to cover that, which matters on macOS: a
+launchd agent starts with a soft limit of 256, and running out shows up as
+`OSError: Too many open files` on `accept()` and ECONNRESET in the browser, with
+nothing pointing at a ulimit. If you would rather not raise it, lower
+`MOKURO_BRIDGE_FETCH_PORTS` instead; each port costs about 12 descriptors.
+
 Downloading never depends on the bridge. With it stopped, the userscript falls
 back to its own page and background-context lanes. Set
 `MOKURO_BRIDGE_FETCH_PORTS=0` to turn the feature off, or lower it if something
@@ -574,6 +582,7 @@ origin as long as that origin is in `CORS_ORIGINS`.
 | Upload fails with `partial_upload` | Check the `stderr` in the NDJSON error frame. Make sure the destination is creatable by your account — the bridge creates the `mokuro-reader` folder automatically. |
 | OCR is slow | Normal without a GPU. Raise `OCR_CHUNK_SIZE` / `OCR_IDLE_FLUSH_S`, or use the batch-OCR fork via `MOKURO_REPO`. First run downloads the model. |
 | Port `62642` already in use | Another process holds it. Stop it, or pick another port with `MOKURO_BRIDGE_PORT=62643 ./run.sh`. If an older launchd auto-start agent is running: `launchctl bootout gui/$(id -u)/com.mokuro-bridge` (macOS). |
+| `OSError: Too many open files` on accept(), or ECONNRESET mid-download | Each page in flight holds a descriptor on both sides of the proxy, so the bridge raises `RLIMIT_NOFILE` at startup (see [Page-fetch accelerator](#page-fetch-accelerator)). If it still happens, raise the limit in your shell before starting (`ulimit -n 8192`), or lower `MOKURO_BRIDGE_FETCH_PORTS`. |
 | reader can't see your `output/` folder | Local import only works in desktop Chromium (Chrome, Edge, Brave, Opera). In Safari/Firefox, upload to a cloud provider and connect it inside the reader, or drag a single series folder into the app. |
 
 ---
