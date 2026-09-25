@@ -6,9 +6,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+def _chmod_fd_private(fd: int, mode: int = 0o600) -> None:
+    """Best-effort POSIX mode setting for an open private file.
+
+    ``os.fchmod`` is not available on standard Windows builds.  The descriptor
+    itself is already created with the private mode on POSIX, so unsupported
+    chmod is harmless there; real permission errors remain fail-closed.
+    """
+    try:
+        os.fchmod(fd, mode)
+    except (AttributeError, NotImplementedError):
+        return
+
+
 def _env_path(name: str, default: Path) -> Path:
     raw = os.environ.get(name, "").strip()
-    return Path(raw).expanduser() if raw else default
+    return Path(raw).expanduser().resolve() if raw else Path(default).expanduser().resolve()
 
 def _truthy(value: str | None) -> bool:
     """Parse a form/env string as boolean; unset/empty → False."""

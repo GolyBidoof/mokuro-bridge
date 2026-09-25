@@ -59,6 +59,7 @@ def finalize(url: str, session_id: str, upload_method: str, delete: bool, local_
     body = urllib.parse.urlencode(fields).encode()
     req = urllib.request.Request(f"{url}/session/{session_id}/finalize", data=body)
     final = {}
+    terminal_seen = False
     with urllib.request.urlopen(req, timeout=3600) as resp:
         for raw in resp:
             line = raw.decode().strip()
@@ -73,22 +74,54 @@ def finalize(url: str, session_id: str, upload_method: str, delete: bool, local_
             if stage == "error":
                 sys.exit(f"Bridge error: {msg.get('message')}")
             if stage == "done":
+                if terminal_seen:
+                    sys.exit("Finalization emitted multiple terminal events")
+                terminal_seen = True
+                if msg.get("status") != "success":
+                    sys.exit(
+                        f"Finalization ended with status {msg.get('status', 'unknown')}: "
+                        f"{msg.get('message', 'no detail')}"
+                    )
                 final = msg
+    if not terminal_seen:
+        sys.exit("Finalization ended without a terminal success event")
     return final
 
 
 def list_methods(url: str) -> None:
-    """Print the bridge's configured upload methods and current folders."""
+    """Print the bridge's configured upload accounts and current folders."""
     info = get_json(f"{url}/upload-methods")
+    methods = info.get("methods", [])
     print("Configured upload methods:")
-    for m in info.get("methods", []):
+    # Account ids can be long ("onedrive:university"), so size the column.
+    width = max((len(str(m.get("id", ""))) for m in methods), default=9)
+    for m in methods:
         flag = "default" if m.get("default") else ("configured" if m.get("configured") else "not configured")
-        print(f"  {m.get('id'):<9} {flag:<14} folder: {m.get('current_folder') or '—'}")
+        print(f"  {m.get('id'):<{width}} {flag:<14} folder: {m.get('current_folder') or '—'}")
     print(f"default: {info.get('upload_method_default')}  selected: {info.get('upload_method_selected')}")
 
 
 # Method ids the bridge can know about, even before we can ask it.
 _KNOWN_METHODS = ("local", "mega", "drive", "onedrive")
+
+
+def _valid_method(value: str) -> bool:
+    """Accept a bare provider id or "<provider>:<account>" for a 2nd account.
+
+    The account names themselves are validated by the bridge (the list of
+    configured ones comes from /upload-methods); this only rejects obviously
+    malformed targets early, so a typo doesn't travel all the way to the API.
+    """
+    provider, sep, name = str(value or "").strip().lower().partition(":")
+    if provider not in _KNOWN_METHODS:
+        return False
+    if not sep:
+        return True
+    if provider == "local":
+        return False  # local writes to a directory; it has no accounts
+    return bool(name) and all(
+        c.islower() or c.isdigit() or c in ("_", "-") for c in name
+    )
 
 
 def main() -> int:
@@ -102,7 +135,9 @@ def main() -> int:
     parser.add_argument(
         "--upload-method",
         default=None,
-        help=f"upload destination: one of {', '.join(_KNOWN_METHODS)} (default: local)",
+        help=f"upload destination: one of {', '.join(_KNOWN_METHODS)} "
+        "(default: local), or '<provider>:<account>' for a second account "
+        "(e.g. mega:work — see `python server.py --list-uploads`)",
     )
     parser.add_argument(
         "--upload-mega",
@@ -146,8 +181,12 @@ def main() -> int:
         parser.error("source_dir is required (or pass --list-methods)")
 
     method = args.upload_method or ("mega" if args.upload_mega else "local")
-    if method not in _KNOWN_METHODS:
-        sys.exit(f"unknown upload method: {method} (expected one of: {', '.join(_KNOWN_METHODS)})")
+    if not _valid_method(method):
+        sys.exit(
+            f"unknown upload method: {method} (expected one of: "
+            f"{', '.join(_KNOWN_METHODS)}, or '<provider>:<account>' such as "
+            "mega:work)"
+        )
     if args.upload_mega and args.upload_method:
         sys.exit("use either --upload-method or --upload-mega, not both")
 

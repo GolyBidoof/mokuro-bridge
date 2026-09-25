@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.6.0
+
+Several accounts per upload provider, and a fix for the keychain lookup that
+made a re-run of the MEGA wizard appear to do nothing.
+
+### Added
+
+- **Named upload accounts.** Every provider can now hold more than one account:
+  `python server.py --setup-upload mega --name work` adds a second MEGA
+  account, and it is addressed as `mega:work` (`upload_method=mega:work`,
+  `ocr_folder.py --upload-method mega:work`,
+  `MOKURO_BRIDGE_UPLOAD_DEFAULT=mega:work`). A bare provider id still means the
+  default account, so existing clients and configs are untouched.
+- Each account has its own remote root (`--root`), display label (`--label`)
+  and credential store: one keychain item per MEGA email, a 0600 credential or
+  token file per Drive/OneDrive account. Non-secret metadata lives in
+  `~/.config/mokuro-bridge/accounts/<provider>__<name>.json`
+  (`MOKURO_BRIDGE_ACCOUNTS_DIR`).
+- `python server.py --list-uploads` prints every account with its readiness,
+  credential source and remote root; `--remove-upload mega:work` forgets one.
+- `/upload-methods` and `/health` list one entry per account, each with
+  `provider`, `account`, its own root and `current_folder`.
+- `mokuro_bridge/accounts.py`: the instance registry (id parsing, metadata,
+  legacy default resolution), plus tests for id parsing, account isolation and
+  the keychain cleanup rules.
+
+### Fixed
+
+- The macOS keychain lookup paired the email from one `mega.nz` item with the
+  password from another, and an account-less `find-internet-password` kept
+  returning the *older* item. A stale entry for a previous address therefore
+  shadowed the working one and every upload failed with
+  `API call 'us' failed: Server returned error ENOENT` even after a successful
+  wizard run. The lookup now reads both halves from a single item, prefers the
+  email recorded for the account, and the wizard removes only the entries it
+  knows are orphaned — never a sibling account's.
+
+### Notes
+
+- `accounts_dir()` no longer creates its directory on read, so importing the
+  bridge cannot fail on an unwritable `$HOME`.
+
 ## v0.5.2
 
 Two install failures reported from the field. Both are diagnosed in the README

@@ -59,13 +59,86 @@ from mokuro_bridge.config import (
     WORK_DIR,
 )
 from mokuro_bridge.ocr import _MOKURO_REPO, _fork_supported, _mokuro_pkg
+from mokuro_bridge import accounts
+from mokuro_bridge.creds import _delete_mega_creds_keychain
 from mokuro_bridge.providers import (
     _UPLOAD_METHODS,
+    _build_upload_methods,
     _default_upload_method,
+    _method_current_folder,
     _run_setup_drive,
     _run_setup_mega,
     _run_setup_onedrive,
 )
+
+
+def _list_uploads() -> None:
+    """Print every configured upload account (and whether it is usable)."""
+    rows = []
+    for method in _build_upload_methods().values():
+        if method.id == "local":
+            continue
+        rows.append((
+            method.id,
+            method.name,
+            "yes" if method.configured else "no",
+            method.extra.get("creds_source") or "—",
+            _method_current_folder(method.id),
+        ))
+    if not rows:
+        print("no remote upload accounts configured")
+        print("add one with: python server.py --setup-upload mega|drive|onedrive")
+        return
+    width = max(len(r[0]) for r in rows)
+    print(f"{'ACCOUNT'.ljust(width)}  {'READY':5}  {'CREDS':11}  REMOTE ROOT")
+    for account_id, _name, ready, creds, folder in rows:
+        print(f"{account_id.ljust(width)}  {ready:5}  {creds:11}  {folder}")
+    print()
+    print(f"default: {_default_upload_method()}")
+
+
+def _remove_upload(target: str) -> int:
+    """Forget one upload account: metadata, its secret files, its keychain item."""
+    try:
+        provider, name = accounts.parse_method_id(target)
+    except ValueError as exc:
+        print(f"error: {exc}")
+        return 2
+    instance = accounts.load_instance(provider, name)
+    label = instance.id if instance is not None else target
+    email = instance.email if instance is not None else ""
+    # Emails other accounts still rely on — deleting the shared keychain item
+    # would break them (see accounts.sibling_emails).
+    siblings = accounts.sibling_emails(provider, name) if provider == "mega" else set()
+
+    removed = accounts.delete_instance(provider, name)
+    legacy = accounts.legacy_secret_path(provider, name)
+    if legacy is not None:
+        removed += accounts.remove_paths([legacy])
+
+    if provider == "mega":
+        if email and email in siblings:
+            print(
+                f"note: {email} is still used by another MEGA account — its "
+                "keychain item was left in place."
+            )
+        elif email:
+            if _delete_mega_creds_keychain(email):
+                removed.append(f"keychain:mega.nz/{email}")
+        else:
+            print(
+                "note: no account file records a MEGA email, so any keychain "
+                "item was left alone. Delete it in Keychain Access "
+                "(service mega.nz) if you want it gone."
+            )
+
+    if not removed:
+        print(f"nothing to remove for {label}")
+        return 0
+    print(f"removed {label}:")
+    for path in removed:
+        print(f"  {path}")
+    return 0
 
 
 def _main() -> None:
@@ -76,8 +149,44 @@ def _main() -> None:
         "--setup-upload",
         metavar="METHOD",
         default=None,
-        help="Interactively configure/authenticate an upload method "
-        "(available: mega, drive, onedrive). e.g. --setup-upload drive",
+        help="Interactively configure/authenticate an upload account "
+        "(mega, drive, onedrive, optionally with an account name such as "
+        "'mega:work'). Running it again with a new name adds a second account. "
+        "e.g. --setup-upload drive --name main",
+    )
+    parser.add_argument(
+        "--name",
+        default=None,
+        metavar="ACCOUNT",
+        help="Account name for --setup-upload (default: ask, offering the "
+        "first free name). Use a new name to add another account; the target "
+        "is then addressed as '<provider>:<name>'.",
+    )
+    parser.add_argument(
+        "--root",
+        default="",
+        metavar="REMOTE_DIR",
+        help="Remote root folder for the account being set up (default: the "
+        "provider's usual root, e.g. /Root/mokuro-reader for MEGA).",
+    )
+    parser.add_argument(
+        "--label",
+        default="",
+        metavar="TEXT",
+        help="Human label shown in --list-uploads / /health for this account.",
+    )
+    parser.add_argument(
+        "--list-uploads",
+        action="store_true",
+        help="List configured upload accounts and exit.",
+    )
+    parser.add_argument(
+        "--remove-upload",
+        default=None,
+        metavar="ACCOUNT",
+        help="Forget an upload account (e.g. 'mega:work'): metadata, its "
+        "credential file(s) and its OS keychain item. The default account is "
+        "addressed by the bare provider name ('mega').",
     )
     parser.add_argument(
         "--setup-mega",
@@ -95,23 +204,37 @@ def _main() -> None:
     )
     args = parser.parse_args()
 
+    if args.list_uploads:
+        _list_uploads()
+        return
+    if args.remove_upload:
+        raise SystemExit(_remove_upload(args.remove_upload))
+
     setup_method = args.setup_upload or ("mega" if args.setup_mega else None)
     if setup_method:
-        if setup_method == "mega":
-            _run_setup_mega()
-        elif setup_method == "drive":
-            _run_setup_drive()
-        elif setup_method == "onedrive":
-            _run_setup_onedrive()
-        elif setup_method in _UPLOAD_METHODS:
-            print(f"error: upload method '{setup_method}' has no setup wizard yet")
-            raise SystemExit(2)
-        else:
+        try:
+            provider, name = accounts.parse_method_id(setup_method)
+        except ValueError:
             print(
                 f"error: unknown upload method '{setup_method}' "
-                f"(available: {', '.join(_UPLOAD_METHODS)})"
+                f"(available: {', '.join(accounts.PROVIDERS)}, plus an optional "
+                "':<name>')"
             )
             raise SystemExit(2)
+        explicit = (args.name or "").strip().lower()
+        if explicit and name != accounts.DEFAULT_NAME and explicit != name:
+            print(
+                f"error: two different account names given: '{name}' "
+                f"(in {setup_method}) and '{explicit}' (in --name)"
+            )
+            raise SystemExit(2)
+        chosen = explicit or (name if name != accounts.DEFAULT_NAME else "")
+        runner = {
+            "mega": _run_setup_mega,
+            "drive": _run_setup_drive,
+            "onedrive": _run_setup_onedrive,
+        }[provider]
+        runner(chosen or None, root=args.root, label=args.label)
         return
 
     import uvicorn
@@ -152,6 +275,12 @@ def _main() -> None:
             f"  fetch proxy: {len(proxy_ports)} extra port(s) "
             f"{proxy_ports[0]}–{proxy_ports[-1]}  →  "
             f"{6 * len(proxy_ports)} browser sockets for the downloader"
+        )
+        print(
+            "  proxy hosts: "
+            + ("any public host the caller names"
+               if fetchproxy.UPSTREAM_PATTERNS == ["*"]
+               else ", ".join(fetchproxy.UPSTREAM_PATTERNS))
         )
         print(f"  fd limit:   {_fd_limit} (raised for the proxy)")
     elif fetchproxy.FETCH_PORTS > 0 and reload_on:

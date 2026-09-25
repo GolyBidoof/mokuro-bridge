@@ -2,10 +2,14 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
 
+from .. import accounts
+from ..accounts import DEFAULT_NAME
+from ..util import _chmod_fd_private
 from ..config import (
     DRIVE_CREDS_FILE,
     DRIVE_ROOT_NAME,
@@ -126,17 +130,54 @@ def _drive_client_valid(client_id: str, client_secret: str) -> bool:
     # invalid_grant (valid client, bad code) and anything else → client valid.
     return True
 
-def _drive_creds_source() -> Optional[str]:
+def _write_secret_atomic(path: Path, data: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    temporary = Path(temporary_name)
+    try:
+        _chmod_fd_private(fd)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if fd != -1:
+            os.close(fd)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _drive_creds_path(name: str = DEFAULT_NAME) -> Path:
+    """Where one Drive account's OAuth credentials live.
+
+    The default account keeps the historical DRIVE_CREDS_FILE (no migration);
+    additional accounts get their own 0600 file under ACCOUNTS_DIR.
+    """
+    if name == DEFAULT_NAME:
+        return DRIVE_CREDS_FILE
+    return accounts.secret_path("drive", name, "creds.json")
+
+def _drive_setup_hint(name: str = DEFAULT_NAME) -> str:
+    """The command that configures this account (for error messages)."""
+    if name == DEFAULT_NAME:
+        return "python server.py --setup-upload drive"
+    return f"python server.py --setup-upload drive --name {name}"
+
+def _drive_creds_source(name: str = DEFAULT_NAME) -> Optional[str]:
     """Where Drive creds come from: 'oauth', 'service_account', or None.
 
-    Pure file inspection (NO google imports): reads DRIVE_CREDS_FILE and
-    classifies by content — OAuth user creds carry a "refresh_token", a
-    service-account key carries "type": "service_account".
+    Pure file inspection (NO google imports): reads the account's credential
+    file and classifies by content — OAuth user creds carry a "refresh_token",
+    a service-account key carries "type": "service_account".
     """
-    if not DRIVE_CREDS_FILE.is_file():
+    path = _drive_creds_path(name)
+    if not path.is_file():
         return None
     try:
-        info = json.loads(DRIVE_CREDS_FILE.read_text(encoding="utf-8"))
+        info = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if info.get("refresh_token"):
@@ -145,31 +186,32 @@ def _drive_creds_source() -> Optional[str]:
         return "service_account"
     return None
 
-def _drive_configured() -> bool:
-    """Whether the Drive method is usable right now (creds + client lib)."""
+def _drive_configured(name: str = DEFAULT_NAME) -> bool:
+    """Whether one Drive account is usable right now (creds + client lib)."""
     return (
-        _drive_creds_source() is not None
+        _drive_creds_source(name) is not None
         and importlib.util.find_spec("googleapiclient") is not None
     )
 
-def _drive_creds():
-    """Load OAuth / service-account credentials from DRIVE_CREDS_FILE."""
+def _drive_creds(name: str = DEFAULT_NAME):
+    """Load OAuth / service-account credentials for one Drive account."""
     try:
         from google.auth.transport.requests import Request
         from google.oauth2 import service_account
         from google.oauth2.credentials import Credentials
     except ImportError as exc:
         raise RuntimeError(_DRIVE_IMPORT_HINT) from exc
-    if not DRIVE_CREDS_FILE.is_file():
+    path = _drive_creds_path(name)
+    if not path.is_file():
         raise RuntimeError(
-            "Google Drive not configured. Run `python server.py "
-            "--setup-upload drive` to authorize, then retry the upload."
+            f"Google Drive account '{name}' is not configured. Run `"
+            f"{_drive_setup_hint(name)}` to authorize, then retry the upload."
         )
     try:
-        info = json.loads(DRIVE_CREDS_FILE.read_text(encoding="utf-8"))
+        info = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise RuntimeError(
-            f"could not read Drive credentials from {DRIVE_CREDS_FILE}: {exc}"
+            f"could not read Drive credentials from {path}: {exc}"
         ) from exc
     if info.get("type") == "service_account":
         return service_account.Credentials.from_service_account_info(
@@ -181,18 +223,18 @@ def _drive_creds():
             creds.refresh(Request())
         except Exception as exc:  # e.g. revoked/expired refresh token
             raise RuntimeError(
-                f"Drive OAuth token refresh failed ({exc}). Re-run `python "
-                "server.py --setup-upload drive` to re-authorize."
+                f"Drive OAuth token refresh failed ({exc}). Re-run `"
+                f"{_drive_setup_hint(name)}` to re-authorize."
             ) from exc
     return creds
 
-def _drive_service():
-    """Build a Drive API v3 service handle (lazy import)."""
+def _drive_service(name: str = DEFAULT_NAME):
+    """Build a Drive API v3 service handle for one account (lazy import)."""
     try:
         from googleapiclient.discovery import build
     except ImportError as exc:
         raise RuntimeError(_DRIVE_IMPORT_HINT) from exc
-    return build("drive", "v3", credentials=_drive_creds(), cache_discovery=False)
+    return build("drive", "v3", credentials=_drive_creds(name), cache_discovery=False)
 
 def _drive_find_folder(service, name, parent_id) -> Optional[str]:
     """Look up a Drive folder by name directly under parent_id (or None)."""
@@ -255,21 +297,22 @@ def _drive_ensure_folder(service, name, parent_id) -> str:
     )
     return created["id"]
 
-def _drive_series_folder_id(service, drive_path: str) -> str:
+def _drive_series_folder_id(
+    service, drive_path: str, root_name: str = DRIVE_ROOT_NAME
+) -> str:
     """Ensure the Drive folder chain for a "/"-separated remote path.
 
     remote_dir arrives as e.g. "mokuro-reader/<Series>": the first segment
-    must be the configured root folder (DRIVE_ROOT_NAME, created under
-    "root"/My Drive) and each remaining segment is a folder nested under
-    the previous one. Handles 1-2+ segments generically. Returns the id of
-    the deepest folder.
+    must be the account's root folder (created under "root"/My Drive) and each
+    remaining segment is a folder nested under the previous one. Handles 1-2+
+    segments generically. Returns the id of the deepest folder.
     """
     segments = [seg for seg in str(drive_path).strip("/").split("/") if seg]
     if not segments:
         raise ValueError(f"empty Google Drive remote path: {drive_path!r}")
-    if segments[0] != DRIVE_ROOT_NAME:
+    if root_name and segments[0] != root_name:
         raise ValueError(
-            f"Google Drive remote path must start with '{DRIVE_ROOT_NAME}' "
+            f"Google Drive remote path must start with '{root_name}' "
             f"(got {drive_path!r})"
         )
     parent_id = "root"
@@ -292,7 +335,7 @@ def _drive_upload_file(
 
     overwrite: "fail" → an existing file with the same name is an error;
     "skip" → existing file counts as success (nothing uploaded);
-    "overwrite" → the existing file is deleted first, then re-uploaded.
+    "overwrite" → the existing file is updated in place by Drive's resumable API.
     """
     try:
         from googleapiclient.http import MediaFileUpload
@@ -313,20 +356,26 @@ def _drive_upload_file(
                 "to keep the existing copy)",
                 None,
             )
-        service.files().delete(fileId=existing_id, supportsAllDrives=True).execute()
-
     media = MediaFileUpload(
         str(local_path),
         mimetype="application/octet-stream",
         chunksize=8 * 1024 * 1024,
         resumable=True,
     )
-    request = service.files().create(
-        body={"name": local_path.name, "parents": [folder_id]},
-        media_body=media,
-        fields="id,name,size",
-        supportsAllDrives=True,
-    )
+    if existing_id:
+        request = service.files().update(
+            fileId=existing_id,
+            media_body=media,
+            fields="id,name,size",
+            supportsAllDrives=True,
+        )
+    else:
+        request = service.files().create(
+            body={"name": local_path.name, "parents": [folder_id]},
+            media_body=media,
+            fields="id,name,size",
+            supportsAllDrives=True,
+        )
     last_bytes = 0
     last_time = time.monotonic()
     try:
@@ -348,8 +397,10 @@ def _drive_upload_file(
     except Exception as exc:  # HttpError / ResumableUploadError / network…
         return False, str(exc), None
 
-def _run_setup_drive() -> None:
-    """Guided first-run wizard: create/paste an OAuth client, sign in.
+def _run_setup_drive(
+    name: Optional[str] = None, root: str = "", label: str = ""
+) -> None:
+    """Guided wizard: create/paste an OAuth client, sign in one account.
 
     Google won't let the bridge ship a usable OAuth client — a client only
     works in the project that registered it (anything else fails on Google's
@@ -363,10 +414,12 @@ def _run_setup_drive() -> None:
       3. verifies with Google that the client+secret are valid *before*
          opening the browser, so a typo/mis-click gives a helpful message
          instead of a raw Google error page,
-      4. stores the refresh token in DRIVE_CREDS_FILE (0600) — the client
-         secret itself is never persisted.
+      4. stores the refresh token in the account's credential file (0600) —
+         the client secret itself is never persisted.
     DRIVE_CLIENT_ID / DRIVE_CLIENT_SECRET or DRIVE_CLIENT_SECRET_FILE can
-    preset the client instead.
+    preset the client instead. Run it again with a different `name` to
+    authorize a second Google account: the default account is the bare
+    `drive` target, additional ones are `drive:<name>`.
     """
     from ..util import _ensure_python_deps
 
@@ -383,12 +436,21 @@ def _run_setup_drive() -> None:
 
     from google_auth_oauthlib.flow import InstalledAppFlow
 
+    name = accounts.ask_account_name(name, "drive")
+    try:
+        accounts.parse_method_id(accounts.method_id("drive", name))
+    except ValueError as exc:
+        print(f"error: {exc}")
+        return
+    creds_path = _drive_creds_path(name)
+
     print("Google Drive upload setup for mokuro-bridge")
     print("-" * 40)
-    if DRIVE_CREDS_FILE.is_file():
+    print(f"Account: {accounts.method_id('drive', name)}")
+    if creds_path.is_file():
         answer = input(
-            f"Drive credentials already exist at {DRIVE_CREDS_FILE}. "
-            "Overwrite (re-authorize)? [y/N] "
+            f"Account {accounts.method_id('drive', name)} is already "
+            f"authorized ({creds_path}). Re-authorize it? [y/N] "
         ).strip().lower()
         if answer not in ("y", "yes"):
             print("Keeping existing credentials.")
@@ -493,7 +555,14 @@ def _run_setup_drive() -> None:
             print(f"error: could not finish sign-in: {exc}")
             return
 
-    DRIVE_CREDS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    DRIVE_CREDS_FILE.write_text(creds.to_json(), encoding="utf-8")
-    os.chmod(DRIVE_CREDS_FILE, 0o600)
-    print(f"Stored Drive credentials in {DRIVE_CREDS_FILE} (permissions 0600).")
+    _write_secret_atomic(creds_path, creds.to_json())
+    print(f"Stored Drive credentials in {creds_path} (permissions 0600).")
+    stored = accounts.save_instance(
+        "drive",
+        name,
+        label=(label or None),
+        root=(root or None),
+    )
+    if stored is not None:
+        print(f"Remote root: {stored.root_path} (a folder in this account's My Drive)")
+        print(f"Account ready: {stored.id}")

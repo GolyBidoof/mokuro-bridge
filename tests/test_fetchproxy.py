@@ -6,6 +6,7 @@ for the CDN, and a Starlette TestClient drives the proxy in-process.
 
 from __future__ import annotations
 
+import gzip
 import socket
 import subprocess
 import sys
@@ -45,9 +46,14 @@ class _Upstream(BaseHTTPRequestHandler):
         type(self).seen.append(("GET", self.path))
         self.send_response(200)
         self.send_header("Content-Type", "image/jpeg")
-        self.send_header("Content-Length", str(len(BODY)))
+        if self.path == "/gzip":
+            encoded = gzip.compress(BODY)
+            self.send_header("Content-Encoding", "gzip")
+        else:
+            encoded = BODY
+        self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
-        self.wfile.write(BODY)
+        self.wfile.write(encoded)
 
     def do_HEAD(self):  # noqa: N802 - stdlib naming
         type(self).seen.append(("HEAD", self.path))
@@ -137,6 +143,45 @@ def test_health_marks_that_the_ports_belong_to_the_bridge(proxied):
     assert "bwddFetchProxy" in proxied.get("/__bwdd_health").json()
 
 
+def _preflight(client, origin):
+    return client.options(
+        "/page.jpeg",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Private-Network": "true",
+        },
+    )
+
+
+def test_private_network_preflight_is_allowed_for_any_origin_by_default(proxied):
+    """The bridge is generic: it serves whichever store the userscript runs on,
+    so it must not be pinned to one store's origin list. This is what makes a
+    new store work with no bridge-side configuration."""
+    for origin in (
+        "https://viewer-trial.bookwalker.jp",
+        "https://www.cmoa.jp",
+        "https://some-future-store.example",
+    ):
+        response = _preflight(proxied, origin)
+        assert response.status_code == 204, origin
+        assert response.headers["access-control-allow-origin"] == origin
+        assert response.headers["access-control-allow-private-network"] == "true"
+        # The preflight is cached, so a download does not re-ask per port.
+        assert response.headers["access-control-max-age"] == "600"
+
+
+def test_private_network_preflight_refuses_others_when_origins_are_narrowed(monkeypatch, upstream):
+    """Setting CORS_ORIGINS still tightens it back to a list."""
+    from starlette.testclient import TestClient as _TC
+    monkeypatch.setattr(fetchproxy, "CORS_ORIGINS", ["https://viewer-trial.bookwalker.jp"])
+    monkeypatch.setattr(fetchproxy, "UPSTREAM", upstream)
+    with _TC(fetchproxy.build_app([9001, 9002])) as client:
+        assert _preflight(client, "https://viewer-trial.bookwalker.jp").status_code == 204
+        denied = _preflight(client, "https://not-a-viewer.example")
+        assert denied.status_code == 403
+
+
 # ---------------------------------------------------------------- proxying
 
 def test_proxy_forwards_path_and_signed_query(proxied):
@@ -151,6 +196,13 @@ def test_proxy_streams_the_body_back(proxied):
     response = proxied.get("/page.jpeg")
     assert response.content == BODY
     assert response.headers["content-type"] == "image/jpeg"
+
+
+def test_proxy_decodes_compressed_upstream_bodies(proxied):
+    response = proxied.get("/gzip")
+    assert response.status_code == 200
+    assert response.content == BODY
+    assert "content-encoding" not in response.headers
 
 
 def test_proxy_marks_its_responses_and_forbids_caching(proxied):

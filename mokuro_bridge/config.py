@@ -1,16 +1,24 @@
 from __future__ import annotations
 import json
+import math
 import os
+import tempfile
+import threading
 from pathlib import Path
+from typing import Optional
 
-from .util import _env_path
+from .util import _chmod_fd_private, _env_path
 
-_CORS_DEFAULT_ORIGINS = (
-    "https://viewer.bookwalker.jp,"
-    "https://viewer-trial.bookwalker.jp,"
-    "https://viewer-ptrial.bookwalker.jp,"
-    "https://viewer-subscription.bookwalker.jp"
-)
+# Any origin by default. The bridge is a local helper for a userscript that
+# runs on whichever store the user is reading from, so pinning an origin list
+# here means every new store silently breaks: no Access-Control-Allow-Origin on
+# /health, so the userscript cannot even see that the bridge is running.
+#
+# This is safe to open up because nothing is authorised by origin: the bridge
+# binds 127.0.0.1, sends no cookies (the credential rides in the signed CDN URL),
+# and sets allow_credentials=False. Set CORS_ORIGINS to a comma-separated list to
+# narrow it again.
+_CORS_DEFAULT_ORIGINS = "*"
 CORS_ORIGINS = [
     o.strip()
     for o in os.environ.get("CORS_ORIGINS", _CORS_DEFAULT_ORIGINS).split(",")
@@ -27,7 +35,12 @@ WORK_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 SESSIONS_DIR = WORK_DIR / ".bridge_sessions"
 SESSIONS_DIR.mkdir(exist_ok=True)
-IMAGE_EXTENSIONS = {".webp", ".jpg", ".jpeg", ".png"}
+for _private_dir in (WORK_DIR, SESSIONS_DIR):
+    try:
+        _private_dir.chmod(0o700)
+    except OSError:
+        pass
+IMAGE_EXTENSIONS = {".webp", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".avif", ".tif", ".tiff"}
 
 # request with upload_to_mega=true.
 MEGA_LIBRARY_ROOT = os.environ.get("MEGA_LIBRARY_ROOT", "/Root/mokuro-reader")
@@ -39,7 +52,15 @@ _MEGA_UPLOAD_DEFAULT = str(
 # has fewer than this many pages (free-viewer errors can capture a handful of
 # junk pages). Default 1 = effectively off — a legit short volume (e.g. a
 # 9-page sampler) must still upload. Raise it if you want a stricter floor.
-MIN_PAGES_FOR_MEGA = max(1, int(os.environ.get("MIN_PAGES_FOR_MEGA", "1")))
+def _env_positive_int(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(1, value)
+
+
+MIN_PAGES_FOR_MEGA = _env_positive_int("MIN_PAGES_FOR_MEGA", 1)
 
 # Google Drive (optional destination via google-api-python-client).
 # Auth is OAuth2: creds live in DRIVE_CREDS_FILE (0600), created by
@@ -70,25 +91,75 @@ _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 # Chunked OCR flush: pages are grouped into batches so the queue drains in
 # controlled chunks. Override via env.
-_OCR_CHUNK_SIZE = max(1, int(os.environ.get("OCR_CHUNK_SIZE", "8")))
-_OCR_IDLE_FLUSH_S = float(os.environ.get("OCR_IDLE_FLUSH_S", "1.5"))
+def _env_nonnegative_float(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    # A zero timeout makes Condition.wait spin on a partially filled queue;
+    # retain an explicit "immediate" mode without burning a CPU core.
+    return max(0.01, value) if math.isfinite(value) else default
+
+
+_OCR_CHUNK_SIZE = _env_positive_int("OCR_CHUNK_SIZE", 8)
+_OCR_IDLE_FLUSH_S = _env_nonnegative_float("OCR_IDLE_FLUSH_S", 1.5)
+
+# Multi-volume OCR scheduling.  The fair selector is the default because it
+# does not change FIFO behaviour when only one session is queued.  Set
+# MOKURO_BRIDGE_OCR_FAIR_SCHEDULING=0 to restore the historical FIFO/finalize
+# priority selector.  Finalize work gets at most this fraction of a mixed batch
+# (the remaining slots are reserved for active, non-finalize sessions).
+_OCR_FAIR_SCHEDULING = str(
+    os.environ.get("MOKURO_BRIDGE_OCR_FAIR_SCHEDULING", "true")
+).strip().lower() not in ("0", "false", "no", "off")
+try:
+    _ratio = float(os.environ.get("MOKURO_BRIDGE_OCR_FINALIZE_PRIORITY", "0.5"))
+    _OCR_FINALIZE_PRIORITY_RATIO = (
+        max(0.0, min(1.0, _ratio)) if math.isfinite(_ratio) else 0.5
+    )
+except (TypeError, ValueError):
+    _OCR_FINALIZE_PRIORITY_RATIO = 0.5
 
 # MEGA credentials, resolved in order: env vars → creds file → OS keychain.
 MEGA_CREDS_FILE = _env_path(
     "MEGA_CREDS_FILE", Path.home() / ".config" / "mokuro-bridge" / "credentials.env"
 )
 
+# Additional upload accounts ("instances"). One JSON file per account holds its
+# non-secret metadata (label, remote root, e.g. the MEGA email); secrets stay in
+# the provider's own store. The paths above remain the *default* account's
+# storage, so a single-account install needs no migration. See accounts.py.
+ACCOUNTS_DIR = _env_path(
+    "MOKURO_BRIDGE_ACCOUNTS_DIR",
+    Path.home() / ".config" / "mokuro-bridge" / "accounts",
+)
+ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
+for _secret_dir in {
+    ACCOUNTS_DIR,
+    MEGA_CREDS_FILE.parent,
+    DRIVE_CREDS_FILE.parent,
+    ONEDRIVE_TOKEN_FILE.parent,
+}:
+    try:
+        _secret_dir.mkdir(parents=True, exist_ok=True)
+        _secret_dir.chmod(0o700)
+    except OSError:
+        pass
+
 # The local output directory is "sticky" the same way: an explicit `local_dir`
 # on a local finalize becomes the remembered default for later local finalizes.
 # It persists in this state file (under the work dir); OUTPUT_DIR is the
 # fallback when nothing has been remembered yet.
 _LOCAL_DIR_STATE_FILE = WORK_DIR / "local_dir_default.json"
+_local_dir_state_lock = threading.RLock()
 
 def _load_remembered_local_dir() -> Optional[str]:
     """The persisted sticky local output dir, or None when unset/invalid."""
     try:
         data = json.loads(_LOCAL_DIR_STATE_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
         return None
     raw = str(data.get("local_dir", "")).strip()
     return raw or None
@@ -98,10 +169,26 @@ def _remember_local_dir(path_str: str) -> None:
     if not path_str:
         return
     try:
-        _LOCAL_DIR_STATE_FILE.write_text(
-            json.dumps({"local_dir": path_str}), encoding="utf-8"
-        )
-        _LOCAL_DIR_STATE_FILE.chmod(0o600)
+        with _local_dir_state_lock:
+            _LOCAL_DIR_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(
+                prefix=f".{_LOCAL_DIR_STATE_FILE.name}.",
+                suffix=".tmp",
+                dir=str(_LOCAL_DIR_STATE_FILE.parent),
+            )
+            try:
+                _chmod_fd_private(fd)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"local_dir": path_str}) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, _LOCAL_DIR_STATE_FILE)
+            finally:
+                try:
+                    if os.path.exists(temporary):
+                        os.unlink(temporary)
+                except OSError:
+                    pass
     except OSError:
         pass  # non-fatal
 

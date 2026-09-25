@@ -83,7 +83,7 @@ release may not work yet — PyTorch wheels often lag new Python versions. If
 python server.py
 ```
 
-You'll see `mokuro-bridge v0.5.2 on http://127.0.0.1:62642`.
+You'll see `mokuro-bridge v0.6.0 on http://127.0.0.1:62642`.
 
 **3. OCR a folder of pages you already have**
 
@@ -140,6 +140,39 @@ default for later requests — until another explicit choice replaces it. The
 choice persists across restarts in `<work>/upload_method_default.json` and
 `<work>/local_dir_default.json` (0600). Requests that omit the field just use
 the current default and never change it.
+
+### More than one account (MEGA, Drive, OneDrive)
+
+Every provider can hold **several accounts**. Give the next one a name, then
+address it as `<provider>:<name>`:
+
+```bash
+python3 server.py --setup-upload mega --name work     # add a 2nd MEGA account
+python3 server.py --setup-upload drive --name main    # a 2nd Google account
+python3 server.py --list-uploads                      # what's configured
+python3 server.py --remove-upload mega:work           # forget one again
+```
+
+- A **bare provider id is the default account** (`mega`, `drive`,
+  `onedrive`), so existing set-ups and clients keep working unchanged. Extra
+  accounts are `mega:work`, `drive:main`, `onedrive:uni-2` (the verbose
+  `<provider>:default` is accepted as another spelling of the bare id).
+- `--name` is optional — without it the wizard prompts, offering the first
+  free name (`default` on a fresh install). `--upload-method mega:work` on
+  `ocr_folder.py` and `upload_method=mega:work` on `/session/{id}/finalize`
+  target the extra account; `MOKURO_BRIDGE_UPLOAD_DEFAULT=mega:work` makes it
+  the default. `/upload-methods` and `/health` list one entry per account.
+- **Each account can have its own remote root** — `--root /Root/other-library`
+  for MEGA, or a folder name for Drive/OneDrive — so two accounts don't have to
+  share one library folder. `--label "Work account"` adds a display name.
+- **Secrets stay separate per account**: MEGA keeps one keychain item per
+  email; Drive and OneDrive get their own 0600 credential/token file. The
+  non-secret bookkeeping (label, root, which email) lives in
+  `~/.config/mokuro-bridge/accounts/<provider>__<name>.json` — override the
+  directory with `MOKURO_BRIDGE_ACCOUNTS_DIR`.
+- `--remove-upload <id>` deletes that account's metadata, its credential file
+  and (for MEGA) its keychain item — never a sibling account's. Removing the
+  default account also removes the legacy single-account file it used.
 
 ### MEGA
 
@@ -394,7 +427,9 @@ set -a; source .env; set +a        # macOS / Linux
 | `ONEDRIVE_TOKEN_FILE` | `~/.config/mokuro-bridge/onedrive_token.json` | msal token cache (0600). |
 | `OCR_CHUNK_SIZE` | `8` | Pages per OCR batch (tune for your GPU/CPU). |
 | `OCR_IDLE_FLUSH_S` | `1.5` | Seconds to wait for a fuller batch before flushing. |
-| `MIN_PAGES_FOR_MEGA` | `10` | Refuse remote upload below this many pages (failed-scrape guard). |
+| `MOKURO_BRIDGE_OCR_FAIR_SCHEDULING` | `true` | Round-robin mixed-volume OCR batches; set `0` for the legacy FIFO/finalize-priority selector. Single-volume FIFO behavior is unchanged. |
+| `MOKURO_BRIDGE_OCR_FINALIZE_PRIORITY` | `0.5` | Maximum fraction of a mixed batch reserved for sessions waiting on finalize (remaining slots stay available to active volumes). |
+| `MIN_PAGES_FOR_MEGA` | `1` | Refuse remote upload below this many pages (raise for a stricter failed-scrape guard). |
 | `UVICORN_RELOAD` | `0` | Dev auto-reload (wipes in-memory sessions on change). |
 
 ---
@@ -404,12 +439,13 @@ set -a; source .env; set +a        # macOS / Linux
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/health` | Dependency/config status (mokuro, engines, creds, upload methods…), including `fetchProxyPorts` for the [page-fetch accelerator](#page-fetch-accelerator). |
+| `GET` | `/queue` | Read-only OCR queue/worker metrics: depths, per-session counts, active batch sessions, and worker state. |
 | `GET` | `/upload-methods` | Configured upload methods + their current folder (JSON). |
 | `POST` | `/session/start` | `title`, `reuse_existing` → new session id. |
 | `POST` | `/session/resume` | `title`, `source_dir` — OCR a folder on disk (what `ocr_folder.py` uses). |
 | `POST` | `/session/{id}/page` | Multipart `page` image + `filename` (browser capture). |
 | `POST` | `/session/{id}/page-local` | `path` — ingest an image already on this machine (headless scrapers). |
-| `POST` | `/session/{id}/cover` | Multipart `cover` image + `upload_method`, `local_dir` — **early cover upload**: store/upload `<title>.webp` (a copy of the first page) to the destination before OCR finishes. Finalize then skips re-uploading the cover to the same destination. Returns JSON `{ok, method, file, path|remote_path, url, size}`. |
+| `POST` | `/session/{id}/cover` | Multipart `cover` image + `upload_method`, `local_dir` — **early cover upload**: store/upload `<title>.webp` (a copy of the first page) to the destination before OCR finishes. Finalize skips re-uploading when the recorded method/target and SHA-256 still match; otherwise it uploads again. Returns JSON `{ok, method, file, path|remote_path, url, size}`. |
 | `GET` | `/session/{id}/status` | Capture/OCR progress snapshot (includes live `upload` and `cover_uploaded` state). |
 | `GET` | `/sessions` | All live sessions. |
 | `POST` | `/session/{id}/finalize` | `upload_method`, `local_dir`, `delete_after_upload` → NDJSON progress stream. |
@@ -417,8 +453,11 @@ set -a; source .env; set +a        # macOS / Linux
 ### `finalize` form fields
 
 - `upload_method` — destination: `local` (default), `mega`, `drive`, or
-  `onedrive`. Unset → falls back to the legacy `upload_to_mega`, then the
-  `MOKURO_BRIDGE_UPLOAD_DEFAULT` env var.
+  `onedrive`. Add `:<name>` to target a second account (`mega:work`,
+  `drive:main` — see
+  [More than one account](#more-than-one-account-mega-drive-onedrive)).
+  Unset → falls back to the legacy `upload_to_mega`, then the
+  `MOKURO_BRIDGE_UPLOAD_DEFAULT` env var (which also accepts an account id).
 - `local_dir` — when `upload_method=local`, write the finished volume into
   this folder instead of the default output dir. Ignored for remote methods.
 - `upload_to_mega` — legacy alias; `true` → MEGA, `false` → local.
@@ -437,10 +476,13 @@ set -a; source .env; set +a        # macOS / Linux
     "default":true,"current_folder":"/Users/you/mokuro-bridge/output"},
    {"id":"mega","name":"MEGA (megatools)","configured":true,"default":false,
     "creds_source":"keychain","library_root":"/Root/mokuro-reader",
-    "current_folder":"/Root/mokuro-reader"},
+    "current_folder":"/Root/mokuro-reader","provider":"mega","account":"default"},
+   {"id":"mega:work","name":"MEGA (megatools) — work","configured":true,
+    "default":false,"creds_source":"keychain","library_root":"/Root/work-library",
+    "current_folder":"/Root/work-library","provider":"mega","account":"work"},
    {"id":"drive","name":"Google Drive","configured":false,"default":false,
     "creds_source":null,"root":"mokuro-reader",
-    "current_folder":"mokuro-reader (My Drive root)"},
+    "current_folder":"mokuro-reader (a folder in that account's My Drive)"},
    {"id":"onedrive","name":"OneDrive","configured":false,"default":false,
     "creds_source":null,"root":"mokuro-reader",
     "current_folder":"mokuro-reader (OneDrive root)"}
@@ -481,6 +523,30 @@ While a remote upload runs, `GET /session/{id}/status` also carries a live
 events below) with the in-flight file's bytes/percent/speed plus the final
 per-file `url` when it completes — handy for clients that poll instead of
 streaming.
+
+### OCR queue metrics
+
+`GET /queue` is optional and read-only. It reports the one shared OCR worker
+without exposing page names, volume paths, or credentials:
+
+```json
+{"scheduler":"round_robin","queue_depth":12,"processing_depth":8,
+ "total_depth":20,
+ "per_session":[{"session_id":"a1b2","pending":7,"processing":4},
+                {"session_id":"c3d4","pending":5,"processing":4}],
+ "active_batch_sessions":["a1b2","c3d4"],"active_sessions":2,
+ "source_ingesting_sessions":0,
+ "worker":{"started":true,"alive":true,"state":"processing",
+          "model_loaded":true}}
+```
+
+`pending` counts queued pages plus page-ingest reservations; `processing` counts
+pages in the current worker batch. A session with `source_ingesting: true` is
+busy even before its source files enter the queue; `source_ingesting_sessions`
+reports how many such sessions exist. `active_batch_sessions` is the set of
+sessions represented in that batch. `/health` also includes the same safe count
+fields for clients that already poll it. Existing `/session/{id}/status` and
+finalize NDJSON responses are unchanged.
 
 ### Progress stream format
 
@@ -562,7 +628,10 @@ A client only needs four HTTP calls:
 Storefront-specific capture scripts (browser userscripts, headless scrapers)
 are intentionally **not** part of this repository — they embed account/session
 handling. In browsers, a userscript can POST straight from the storefront
-origin as long as that origin is in `CORS_ORIGINS`.
+origin as long as that origin is in `CORS_ORIGINS`. The bridge also answers
+Chromium's private-network preflight (`Access-Control-Request-Private-Network`)
+for those same configured origins, so a loopback HTTP bridge remains reachable
+from the HTTPS BookWalker viewer. This is still an origin allow-list, not `*`.
 
 ---
 
@@ -576,8 +645,10 @@ origin as long as that origin is in `CORS_ORIGINS`.
   in this repository.
 - `page-local` ingest only accepts paths under your home directory or system
   temp locations.
-- CORS is an allow-list, not `*`. `CORS_ORIGINS` controls which storefront
-  origins may POST from a browser userscript.
+- CORS and the private-network preflight are allow-lists, not `*`.
+  `CORS_ORIGINS` controls which storefront origins may POST from a browser
+  userscript. Keep the bridge bound to loopback; do not use the preflight as a
+  reason to expose it on a LAN address.
 - After a successful finalize, the session's working files are removed
   (`delete_after_upload=true` default); in local mode the finished trio in the
   output dir is kept.
@@ -590,6 +661,7 @@ origin as long as that origin is in `CORS_ORIGINS`.
 |---|---|
 | `mokuro_installed: false` in `/health` | Expected on a base install: the OCR engine is a separate step. Run `pip install -r requirements-ocr.txt`, or set `MOKURO_REPO` to a fork checkout. Capture, the fetch accelerator and uploads all work without it. |
 | `mega_configured: false` | Run `python server.py --setup-upload mega` (stores in your OS keychain/credential store or a 0600 file), export `MEGA_EMAIL`/`MEGA_PASSWORD`, or use `./setup-keychain.sh` (macOS). On headless Linux, keychain storage needs a Secret Service daemon (gnome-keyring). |
+| Uploads still use the wrong MEGA address after re-running the wizard | A leftover keychain item for the old address can shadow the new one (macOS returns the older item first). `python server.py --list-uploads` shows what the bridge actually resolves; `--remove-upload mega:<name>` deletes that account's item only — sibling accounts are never touched. You can also set `MEGA_EMAIL` to pick the item explicitly. |
 | Upload fails with `partial_upload` | Check the `stderr` in the NDJSON error frame. Make sure the destination is creatable by your account — the bridge creates the `mokuro-reader` folder automatically. |
 | OCR is slow | Normal without a GPU. Raise `OCR_CHUNK_SIZE` / `OCR_IDLE_FLUSH_S`, or use the batch-OCR fork via `MOKURO_REPO`. First run downloads the model. |
 | Port `62642` already in use | Another process holds it. Stop it, or pick another port with `MOKURO_BRIDGE_PORT=62643 ./run.sh`. If an older launchd auto-start agent is running: `launchctl bootout gui/$(id -u)/com.mokuro-bridge` (macOS). |

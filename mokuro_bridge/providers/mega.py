@@ -3,43 +3,89 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Optional
 
+from .. import accounts
+from ..accounts import DEFAULT_NAME
+from ..util import _chmod_fd_private
 from ..config import MEGA_CREDS_FILE, WORK_DIR
 from ..creds import (
+    _keychain_mega_account,
     _keychain_mega_creds,
+    _keychain_mega_creds_for,
     _mega_creds_source,
     _read_creds_file,
     _store_mega_creds_os,
     _write_creds_file,
 )
 
-def _mega_configured() -> bool:
-    """Whether the MEGA upload method is usable right now."""
-    return bool(shutil.which("megatools")) and _mega_creds_source() is not None
+def _mega_configured(name: str = DEFAULT_NAME) -> bool:
+    """Whether one MEGA account is usable right now."""
+    return bool(shutil.which("megatools")) and _mega_creds_source(name) is not None
 
-def _get_mega_creds() -> tuple[str, str]:
-    env_email = os.environ.get("MEGA_EMAIL", "").strip()
-    env_password = os.environ.get("MEGA_PASSWORD", "").strip()
-    if env_email and env_password:
-        return env_email, env_password
-    file_creds = _read_creds_file()
+def _mega_account_secret_file(name: str) -> Path:
+    """The 0600 fallback credential file for a non-default MEGA account."""
+    return accounts.secret_path("mega", name, "credentials.env")
+
+def _get_mega_creds(name: str = DEFAULT_NAME) -> tuple[str, str]:
+    """Credentials for one MEGA account.
+
+    The default account keeps the historical order (env → credentials file →
+    OS keychain). A named account uses the email recorded in its account file
+    and looks the password up in the OS store scoped to that email, falling
+    back to its own 0600 credential file.
+    """
+    if name == DEFAULT_NAME:
+        env_email = os.environ.get("MEGA_EMAIL", "").strip()
+        env_password = os.environ.get("MEGA_PASSWORD", "").strip()
+        if env_email and env_password:
+            return env_email, env_password
+        file_creds = _read_creds_file()
+        if file_creds is not None:
+            return file_creds
+        keychain_creds = _keychain_mega_creds()
+        if keychain_creds is not None:
+            return keychain_creds
+        raise RuntimeError(
+            "MEGA credentials not configured. Set MEGA_EMAIL + MEGA_PASSWORD "
+            "environment variables, run `python server.py --setup-mega` (stores "
+            "them in your OS keychain/credential store or a 0600 file), or write "
+            "them to the credentials file."
+        )
+
+    instance = accounts.load_instance("mega", name)
+    if instance is None:
+        raise RuntimeError(
+            f"MEGA account '{name}' is not configured. Add it with "
+            f"`python server.py --setup-upload mega --name {name}`."
+        )
+    email = instance.email
+    if email:
+        keychain_creds = _keychain_mega_creds_for(email)
+        if keychain_creds is not None:
+            return keychain_creds
+    file_creds = _read_creds_file(_mega_account_secret_file(name))
     if file_creds is not None:
         return file_creds
-    keychain_creds = _keychain_mega_creds()
-    if keychain_creds is not None:
-        return keychain_creds
     raise RuntimeError(
-        "MEGA credentials not configured. Set MEGA_EMAIL + MEGA_PASSWORD "
-        "environment variables, run `python server.py --setup-mega` (stores "
-        "them in your OS keychain/credential store or a 0600 file), or write "
-        "them to the credentials file."
+        f"MEGA account '{name}' has no usable password: nothing in the OS "
+        f"keychain for {email or 'its recorded email'} and no "
+        f"{_mega_account_secret_file(name)}. Re-run `python server.py "
+        f"--setup-upload mega --name {name}`."
     )
 
-def _run_setup_mega() -> None:
-    """Interactive first-run wizard: ask for MEGA credentials and store them."""
+def _run_setup_mega(
+    name: Optional[str] = None, root: str = "", label: str = ""
+) -> None:
+    """Interactive wizard: store credentials for one MEGA account.
+
+    Run it again with a different `name` to add a second account; the default
+    account keeps using the bare `mega` method id, additional ones are
+    addressed as `mega:<name>`.
+    """
     import getpass
 
     if not shutil.which("megatools"):
@@ -51,18 +97,38 @@ def _run_setup_mega() -> None:
         )
         return
 
+    name = accounts.ask_account_name(name, "mega")
+    try:
+        accounts.parse_method_id(accounts.method_id("mega", name))
+    except ValueError as exc:
+        print(f"error: {exc}")
+        return
+
     print("MEGA upload setup for mokuro-bridge")
     print("-" * 40)
-    existing = _mega_creds_source()
-    if existing:
+    print(f"Account: {accounts.method_id('mega', name)}")
+    instance = accounts.load_instance("mega", name)
+    existing = _mega_creds_source(name)
+    if instance is not None and instance.tracked:
+        whose = instance.email or "(no email recorded)"
         answer = input(
-            f"MEGA credentials already found ({existing}). Overwrite? [y/N] "
+            f"Account {instance.id} already exists ({whose}). Overwrite? [y/N] "
+        ).strip().lower()
+        if answer not in ("y", "yes"):
+            print("Keeping existing credentials.")
+            return
+    elif existing:
+        answer = input(
+            f"MEGA credentials already found ({existing}) for the default "
+            "account. Overwrite? [y/N] "
         ).strip().lower()
         if answer not in ("y", "yes"):
             print("Keeping existing credentials.")
             return
 
-    if os.environ.get("MEGA_EMAIL", "") and os.environ.get("MEGA_PASSWORD", ""):
+    if name == DEFAULT_NAME and (
+        os.environ.get("MEGA_EMAIL", "") and os.environ.get("MEGA_PASSWORD", "")
+    ):
         print(
             "MEGA_EMAIL/MEGA_PASSWORD are set in the environment — the wizard "
             "cannot (and should not) override those. Export them instead."
@@ -82,15 +148,54 @@ def _run_setup_mega() -> None:
         print(f"error: MEGA login failed — credentials not stored. {verify_err or ''}".strip())
         return
 
+    # Which keychain items this store leaves orphaned: the email this account
+    # used before, unless some *other* tracked account still uses it. Empty
+    # unless there really is something to drop, so adding an account never
+    # deletes a sibling account's item.
+    previous_email = ""
+    if instance is not None and instance.tracked:
+        previous_email = instance.email
+    if not previous_email and name == DEFAULT_NAME:
+        previous_email = _keychain_mega_account() or ""
+    others = {
+        i.email
+        for i in accounts.instances_for("mega")
+        if i.email and i.name != name
+    }
+    stale = (
+        [previous_email]
+        if previous_email and previous_email != email and previous_email not in others
+        else []
+    )
+
+    secret_file = (
+        MEGA_CREDS_FILE if name == DEFAULT_NAME else _mega_account_secret_file(name)
+    )
+    backend = ""
     try:
-        backend = _store_mega_creds_os(email, password)
+        backend = _store_mega_creds_os(email, password, stale)
     except RuntimeError as exc:
         print(f"{exc}; falling back to a credentials file.")
-    else:
+
+    # Record the instance first: the source check below resolves a *named*
+    # account through its account file (name → email → keychain item).
+    stored = accounts.save_instance(
+        "mega",
+        name,
+        label=(label or None),
+        root=(root or None),
+        extra={"email": email},
+    )
+    if backend:
         print(f"Stored in {backend}.")
-        return
-    _write_creds_file(email, password)
-    print(f"Stored in {MEGA_CREDS_FILE} (permissions 0600).")
+    if not _mega_creds_source(name):
+        _write_creds_file(email, password, secret_file)
+        print(f"Stored in {secret_file} (permissions 0600).")
+    if stored is not None and stored.root:
+        print(f"Remote root: {stored.root_path}")
+    print(
+        f"Account ready: {stored.id if stored else accounts.method_id('mega', name)}"
+    )
     print(
         "Tip: you can also use environment variables MEGA_EMAIL / MEGA_PASSWORD "
         "instead of storing anything."
@@ -124,11 +229,24 @@ def _mega_verify_creds(email: str, password: str) -> tuple[bool, Optional[str]]:
         megarc_path.unlink(missing_ok=True)
 
 def create_megarc(email: str, password: str) -> Path:
-    # megatools requires a [Login] section (not [DEFAULT]) with Username=
-    megarc = WORK_DIR / f".megarc_{uuid.uuid4().hex[:8]}"
-    megarc.write_text(f"[Login]\nUsername = {email}\nPassword = {password}\n")
-    megarc.chmod(0o600)
-    return megarc
+    if any("\n" in str(value) or "\r" in str(value) for value in (email, password)):
+        raise ValueError("MEGA credentials must not contain newlines")
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".megarc_", dir=str(WORK_DIR))
+    megarc = Path(name)
+    try:
+        _chmod_fd_private(fd)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(f"[Login]\nUsername = {email}\nPassword = {password}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return megarc
+    except Exception:
+        if fd != -1:
+            os.close(fd)
+        megarc.unlink(missing_ok=True)
+        raise
 
 def mega_mkdir(megarc_path: Path, remote_dir: str) -> subprocess.CompletedProcess:
     # mkdir takes remote paths as positional args (no --path)
@@ -249,14 +367,15 @@ def _mega_upload_file(
 
     overwrite: "fail" → an existing remote file is an error (a clear,
     method-agnostic message is returned); "skip" → existing file counts as
-    success (nothing uploaded); "overwrite" → the remote file is deleted
-    first, then uploaded fresh.
+    success (nothing uploaded); "overwrite" → upload a versioned sibling and
+    keep the prior valid copy (MEGA CLI has no atomic replace operation).
     """
     total_bytes = local_path.stat().st_size
 
     # Existing-file policy. megatools put refuses to overwrite (exit code 2,
     # "File already exists"), so implement skip/overwrite explicitly here.
     exists = _mega_remote_exists(megarc_path, remote_path)
+    staged_path = ""
     if exists:
         if overwrite == "skip":
             # Already there — treat as success; try to surface its link too.
@@ -281,20 +400,12 @@ def _mega_upload_file(
                 "to keep the existing copy)",
                 None,
             )
-        rm = subprocess.run(
-            ["megatools", "rm", "--config", str(megarc_path), remote_path],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if rm.returncode != 0:
-            return (
-                False,
-                f"could not remove existing remote file {remote_path}: "
-                f"{(rm.stderr or rm.stdout or '').strip()}",
-                None,
-            )
+        # megatools 1.x has no move/replace command.  Never delete the old
+        # valid artifact before the replacement has uploaded successfully;
+        # expose a versioned sibling instead.
+        staged_path = f"{remote_path}.replace-{uuid.uuid4().hex[:10]}"
 
+    put_path = staged_path or remote_path
     proc = subprocess.Popen(
         [
             "megatools",
@@ -302,7 +413,7 @@ def _mega_upload_file(
             "--config",
             str(megarc_path),
             "--path",
-            remote_path,
+            put_path,
             str(local_path),
         ],
         stdout=subprocess.PIPE,
@@ -353,7 +464,7 @@ def _mega_upload_file(
     if success:
         try:
             exp = subprocess.run(
-                ["megatools", "export", "--config", str(megarc_path), remote_path],
+                ["megatools", "export", "--config", str(megarc_path), put_path],
                 capture_output=True,
                 text=True,
                 timeout=60,
