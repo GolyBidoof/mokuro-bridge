@@ -599,7 +599,7 @@ progress and an early file URL before the large archive transfers.
 ```
 
 - `upload`, per-file progress: `file`, `bytes`/`current_bytes` (uploaded so
-  far), `total_bytes`, `percent` (0–100), `speed_bps`, `speed_human`, `method`.
+  far), `total_bytes`, `percent` (0-100), `speed_bps`, `speed_human`, `method`.
   The top-level `current_bytes`/`total_bytes`/`percent`/`speed_bps` fields are
   mirrors of the same values for convenience.
 - `remote_path`, where the file is going on that provider (`mega_path` is a
