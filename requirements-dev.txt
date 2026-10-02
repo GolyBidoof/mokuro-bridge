@@ -3,3 +3,8 @@
 # provider: it exercises the bridge itself against local stub servers.
 -r requirements.txt
 pytest>=8.0
+# tests/test_packaging.py reads pyproject.toml; tomllib is stdlib only from 3.11.
+tomli>=2.0; python_version < "3.11"
+# Lint config lives in pyproject.toml [tool.ruff]; ruff must be pinned here so
+# `python3 -m ruff check .` is the same run CI does.
+ruff>=0.6

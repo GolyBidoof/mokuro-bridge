@@ -1,0 +1,87 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest (${{ matrix.os }}, ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One failing interpreter must not hide the others: a break on 3.10 only
+      # is exactly the kind of thing this matrix exists to show.
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python-version: "3.10" }
+          - { os: ubuntu-latest, python-version: "3.11" }
+          - { os: ubuntu-latest, python-version: "3.12" }
+          - { os: ubuntu-latest, python-version: "3.13" }
+          - { os: macos-latest, python-version: "3.13" }
+          - { os: windows-latest, python-version: "3.13" }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The repo root also holds a full mokuro fork checkout in ./mokuro.
+          # It is not a submodule, so fetching it is wasted work; the test
+          # suite deliberately needs no OCR engine.
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install the base requirements plus pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+      - name: Run the suite
+        # No mokuro, no torch, no upload SDKs and no network by design.
+        run: python -m pytest
+
+  package:
+    name: build and check the wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --upgrade build
+      - run: python -m build
+
+      - name: The wheel must not ship the vendored mokuro fork
+        # A top-level `mokuro` package in this wheel would shadow the real OCR
+        # engine that users install separately, and ./mokuro carries its own
+        # .git, .bench-variants and .audit. This is the guard for that.
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          tops = {n.split("/")[0] for n in names}
+          bad = [n for n in names if n.startswith("mokuro/")]
+          assert "mokuro" not in tops, f"wheel ships a top-level mokuro package: {bad[:3]}"
+          assert not bad, f"vendored fork leaked into the wheel: {bad[:3]}"
+          assert not any(n.startswith("output/") for n in names), "wheel ships output/"
+          for required in ("mokuro_bridge/cli.py", "mokuro_bridge/update.py"):
+              assert required in names, f"wheel is missing {required}"
+          print(f"{wheel}: {len(names)} entries, no leaked fork code")
+          PY
+
+      - name: Install the wheel in a clean venv and run it
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/python -m pip install --upgrade pip
+          /tmp/smoke/bin/python -m pip install dist/*.whl
+          cd /tmp   # keep the checkout off sys.path so this tests the wheel
+          /tmp/smoke/bin/mokuro-bridge --version
+          /tmp/smoke/bin/mokuro-bridge --help
+          /tmp/smoke/bin/mokuro-bridge-ocr --help
+          /tmp/smoke/bin/python -c "import mokuro_bridge.api, mokuro_bridge.update; print('imports ok')"

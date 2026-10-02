@@ -8,7 +8,6 @@ busy OCR/upload session doesn't flood the log.
 from __future__ import annotations
 import sys
 import time
-from typing import Optional
 
 _LEVEL_ORDER = {"debug": 10, "info": 20, "warn": 30, "error": 40}
 _LEVEL = "info"  # configurable via set_level()
@@ -67,9 +66,20 @@ def progress(tag: str, msg: str, throttle_s: float = _THROTTLE_S) -> None:
     """Throttled, in-place progress line: each update overwrites the previous
     one on the same line (carriage return + clear-line), so a stream of
     progress doesn't scroll the terminal. Real completion should use info()/
-    error(), which clear the in-place line and print a proper newline line."""
+    error(), which clear the in-place line and print a proper newline line.
+
+    Only a terminal gets these. launchd redirects stdout straight to
+    ~/Library/Logs/mokuro-bridge.log with no rotation, where a stream of
+    "\\r\\x1b[K" lines is neither rewritten in place nor anything the reader
+    wants, and the file only ever grows. Without a TTY there is nothing to
+    overwrite, so this is a no-op."""
     global _PROGRESS_ACTIVE
     if not _enabled("info"):
+        return
+    try:
+        if not sys.stdout.isatty():
+            return
+    except Exception:
         return
     now = time.time()
     last = _LAST_THROTTLE.get(tag, 0.0)

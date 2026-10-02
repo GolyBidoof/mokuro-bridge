@@ -1,12 +1,19 @@
-# Optional OCR engine. Kept out of requirements.txt because mokuro depends on
-# PyTorch, which is several GB and unnecessary for capture, the fetch
-# accelerator or uploading.
+# Stock mokuro from PyPI -- the FALLBACK engine, not the recommended one.
 #
-#   pip install -r requirements-ocr.txt
+# The recommended engine is the fork, which adds batched recognition and is worth
+# roughly 1.8x. Install it instead of this file:
 #
-# Or use a custom mokuro checkout instead and skip this file entirely:
+#   pip install "mokuro @ git+https://github.com/GolyBidoof/mokuro"
+#
+# The bridge finds the batch API by introspection, so installing the fork is
+# enough; nothing else needs configuring. A local checkout works too:
 #   export MOKURO_REPO=/path/to/mokuro
 #
+# This file is kept because the stock package is a stable, versioned dependency
+# and some people would rather not track a git one.
+#
+# Kept out of requirements.txt because mokuro depends on PyTorch, which is
+# several GB and unnecessary for capture, the fetch accelerator or uploading.
 # 0.2+ emits the .mokuro format reader.mokuro.app reads.
 -r requirements.txt
 mokuro>=0.2.0

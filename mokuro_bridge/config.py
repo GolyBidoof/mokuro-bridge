@@ -16,8 +16,9 @@ from .util import _chmod_fd_private, _env_path
 #
 # This is safe to open up because nothing is authorised by origin: the bridge
 # binds 127.0.0.1, sends no cookies (the credential rides in the signed CDN URL),
-# and sets allow_credentials=False. Set CORS_ORIGINS to a comma-separated list to
-# narrow it again.
+# and the bridge is unauthenticated anyway - loopback binding is the only access
+# control, and any process that can reach the port can drive it. Set
+# CORS_ORIGINS to a comma-separated list to narrow it again.
 _CORS_DEFAULT_ORIGINS = "*"
 CORS_ORIGINS = [
     o.strip()
@@ -29,7 +30,28 @@ CORS_ORIGINS = [
 WORK_DIR = _env_path("MOKURO_BRIDGE_WORK_DIR", Path.home() / "mokuro-input")
 # Local output dir: finished <series>/<volume>.{cbz,mokuro,webp} when MEGA
 # upload is disabled (default). Git-ignored when inside the repo checkout.
-OUTPUT_DIR = _env_path("MOKURO_BRIDGE_OUTPUT_DIR", Path(__file__).resolve().parent.parent / "output")
+def _default_output_dir(package_file: Optional[str] = None) -> Path:
+    """Where finished volumes land when MOKURO_BRIDGE_OUTPUT_DIR is unset.
+
+    A source checkout keeps writing to <repo>/output, exactly as before, and an
+    editable install resolves to the checkout too. An installed wheel must not
+    do that: `Path(__file__).parent.parent` is then the parent of site-packages,
+    so the bridge would deposit the user's manga inside its own virtualenv,
+    where a `pipx upgrade` rebuild can strand it. Those installs get
+    ~/mokuro-bridge/output instead.
+
+    The test is the path rather than a marker file, since a marker is only
+    present in a checkout by coincidence: site-packages (or Debian's
+    dist-packages) means installed, anything else means a working tree.
+    *package_file* exists so tests can exercise this without a real venv.
+    """
+    checkout = Path(package_file or __file__).resolve().parent.parent
+    if {"site-packages", "dist-packages"} & set(checkout.parts):
+        return Path.home() / "mokuro-bridge" / "output"
+    return checkout / "output"
+
+
+OUTPUT_DIR = _env_path("MOKURO_BRIDGE_OUTPUT_DIR", _default_output_dir())
 
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

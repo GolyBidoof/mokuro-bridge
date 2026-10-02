@@ -24,6 +24,7 @@ import fnmatch
 import os
 import re
 import socket
+import time
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 
@@ -49,6 +50,7 @@ def _env_nonnegative_int(name: str, default: int) -> int:
 # profile roughly 300 sockets in total, so ~48 leaves room for the page, GM and
 # trailing-dot lanes while staying under that ceiling.
 FETCH_PORTS = _env_nonnegative_int("MOKURO_BRIDGE_FETCH_PORTS", 48)
+
 # 0 = unlimited, matching the standalone helper. Lower it if CloudFront starts
 # throttling a very large burst.
 FETCH_CONCURRENCY = _env_nonnegative_int("MOKURO_BRIDGE_FETCH_CONCURRENCY", 0)
@@ -57,14 +59,24 @@ UPSTREAM = os.environ.get(
     "MOKURO_BRIDGE_FETCH_UPSTREAM", "https://bw-bv-epubs.bookwalker.jp"
 ).rstrip("/")
 
+# The upstream may also ride in the path, as /_bwdd/<host>/<rest...>. That form
+# exists so the browser's request carries no custom header and is therefore a
+# CORS "simple request": a header makes every unique page URL pay its own
+# preflight first, which on a 160-page volume measured 299 of them.
+PATH_UPSTREAM_PREFIX = "/_bwdd/"
+
 # Which hosts this proxy may forward to. A browser request to a proxy port
 # carries only the path and query, so the caller names the upstream in the
 # x-bwdd-upstream header; requests without that header keep using UPSTREAM
 # exactly as before.
 #
-# This is still not an open proxy: the header is only honoured when the named
-# host matches one of these patterns, so the worst a hostile page can do is
-# fetch the CDNs already listed here.
+# This list is *not* the security boundary by default: it defaults to "*", so
+# it does nothing until MOKURO_BRIDGE_FETCH_ALLOWED_HOSTS is set. The real gate
+# is _target_is_safe() below, which rejects any target that resolves to a
+# loopback, private, link-local, multicast or reserved address -- LAN hosts and
+# 169.254.169.254 included. That still means any *public* site is fetchable, so
+# this proxy is a way to reach the public internet, not a closed pipe to one
+# CDN. Narrow it here if you want a closed pipe.
 _ALLOWED_HOSTS_ENV = os.environ.get("MOKURO_BRIDGE_FETCH_ALLOWED_HOSTS", "")
 if _ALLOWED_HOSTS_ENV.strip():
     UPSTREAM_PATTERNS = [
@@ -79,7 +91,37 @@ else:
 # was before the header existed.
 ALLOWED_HOSTS = {urlsplit(UPSTREAM).netloc, "bw-bv-epubs.bookwalker.jp"}
 
-_safe_host_cache: dict[str, bool] = {}
+_safe_host_cache: dict[str, tuple[float, bool]] = {}
+# The memo above is an optimisation, not a policy decision, so it is kept small
+# and short-lived. Caching "this host was public at time T" forever is a DNS
+# rebinding hole: a name that resolved to a public address once can be
+# re-pointed at 127.0.0.1 after the fact and stay trusted. An unbounded cache is
+# its own problem too, since a caller can grow it with nothing but distinct
+# hostnames. 256 entries is far more than the handful of CDN hosts a real
+# download touches, and a minute of TTL bounds how long a stale answer survives.
+_SAFE_HOST_CACHE_MAX = 256
+_SAFE_HOST_CACHE_TTL_S = 60.0
+
+
+def _safe_host_cached(key: str) -> "bool | None":
+    entry = _safe_host_cache.get(key)
+    if entry is None:
+        return None
+    expires_at, ok = entry
+    if expires_at < time.monotonic():
+        _safe_host_cache.pop(key, None)
+        return None
+    return ok
+
+
+def _remember_safe_host(key: str, ok: bool) -> None:
+    if len(_safe_host_cache) >= _SAFE_HOST_CACHE_MAX:
+        # Drop the oldest expiry first; dicts keep insertion order and we never
+        # reorder on a hit, so the front is always the stalest entry.
+        for stale in list(_safe_host_cache)[: _SAFE_HOST_CACHE_MAX // 4]:
+            _safe_host_cache.pop(stale, None)
+    _safe_host_cache[key] = (time.monotonic() + _SAFE_HOST_CACHE_TTL_S, ok)
+
 
 
 def _target_is_safe(host: str) -> bool:
@@ -91,7 +133,7 @@ def _target_is_safe(host: str) -> bool:
     every address it resolves to must be public.
     """
     key = host.lower().strip(".")
-    cached = _safe_host_cache.get(key)
+    cached = _safe_host_cached(key)
     if cached is not None:
         return cached
     ok = False
@@ -114,7 +156,7 @@ def _target_is_safe(host: str) -> bool:
                         or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
                     ok = False
                     break
-    _safe_host_cache[key] = ok
+    _remember_safe_host(key, ok)
     return ok
 
 
@@ -126,14 +168,27 @@ def host_allowed(host: str) -> bool:
     if not any(p == host or fnmatch.fnmatchcase(host, p) for p in UPSTREAM_PATTERNS):
         return False
     return _target_is_safe(host)
-    for pattern in UPSTREAM_PATTERNS:
-        if pattern == host or fnmatch.fnmatchcase(host, pattern):
-            return True
-    return False
+
+
+def split_path_upstream(path: str) -> "tuple[str | None, str]":
+    """Split ``/_bwdd/<host>/<rest>`` into ``(host, "/<rest>")``.
+
+    Anything else returns ``(None, path)`` so an ordinary mirrored request is
+    forwarded exactly as it always was.
+    """
+    if not path.startswith(PATH_UPSTREAM_PREFIX):
+        return None, path
+    rest = path[len(PATH_UPSTREAM_PREFIX):]
+    host, sep, tail = rest.partition("/")
+    if not host or not sep:
+        return None, path
+    return host, "/" + tail
+
 
 # Filled in by server.py once the sockets are actually bound; api.py reports it
 # in /health so the userscript can discover the ports without configuration.
 ACTIVE_PORTS: list[int] = []
+
 
 
 def bind_sockets(host: str, ports: list[int]) -> tuple[list[socket.socket], list[int]]:
@@ -190,12 +245,23 @@ def build_app(port_list: list[int]) -> Starlette:
             # that store's CDN, so one bridge can accelerate both BookWalker and
             # CMOA without either store's requests landing on the wrong host.
             "upstreams": list(UPSTREAM_PATTERNS),
+            # The CDN may also be named as the first path segment
+            # (/_bwdd/<host>/<path>), which keeps the browser's request a CORS
+            # "simple request" and therefore un-preflighted. See proxy().
+            "pathUpstream": True,
             "portList": list(port_list),
             "concurrency": FETCH_CONCURRENCY,
         })
 
     async def proxy(request):
-        requested_host = (request.headers.get("x-bwdd-upstream") or "").strip()
+        # Two ways to name the upstream. The header is the original contract; the
+        # path segment is the preflight-free one, because a custom header makes
+        # the page's request "non-simple" and a browser then answers every
+        # *unique* URL with its own CORS OPTIONS first - one preflight per page,
+        # since every page carries its own signed query. Only the allowlist
+        # decides either way.
+        path_host, upstream_path = split_path_upstream(request.url.path)
+        requested_host = (request.headers.get("x-bwdd-upstream") or "").strip() or path_host or ""
         if requested_host:
             # The caller named the CDN it wants; only the allowlist decides.
             if not host_allowed(requested_host):
@@ -203,7 +269,8 @@ def build_app(port_list: list[int]) -> Starlette:
             base = "https://" + requested_host
         else:
             base = UPSTREAM
-        target = base + request.url.path
+            upstream_path = request.url.path
+        target = base + upstream_path
         if request.url.query:
             target += "?" + request.url.query
         if urlsplit(target).netloc not in ALLOWED_HOSTS and not host_allowed(urlsplit(target).netloc):

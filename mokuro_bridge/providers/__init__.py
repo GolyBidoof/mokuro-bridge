@@ -40,6 +40,34 @@ from .onedrive import (
     _run_setup_onedrive,
 )
 
+# Names this package exists to re-export. Everything below is imported here so
+# cli.py (and api.py) can reach the provider internals from one place, not from
+# three sibling modules; without an explicit __all__ those deliberate
+# re-exports are indistinguishable from leftovers to a linter, and F401 fires
+# on every one of them.
+__all__ = [
+    # The provider setup wizards, re-exported for cli.py.
+    "_run_setup_drive",
+    "_run_setup_mega",
+    "_run_setup_onedrive",
+    # The registry snapshot and the helpers cli.py and api.py build on.
+    "_UPLOAD_METHODS",
+    "UploadMethod",
+    "_build_upload_methods",
+    "_default_upload_method",
+    "_method_current_folder",
+    "_remember_upload_method",
+    "canonical_method_id",
+    "instance_for",
+    "known_method_ids",
+    "mega_series_dir",
+    "method_label",
+    "method_provider",
+    "method_root",
+    "resolve_upload_method",
+    "upload_file",
+]
+
 _account_locks_guard = threading.Lock()
 _account_locks: dict[tuple[str, str], threading.Lock] = {}
 

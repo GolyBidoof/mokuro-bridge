@@ -1,0 +1,41 @@
+# The wheel is one install path; the git checkout is the other, and the README
+# documents the checkout one in detail (run.sh, the launchd agent, the keychain
+# helper). setuptools builds an sdist from this file, and without it that sdist
+# carries none of those files: the install it describes cannot be reproduced
+# from a published release. Everything here is a file a checkout install needs.
+
+# The checkout entry points and their helpers.
+include server.py
+include ocr_folder.py
+include run.sh
+include install-launchd.sh
+include setup-keychain.sh
+include com.mokuro-bridge.plist
+include pytest.ini
+include .env.example
+
+# The requirements lists. pyproject is a build input and is included anyway,
+# but the tests assert the two stay in step, so the sdist has to carry them.
+include requirements.txt
+include requirements-dev.txt
+include requirements-ocr.txt
+include requirements-drive.txt
+include requirements-onedrive.txt
+
+# The test suite, so `python -m pytest` works from an unpacked sdist.
+recursive-include tests *.py
+
+# The docs the README links to. PyPI renders the README but does not rewrite a
+# relative link, so a reader who follows one from the project page needs these
+# to be in the sdist they downloaded.
+recursive-include docs *.md
+
+# Never ship the full mokuro fork checkout at ./mokuro. It is gitignored and
+# not part of this distribution, but it is a real directory on a maintainer's
+# disk, and pruning it keeps an sdist built by hand from sweeping it in.
+prune mokuro
+prune output
+prune build
+prune dist
+
+global-exclude __pycache__ *.py[cod] .DS_Store

@@ -13,8 +13,10 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from unittest import mock
 from urllib.parse import urlsplit
 
+import httpx
 import pytest
 from starlette.testclient import TestClient
 
@@ -232,6 +234,106 @@ def test_a_host_outside_the_allow_list_is_refused(proxied, monkeypatch):
     # Guards against this ever behaving as an open proxy.
     monkeypatch.setattr(fetchproxy, "ALLOWED_HOSTS", set())
     assert proxied.get("/page.jpeg").status_code == 403
+
+
+# ------------------------------------------------- path-named upstream
+
+def _allow_test_host(monkeypatch, netloc):
+    """Let a test host stand in for a public CDN.
+
+    ``_target_is_safe`` refuses anything that is not a public internet address,
+    which is the point of it and is tested on its own; the recording fixture
+    below never opens a socket, so it needs the allowlist opened explicitly.
+    """
+    monkeypatch.setattr(fetchproxy, "UPSTREAM_PATTERNS", ["*"])
+    monkeypatch.setattr(fetchproxy, "_target_is_safe", lambda host: True)
+
+
+@pytest.mark.parametrize("path,expected", [
+    ("/_bwdd/cdn.example/sbc/img.php", ("cdn.example", "/sbc/img.php")),
+    ("/_bwdd/cdn.example/a/b", ("cdn.example", "/a/b")),
+    ("/sbc/img.php", (None, "/sbc/img.php")),
+    ("/_bwdd/cdn.example", (None, "/_bwdd/cdn.example")),
+    ("/_bwdd/", (None, "/_bwdd/")),
+    ("/_bwddX/cdn.example/a", (None, "/_bwddX/cdn.example/a")),
+])
+def test_split_path_upstream(path, expected):
+    assert fetchproxy.split_path_upstream(path) == expected
+
+
+@pytest.fixture
+def recording_proxy():
+    """A proxy whose upstream transport records the exact target URL.
+
+    The named-host forms are always fetched over https, so a plain-HTTP test
+    server cannot stand in for the CDN here; a MockTransport observes the built
+    URL directly and opens nothing.
+    """
+    seen: list[str] = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, content=BODY, headers={"content-type": "image/jpeg"})
+
+    real_client = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    with mock.patch.object(fetchproxy.httpx, "AsyncClient", factory):
+        with TestClient(fetchproxy.build_app([9001, 9002])) as client:
+            yield client, seen
+
+
+# A host that is in ALLOWED_HOSTS by default, so these stay hermetic: no DNS,
+# no TLS, no CDN.
+CDN_HOST = "bw-bv-epubs.bookwalker.jp"
+
+
+def test_health_advertises_the_path_upstream_form(proxied):
+    """The userscript keys the preflight-free request off this flag, so a bridge
+    that stops advertising it silently reverts to one OPTIONS per page."""
+    assert proxied.get("/__bwdd_health").json()["pathUpstream"] is True
+
+
+def test_path_upstream_forwards_to_the_named_host(recording_proxy):
+    client, seen = recording_proxy
+    response = client.get(f"/_bwdd/{CDN_HOST}/sbc/sbcGetImg.php?src=p%2Fa.jpg&q=1&p=tok")
+    assert response.status_code == 200
+    assert response.content == BODY
+    assert seen == [f"https://{CDN_HOST}/sbc/sbcGetImg.php?src=p%2Fa.jpg&q=1&p=tok"], (
+        "the host segment must be stripped and the rest forwarded byte-for-byte"
+    )
+
+
+def test_header_upstream_still_names_the_cdn(recording_proxy):
+    """The original contract keeps working: an older userscript sends the
+    header, and a newer one falls back to it when the bridge has no path form."""
+    client, seen = recording_proxy
+    response = client.get("/page.jpeg?Policy=x", headers={"x-bwdd-upstream": CDN_HOST})
+    assert response.status_code == 200
+    assert seen == [f"https://{CDN_HOST}/page.jpeg?Policy=x"]
+
+
+def test_a_plain_request_still_goes_to_the_configured_upstream(recording_proxy):
+    """No prefix and no header: the mirrored form is untouched, so an old
+    userscript against a new bridge behaves exactly as before."""
+    client, seen = recording_proxy
+    client.get("/page.jpeg")
+    assert seen == [fetchproxy.UPSTREAM + "/page.jpeg"]
+
+
+def test_the_header_wins_when_both_forms_are_present(recording_proxy):
+    client, seen = recording_proxy
+    client.get("/_bwdd/cdn-a.example/page.jpeg", headers={"x-bwdd-upstream": CDN_HOST})
+    assert seen == [f"https://{CDN_HOST}/page.jpeg"]
+
+
+def test_path_upstream_is_refused_outside_the_allow_list(proxied, monkeypatch):
+    monkeypatch.setattr(fetchproxy, "UPSTREAM_PATTERNS", [])
+    assert proxied.get("/_bwdd/evil.example/page.jpeg").status_code == 403
+    assert _Upstream.seen == [], "a refused host must not be fetched"
 
 
 # ------------------------------------------------------------------ env

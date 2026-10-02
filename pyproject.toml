@@ -1,0 +1,113 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mokuro-bridge"
+description = "Local OCR bridge for manga page captures, producing CBZ + .mokuro + cover for reader.mokuro.app"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "GolyBidoof" }]
+keywords = ["manga", "ocr", "mokuro", "bookwalker", "cbz"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Text Processing :: Linguistic",
+  "Topic :: Multimedia :: Graphics :: Capture",
+]
+dynamic = ["version"]
+
+# Mirrors requirements.txt, which stays the readable list for a git checkout.
+# tests/test_packaging.py fails if the two drift apart.
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "python-multipart>=0.0.12",
+  "httpx>=0.27.0",
+  "keyring>=23.13",
+]
+
+[project.optional-dependencies]
+# The OCR engine. Deliberately NOT part of "cloud" or an "all" extra: mokuro
+# pulls in PyTorch (several GB), and the bridge runs fine without it, reporting
+# mokuro_installed:false. Mirrors requirements-ocr.txt.
+ocr = ["mokuro>=0.2.0"]
+# Upload providers, each installing only its own SDK. Mirrors requirements-drive.txt.
+drive = [
+  "google-api-python-client>=2.100.0",
+  "google-auth-oauthlib>=1.0.0",
+  "google-auth>=2.0.0",
+  "requests>=2.20.0",
+]
+# Mirrors requirements-onedrive.txt.
+onedrive = [
+  "msal>=1.24.0",
+  "requests>=2.31",
+]
+# Both upload SDKs, still no PyTorch. This is the extra most people want.
+cloud = [
+  "google-api-python-client>=2.100.0",
+  "google-auth-oauthlib>=1.0.0",
+  "google-auth>=2.0.0",
+  "msal>=1.24.0",
+  "requests>=2.31",
+]
+# Mirrors requirements-dev.txt. tomli is the 3.10 stand-in for stdlib tomllib:
+# without it tests/test_packaging.py importorskips, so a 3.10 CI job would
+# report green having tested nothing. ruff pins the lint result to this repo's
+# [tool.ruff] block instead of whatever config happens to be installed.
+dev = [
+  "pytest>=8.0",
+  "tomli>=2.0; python_version < \"3.11\"",
+  "ruff>=0.6",
+]
+
+[project.scripts]
+mokuro-bridge = "mokuro_bridge.cli:main"
+mokuro-bridge-ocr = "mokuro_bridge.ocr_folder:main"
+
+[project.urls]
+Homepage = "https://github.com/GolyBidoof/mokuro-bridge"
+Repository = "https://github.com/GolyBidoof/mokuro-bridge"
+Issues = "https://github.com/GolyBidoof/mokuro-bridge/issues"
+Changelog = "https://github.com/GolyBidoof/mokuro-bridge/blob/main/CHANGELOG.md"
+Releases = "https://github.com/GolyBidoof/mokuro-bridge/releases"
+
+[tool.setuptools.dynamic]
+version = { attr = "mokuro_bridge.__version__" }
+
+# Explicit, and that matters: this repo also holds a full mokuro fork checkout
+# in ./mokuro (with comic_text_detector, its own .git, .bench-variants and
+# .audit). Auto-discovery would either fail on the multiple top-level
+# directories or sweep that tree into the wheel. Listing the packages keeps the
+# wheel to the bridge itself; the fork is still used at runtime via MOKURO_REPO.
+[tool.setuptools]
+packages = ["mokuro_bridge", "mokuro_bridge.providers"]
+
+# Without this block ruff auto-discovers whatever config is installed on the
+# machine (or in $HOME), so the lint result is not reproducible and is not the
+# one CI runs. E4/E7/E9 are the pycodestyle errors that actually catch bugs;
+# F is pyflakes. The rules deliberately left out are stylistic, not correctness.
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# util.py matches Japanese/Chinese text with CJK regex literals and the Unicode
+# punctuation classes around it. Those look like ambiguous-unicode warnings but
+# are the whole point of the code; do not "fix" them by escaping.
+"mokuro_bridge/util.py" = ["RUF001", "RUF003"]

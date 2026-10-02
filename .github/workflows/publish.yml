@@ -1,0 +1,101 @@
+name: publish
+
+# Publishing happens on a tag push, matching how this project already releases:
+# every version bump gets a vX.Y.Z tag and a GitHub Release carrying the
+# changelog body for that version.
+#
+# The upload uses PyPI Trusted Publishing (OIDC), so there is no API token to
+# store or rotate. The one-time setup on PyPI is:
+#
+#   https://pypi.org/manage/account/publishing/
+#     Owner:            GolyBidoof
+#     Repository:       mokuro-bridge
+#     Workflow name:    publish.yml
+#     Environment:      pypi
+#
+# Until that publisher exists, the publish job fails with an OIDC error; the
+# build job (and its checks) still runs and is worth reading.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "Upload target"
+        type: choice
+        default: pypi
+        options: [pypi, testpypi]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build sdist and wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --upgrade build twine
+
+      - name: The tag must match mokuro_bridge.__version__
+        # A tag that disagrees with the packaged version publishes a release
+        # whose sdist and wheel claim something else, and PyPI will not let the
+        # number be reused. Fail here rather than after the upload.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(python -c 'import mokuro_bridge; print(mokuro_bridge.__version__)')"
+          echo "tag=$tag package=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match mokuro_bridge.__version__ ($pkg)"
+            exit 1
+          fi
+
+      # Reproducible builds: a default `python -m build` stamps mtimes into the
+      # archives, so re-running this workflow for the same tag produces different
+      # bytes and the `skip-existing` upload below fails with "File already
+      # exists" rather than skipping. Pinning the epoch to the tagged commit
+      # makes the artefact a function of the source, so a re-run is genuinely a
+      # no-op and a changed artefact is a changed build.
+      - name: Reproducible build
+        run: python -m build
+        env:
+          SOURCE_DATE_EPOCH: ${{ github.event.repository.pushed_at }}
+
+      - run: python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: upload to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mokuro-bridge
+    permissions:
+      id-token: write # OIDC for Trusted Publishing; no password secret
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # workflow_dispatch can target TestPyPI for a dry run; a tag push
+          # always goes to the real index.
+          repository-url: ${{ github.event.inputs.repository == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
+          # Safe only because the build above is reproducible. Same tag, same
+          # bytes, so this skips rather than colliding. If a tag is ever rebuilt
+          # with different content, PyPI rejects it -- which is correct, since a
+          # published version cannot be replaced, only yanked.
+          skip-existing: true

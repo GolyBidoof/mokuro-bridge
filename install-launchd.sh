@@ -30,13 +30,36 @@ fi
 SERVER="$DIR/server.py"
 PORT="${MOKURO_BRIDGE_PORT:-62642}"   # 62642 spells "MANGA" on a phone keypad
 
+# The port comes straight from the environment and lands inside the plist (and
+# in a URL), so reject anything that is not a plain number before it can
+# corrupt the generated file.
+case "$PORT" in
+  "" | *[!0-9]*)
+    echo "error: MOKURO_BRIDGE_PORT must be a port number, got: $PORT" >&2
+    exit 1
+    ;;
+esac
+
+# sed's s/// replacement treats three characters specially: & expands to the
+# whole match, | ends the pattern (this script uses | as its delimiter), and a
+# backslash is an escape. A path containing any of them -- entirely legal in a
+# $HOME or an interpreter path -- would otherwise silently mangle the plist.
+sed_replacement() {
+  printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'
+}
+
+PYTHON3_ESC="$(sed_replacement "$PYTHON3")"
+SERVER_ESC="$(sed_replacement "$SERVER")"
+DIR_ESC="$(sed_replacement "$DIR")"
+HOME_ESC="$(sed_replacement "$HOME")"
+
 # Rewrite plist with absolute paths for this machine
 mkdir -p "$HOME/Library/LaunchAgents"
 sed \
-  -e "s|__PYTHON3__|${PYTHON3}|g" \
-  -e "s|__SERVER__|${SERVER}|g" \
-  -e "s|__WORKDIR__|${DIR}|g" \
-  -e "s|__HOME__|${HOME}|g" \
+  -e "s|__PYTHON3__|${PYTHON3_ESC}|g" \
+  -e "s|__SERVER__|${SERVER_ESC}|g" \
+  -e "s|__WORKDIR__|${DIR_ESC}|g" \
+  -e "s|__HOME__|${HOME_ESC}|g" \
   -e "s|__PORT__|${PORT}|g" \
   "$PLIST_SRC" > "$PLIST_DST"
 

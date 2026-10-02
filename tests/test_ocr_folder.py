@@ -2,10 +2,25 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 
 import pytest
 
-import ocr_folder
+# The implementation moved into the package so a wheel can ship the
+# mokuro-bridge-ocr console script; the root ocr_folder.py is now a wrapper.
+from mokuro_bridge import ocr_folder
+
+
+def test_help_names_the_command_that_was_invoked(monkeypatch, capsys):
+    """The usage line must not claim to be a file that is not on your PATH.
+
+    Now that `mokuro-bridge-ocr` is a real entry point, `prog` follows argv[0]
+    rather than being pinned to the checkout script's filename.
+    """
+    monkeypatch.setattr(sys, "argv", ["mokuro-bridge-ocr", "--help"])
+    with pytest.raises(SystemExit):
+        ocr_folder.main()
+    assert "usage: mokuro-bridge-ocr" in capsys.readouterr().out
 
 
 class _Response:

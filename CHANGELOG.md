@@ -1,5 +1,58 @@
 # Changelog
 
+## Unreleased
+
+## v0.7.0
+
+Installable as a package, plus a version check that says when a newer release exists.
+
+### Added
+
+- **`pipx install mokuro-bridge`** (or `uv tool install`). `pyproject.toml` builds a wheel carrying two console scripts, `mokuro-bridge` and `mokuro-bridge-ocr`. The git-checkout install is unchanged: `server.py` and `ocr_folder.py` stay as wrappers, so existing launchers, the launchd plist and the README keep working.
+- `--check-update` prints the newest published release and the upgrade command for the way *this* copy was installed (pipx, pip or a git checkout). Exit codes: 0 up to date, 1 update available, 2 the check could not be completed. `--version` prints the running version.
+- `/health` gained `update_check`, `latest_version`, `update_available`, `update_url` and `update_error`, read from a cache so the request never waits on a socket. The check runs in the background at startup and is refreshed at most every six hours (`MOKURO_BRIDGE_UPDATE_TTL_S`). A failure is cached too, so an offline machine does not retry in a loop. `MOKURO_BRIDGE_UPDATE_CHECK=0` turns it off.
+- `python -m mokuro_bridge` runs the bridge, for an install whose script directory is not on `PATH`.
+- `mokuro_bridge/update.py`, with tests for version comparison, the injected fetcher, TTL caching, and the offline and disabled paths.
+- `tests/test_packaging.py` holds the packaging contract: `pyproject.toml` and `requirements*.txt` cannot drift apart, every package directory is listed for the wheel, the installed-vs-checkout output directory rule is pinned, and the console script targets must resolve.
+- CI: `.github/workflows/tests.yml` runs the suite on Linux for Python 3.10 to 3.13, plus macOS and Windows on 3.13, and builds the wheel to assert the vendored `./mokuro` fork never ships inside it. `.github/workflows/publish.yml` publishes a `vX.Y.Z` tag to PyPI with Trusted Publishing.
+
+### Fixed
+
+- **`/session/resume` answered 500 on every call.** The module called `_safe_component()` without importing it, so folder ingest failed with a `NameError` and no volume could be handed over from an existing directory. The import is there now, and `tests/test_endpoints.py` locks the endpoint.
+- **OCR is about 1.8x faster again.** v0.6.0 raised `num_beams` to 4 as a side effect of an unrelated commit, costing ~43 ms/crop against ~23.5 ms/crop at one beam (measured on MPS). The default is back to one beam.
+- **A page resent under a new name no longer duplicates the volume.** A 249-page volume was once finalized as 498 pages, a complete book followed by a jumbled partial copy, and shipped that way. A resend now supersedes the old page instead of sitting beside it.
+- **A volume wedged by the bridge's own staging can be finalized again.** Remote uploads stage in `<vol>/_mega_upload` and the ingest walk rejects images in subdirectories, so that debris made every later attempt fail too. It is cleared on the next attempt.
+- **A volume could never be reused.** The collision check ran *after* the work
+  directory was created, so it was always true and every fresh volume was given a
+  random `<title>_<6 hex>` suffix. A later `reuse_existing` start looked the
+  session up by the plain title, found nothing, and created yet another directory,
+  so the volume and its OCR cache were thrown away on every run. The check now
+  happens before the directory is made.
+- Imprint and edition tags no longer split one series across folders. `サンプル作品(1) (サンプルコミックス)` now derives a single series rather than one per volume.
+
+### Changed
+
+- `page_num` is optional on `/page` and `/page-local`. Clients that omit it are unaffected; it was already documented as advisory.
+- The fetch proxy serves `/_bwdd/<host>/<path>` and advertises it as `pathUpstream` in `/health` (`fetchPathUpstream`), for clients that need a fixed origin.
+- `MOKURO_BRIDGE_FETCH_UPSTREAM` and `MOKURO_BRIDGE_FETCH_ALLOWED_HOSTS` are now documented in the README and `.env.example`. The allow-list still defaults to `*`; `_target_is_safe()` is the gate that rejects loopback, private, link-local, multicast and reserved targets.
+- The CLI moved from `server.py` into `mokuro_bridge/cli.py`. `server.py` is now a wrapper that also re-exports the ASGI app, so `python server.py` and `uvicorn server:app` behave as before. `ocr_folder.py` moved into the package for the same reason, with a wrapper left behind.
+- **The recommended OCR engine is now the mokuro fork** rather than the stock
+  package, since it adds batched recognition and is worth roughly 1.8x on a
+  measured workload. It installs in one line, `pip install "mokuro @ git+https://github.com/GolyBidoof/mokuro"`,
+  and the bridge detects its batch API by introspection, so there is nothing to
+  configure. Stock mokuro from PyPI still works and remains the fallback in
+  `requirements-ocr.txt`.
+- The version check uses httpx rather than urllib. httpx is already a base dependency and verifies TLS against certifi, where a python.org macOS build ships no CA store of its own and fails the request with `CERTIFICATE_VERIFY_FAILED`.
+- The default output directory now depends on how the bridge was installed. A git checkout keeps using `<repo>/output`; an installed wheel uses `~/mokuro-bridge/output`, because the old default resolved to the parent of `site-packages` and would have put the user's volumes inside the virtualenv, where a `pipx upgrade` rebuild can strand them. `MOKURO_BRIDGE_OUTPUT_DIR` still overrides both.
+- `./mokuro` is excluded from the distribution explicitly. A wheel shipping a top-level `mokuro` package would shadow the real OCR engine that users install from PyPI.
+- README quickstart now leads with pipx and keeps the checkout path beside it, and a new "Keeping it up to date" section documents the check, the `/health` fields and the restart after an upgrade.
+
+### Notes
+
+- Nothing is updated automatically. `--check-update` reports, and prints the command; applying it, and restarting a service, stays your call, because a restart mid-OCR would lose work.
+- The first PyPI release is v0.7.0. v0.6.0 was git-only, so there is no version collision, and the update check compares against the v0.7.0 tag. `publish.yml` fails the build if the tag and the packaged version disagree.
+- Publishing needs a one-time pending publisher on PyPI: owner `GolyBidoof`, repository `mokuro-bridge`, workflow `publish.yml`, environment `pypi`. Until that exists the publish job fails at its OIDC step; the build job still runs and its wheel is kept as an artifact.
+
 ## v0.6.0
 
 Several accounts per upload provider, and a fix for the keychain lookup that made a re-run of the MEGA wizard appear to do nothing.
@@ -72,5 +125,5 @@ Turns the bridge into a page-fetch accelerator for the downloader userscript. Ch
 ### Notes
 
 - `UVICORN_RELOAD=1` disables the fetch proxy: the reloader spawns a second process that would contend for the same ports.
-- The proxy refuses any host outside its allow-list, so it cannot be used as an open proxy. Only the CDN host is reachable through it.
+- The proxy resolves every host it is given and refuses loopback, private, link-local, multicast and reserved addresses, so it cannot reach the local network or the bridge itself. Its host allow-list defaults to `*`; `MOKURO_BRIDGE_FETCH_ALLOWED_HOSTS` narrows it. See the README for what that does and does not cover.
 - Downloading never depends on the bridge. With it stopped, the userscript falls back to its own page and background-context lanes. 

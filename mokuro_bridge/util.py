@@ -70,25 +70,36 @@ def _ensure_python_deps(module_names, requirements_file: str) -> bool:
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "_", name).strip().strip(".")[:200]
 
+# An imprint or edition tag can follow the volume number:
+#
+#   サンプル作品(1) (サンプルコミックス)
+#
+# which puts the number *before* the end of the title and so defeats every marker
+# below. Each volume then derives its own "series" name and a series scatters
+# across one remote folder per volume instead of sharing one. The tag is optional
+# and only ever consumed together with a marker, so a title with no volume number
+# keeps its trailing parentheses intact.
+_TRAILING_TAG = r"(?:\s*[（(][^）)]*[）)])?\s*$"
+
 _VOLUME_MARKERS = [
     # （１） (1) （上） etc.
-    re.compile(r"\s*[（(]\s*[0-9０-９一二三四五六七八九十百上下中全]+\s*[）)]\s*$"),
+    re.compile(r"\s*[（(]\s*[0-9０-９一二三四五六七八九十百上下中全]+\s*[）)]" + _TRAILING_TAG),
     # 1巻 第2巻 １２巻
-    re.compile(r"\s*第?\s*[0-9０-９一二三四五六七八九十百]+\s*巻\s*$"),
+    re.compile(r"\s*第?\s*[0-9０-９一二三四五六七八九十百]+\s*巻" + _TRAILING_TAG),
     # Vol.1 vol 2
-    re.compile(r"\s*[Vv]ol\.?\s*[0-9０-９]+\s*$"),
+    re.compile(r"\s*[Vv]ol\.?\s*[0-9０-９]+" + _TRAILING_TAG),
     # trailing volume number after space: "…　6" / "… 3"
-    re.compile(r"[\s　]+[0-9０-９]{1,3}\s*$"),
+    re.compile(r"[\s　]+[0-9０-９]{1,3}" + _TRAILING_TAG),
 ]
 
 def series_title_from_volume(title: str) -> str:
     """
     Derive a shared series folder name from a volume title.
 
-    推しが武道館いってくれたら死ぬ（２）【電子限定特典ペーパー付き】
-      → 推しが武道館いってくれたら死ぬ
-    メダリスト 1巻 → メダリスト
-    「おかえり、パパ」【電子単行本】　6 → 「おかえり、パパ」
+    サンプル作品（２）【電子限定特典ペーパー付き】
+      → サンプル作品
+    サンプル作品 1巻 → サンプル作品
+    「サンプル作品」【電子単行本】　6 → 「サンプル作品」
     """
     s = (title or "").strip()
     # Edition/bonus tags are volume-specific — drop them for the series folder.

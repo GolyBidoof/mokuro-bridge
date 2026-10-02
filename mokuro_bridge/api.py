@@ -26,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from . import APP_NAME, __version__
+from . import update
 from . import fetchproxy as _fetchproxy
 from . import log as _log
 from .config import (
@@ -49,7 +50,6 @@ from . import ocr as _ocr
 from .ocr import (
     _MOKURO_REPO,
     _ensure_ocr_worker,
-    _fork_supported,
     _mokuro_pkg,
     _mokuro_submodule,
     _ocr_queue,
@@ -82,6 +82,11 @@ from .sessions import (
     _find_session_by_safe_title,
     _get_session,
     _persist_session,
+    # Used by the resume ingest to decide which files in a source directory are
+    # pages. It lives in sessions.py and ocr.py already imports it from there;
+    # this module was calling it without the import, so every /session/resume
+    # answered 500 with `NameError: name '_safe_component' is not defined`.
+    _safe_component,
     _sessions,
     _sessions_lock,
     session_snapshot,
@@ -101,7 +106,9 @@ app = FastAPI(title=APP_NAME, version=__version__)
 # A lightweight, thread-safe record of what the bridge is doing right now.
 # health() reads it to report `busy` + `busy_stage` so a polling client can
 # tell "idle" from "OCR running" from "uploading" without parsing sessions.
-import threading as _threading
+# Imported here rather than at the top of the file so it sits with the only
+# thing that uses it; the private alias keeps it out of the shared namespace.
+import threading as _threading  # noqa: E402
 
 _activity_lock = _threading.Lock()
 _activity = {"stage": "idle", "detail": "", "owners": {}}
@@ -705,8 +712,10 @@ def _copy_no_follow(source: Path, destination: Path) -> None:
         raise HTTPException(status_code=409, detail="Destination already exists") from error
     except (OSError, ValueError) as error:
         if created:
-            try: destination.unlink(missing_ok=True)
-            except Exception: pass
+            try:
+                destination.unlink(missing_ok=True)
+            except Exception:
+                pass
         raise HTTPException(status_code=400, detail="Could not copy destination safely") from error
     finally:
         if fd is not None:
@@ -980,7 +989,7 @@ async def _session_start_body(title: str, reuse_existing: str, safe_title: str):
                     with _ocr_cv:
                         for index in range(len(_ocr_queue) - 1, -1, -1):
                             if _ocr_queue[index][0] == existing.session_id:
-                                _ocr_queue.pop(index)
+                                del _ocr_queue[index]
                     raise RuntimeError("could not persist reused session")
                 _ensure_ocr_worker()
                 snap = session_snapshot(existing)
@@ -991,7 +1000,7 @@ async def _session_start_body(title: str, reuse_existing: str, safe_title: str):
                 with _ocr_cv:
                     for index in range(len(_ocr_queue) - 1, -1, -1):
                         if _ocr_queue[index][0] == existing.session_id:
-                            _ocr_queue.pop(index)
+                            del _ocr_queue[index]
                     if not any(item[0] == existing.session_id for item in _ocr_queue):
                         try:
                             _ocr._ocr_session_order.remove(existing.session_id)
@@ -1023,10 +1032,20 @@ async def _session_start_body(title: str, reuse_existing: str, safe_title: str):
     else:
         with _session_create_lock:
             async with _volume_creation_lock(safe_title):
-                vol_dir = _ensure_safe_work_volume(WORK_DIR / safe_title)
-                if vol_dir.exists():
+                # The collision check has to happen BEFORE the directory is made.
+                # _ensure_safe_work_volume() ends in mkdir(exist_ok=True), so
+                # asking afterwards was always true: every fresh volume got a
+                # random <title>_<6 hex> suffix, and the title a later
+                # reuse_existing lookup searches for no longer matched the one
+                # registered here, so the volume and its OCR cache were never
+                # reused. A symlink at the target counts as taken, which is the
+                # safe direction, since _ensure_safe_work_volume rejects those.
+                taken = (WORK_DIR / safe_title).exists()
+                if taken:
                     vol_dir = _ensure_safe_work_volume(WORK_DIR / f"{safe_title}_{uuid.uuid4().hex[:6]}")
                     safe_title = vol_dir.name
+                else:
+                    vol_dir = _ensure_safe_work_volume(WORK_DIR / safe_title)
                 vol_dir.mkdir(parents=True, exist_ok=True)
 
     session_id = uuid.uuid4().hex[:12]
@@ -1057,7 +1076,7 @@ async def _session_start_body(title: str, reuse_existing: str, safe_title: str):
         with _ocr_cv:
             for index in range(len(_ocr_queue) - 1, -1, -1):
                 if _ocr_queue[index][0] == session_id:
-                    _ocr_queue.pop(index)
+                    del _ocr_queue[index]
             if not any(item[0] == session_id for item in _ocr_queue):
                 try:
                     _ocr._ocr_session_order.remove(session_id)
@@ -1288,7 +1307,7 @@ async def _session_resume_body(title: str, source_dir: str, safe_title: str):
             with _ocr_cv:
                 for index in range(len(_ocr_queue) - 1, -1, -1):
                     if _ocr_queue[index][0] == session.session_id:
-                        _ocr_queue.pop(index)
+                        del _ocr_queue[index]
                 if not any(item[0] == session.session_id for item in _ocr_queue):
                     try:
                         _ocr._ocr_session_order.remove(session.session_id)
@@ -1303,12 +1322,97 @@ async def _session_resume_body(title: str, source_dir: str, safe_title: str):
         with session.lock:
             session.ingesting = False
 
+def _clear_stale_staging(vol_dir: Path) -> None:
+    """
+    Remove the bridge's own upload staging left behind by a failed finalize.
+
+    A successful finalize deletes the whole work volume, so anything still in
+    here at the start of the next attempt is debris from one that died -- and
+    because ingest validation rejects images in subdirectories, that debris
+    makes every later attempt fail too.
+    """
+    staging = vol_dir / "_mega_upload"
+    if staging.is_symlink():
+        staging.unlink(missing_ok=True)
+        return
+    if staging.is_dir():
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _unlink_ocr_cache(session, name: str) -> None:
+    """Drop one page's cached OCR result, if a cache path can be resolved for it."""
+    try:
+        cache_volume = _mokuro_submodule("volume").Volume(session.vol_dir)
+        cache_path = ocr_json_path(cache_volume, name)
+        if not _safe_ocr_cache_path(cache_path, cache_volume.path_ocr_cache, allow_missing=True):
+            return
+        cache_path.unlink(missing_ok=True)
+    except Exception:
+        # A missing or unreadable cache is not a reason to refuse the page: the
+        # cache is an optimisation and re-running OCR is always correct.
+        pass
+
+
+def _supersede_stale_page(session, page_num, safe_name: str) -> None:
+    """
+    Drop this session's older file for `page_num` when the page arrives renamed.
+
+    Pages are tracked by *name*, so a client that re-sends a page under a new
+    naming scheme looks like it is sending a brand-new page: the old file stays,
+    both are queued for OCR, and the volume is packaged with both sets. That
+    happened for real -- a 249-page volume was finalized as 498 pages, the first
+    a complete book and the rest a jumbled partial copy, and shipped that way.
+
+    The page number is the identity; the filename is only where its bytes happen
+    to live. So the old file, its OCR cache and its three set entries all go.
+
+    Only ever called with `_ocr_cv` and `session.lock` held, and only when the
+    caller supplied a page number -- a legacy client that omits it must keep
+    working exactly as before, with nothing ever removed.
+    """
+    if page_num is None:
+        return
+    stale_names = []
+    previous = session.page_names.get(page_num)
+    if previous and previous != safe_name:
+        stale_names.append(previous)
+    # A session that predates `page_names` recorded no mapping at all, yet the
+    # page is already here under the older scheme -- so the mapping alone would
+    # never retire it, and the volume would still ship both. The older scheme is
+    # the same fallback shape this module already derives from the page number
+    # above, so look for that too. Comparing whole stems keeps a genuine
+    # 3-digit page ("page_001", page 1) from being mistaken for a 4-digit one
+    # ("page_0001", page 0).
+    legacy_stem = f"page_{page_num:03d}"
+    if Path(safe_name).stem != legacy_stem:
+        stale_names.extend(
+            name for name in session.pages_received
+            if name != safe_name and Path(name).stem == legacy_stem
+        )
+    session.page_names[page_num] = safe_name
+    for name in dict.fromkeys(stale_names):
+        # Never pull a file out from under a request that is still writing or
+        # OCR'ing it; it can be retired when that request's page arrives again.
+        if name in session.page_reservations or (session.session_id, name) in _ocr_processing:
+            continue
+        stale = session.vol_dir / name
+        try:
+            if stale.is_file() and not stale.is_symlink():
+                stale.unlink()
+        except OSError:
+            continue
+        _unlink_ocr_cache(session, name)
+        session.pages_received.discard(name)
+        session.pages_ocr_done.discard(name)
+        session.pages_ocr_failed.discard(name)
+
+
 @app.post("/session/{session_id}/page")
 async def session_page(
     session_id: str,
     page: UploadFile = File(...),
     filename: str = Form(...),
-    page_num: int = Form(0),
+    page_num: Optional[int] = Form(None),
 ):
     """Accept one captured page and queue OCR immediately (non-blocking)."""
     session = await asyncio.to_thread(_get_session, session_id)
@@ -1317,7 +1421,7 @@ async def session_page(
 
     # Accept only image destinations so every accepted page participates in
     # OCR, CBZ packaging, and cover selection consistently.
-    safe_name = _validated_page_name(filename, f"page_{int(page_num):03d}.webp")
+    safe_name = _validated_page_name(filename, f"page_{int(page_num or 0):03d}.webp")
 
     _ensure_safe_work_volume(session.vol_dir)
     dest = session.vol_dir / safe_name
@@ -1346,6 +1450,10 @@ async def session_page(
                     )
                 if dest.exists() and safe_name not in session.pages_ocr_failed and safe_name in session.pages_received:
                     raise HTTPException(status_code=409, detail=f"Page is already queued or present: {safe_name}")
+                # The page number is the identity: if this page already lives here
+                # under an older name, retire that copy before admitting this one,
+                # so the volume never packages both.
+                _supersede_stale_page(session, page_num, safe_name)
                 session.page_reservations.add(safe_name)
                 reserved = True
         async with _upload_memory_slot():
@@ -1384,7 +1492,7 @@ async def session_page_local(
     session_id: str,
     path: str = Form(...),
     filename: str = Form(...),
-    page_num: int = Form(0),
+    page_num: Optional[int] = Form(None),
 ):
     """Same-machine ingest: copy a local image into the session and queue OCR."""
     session = await asyncio.to_thread(_get_session, session_id)
@@ -1399,7 +1507,7 @@ async def session_page_local(
         raise HTTPException(status_code=400, detail=f"Not a file: {src}")
     if src.suffix.lower() not in IMAGE_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"Unsupported image type: {src.suffix}")
-    safe_name = _validated_page_name(filename, f"page_{int(page_num):03d}{src.suffix.lower()}")
+    safe_name = _validated_page_name(filename, f"page_{int(page_num or 0):03d}{src.suffix.lower()}")
 
     async with _upload_memory_slot():
         if not _looks_like_image(await asyncio.to_thread(_read_source_limited, src)):
@@ -1429,6 +1537,7 @@ async def session_page_local(
                     raise HTTPException(status_code=409, detail="Image filename stem already exists with another extension")
                 if dest.exists() and safe_name in session.pages_received and safe_name not in session.pages_ocr_failed:
                     raise HTTPException(status_code=409, detail=f"Page is already queued or present: {safe_name}")
+                _supersede_stale_page(session, page_num, safe_name)
                 session.page_reservations.add(safe_name)
                 reserved = True
         if dest.is_symlink():
@@ -1861,6 +1970,15 @@ async def session_finalize(
                     # the bridge's page/OCR state is intentionally direct-child
                     # only. Reject nested images and every reparse/symlink before
                     # generation so a manually planted tree cannot expand scope.
+                    # The bridge stages each final trio in `<vol>/_mega_upload` (see
+                    # the staging path further down). A finalize that dies mid-upload
+                    # leaves that directory behind -- but it holds the staged cover
+                    # `.webp`, and the walk below rejects *any* image in a
+                    # subdirectory, so every later attempt trips over the bridge's
+                    # own scratch and the volume can never be finalized again. Clear
+                    # it first: it is bridge-owned transient scratch that this
+                    # function recreates, never client content.
+                    _clear_stale_staging(session.vol_dir)
                     for current, directories, files in os.walk(
                         session.vol_dir, topdown=True, followlinks=False
                     ):
@@ -2633,6 +2751,10 @@ async def queue_status():
 
 @app.get("/health")
 async def health():
+    # Keeps the cached version check warm without ever blocking this request:
+    # armed by the CLI at startup, a no-op otherwise (and always a no-op when
+    # MOKURO_BRIDGE_UPDATE_CHECK=0). See mokuro_bridge/update.py.
+    update.maybe_refresh_async()
     queue = await asyncio.to_thread(ocr_queue_metrics)
     upload_methods = await asyncio.to_thread(_build_upload_methods)
     with _sessions_lock:
@@ -2641,6 +2763,8 @@ async def health():
         "app": APP_NAME,
         "version": __version__,
         "status": "ok",
+        # Cache-only update state; see the note above about network I/O.
+        **update.health_fields(),
         "mokuro_installed": False,
         "mokuro_custom_fork": _MOKURO_REPO is not None,
         "mokuro_repo": str(_MOKURO_REPO) if _MOKURO_REPO is not None else None,
@@ -2666,6 +2790,10 @@ async def health():
         # Which CDN hosts those ports may serve, so the userscript can keep one
         # store's pages off a port configured for another store's CDN.
         "fetchUpstreams": list(_fetchproxy.UPSTREAM_PATTERNS),
+        # The fetch proxy also accepts the CDN as a path segment
+        # (/_bwdd/<host>/<path>), which keeps the page's request CORS-simple and
+        # so avoids one preflight per page. See mokuro_bridge/fetchproxy.py.
+        "fetchPathUpstream": True,
         "active_sessions": active_sessions,
         "ocr_chunk_size": _OCR_CHUNK_SIZE,
         "ocr_idle_flush_s": _OCR_IDLE_FLUSH_S,

@@ -39,6 +39,14 @@ class Session:
     finalize_cleanup_task: Optional[object] = None
     finalize_pack_task: Optional[object] = None
     page_reservations: set[str] = field(default_factory=set)
+    # Page number -> the filename currently holding that page.
+    #
+    # Pages are otherwise tracked by *name*, so re-sending one under a new name
+    # looks like a new page: the old file stays, both are queued for OCR, and the
+    # volume is processed twice. That happened for real when a client changed its
+    # naming scheme, leaving 498 pages for a 249-page volume. The page number is
+    # the identity; the name is only where the bytes currently live.
+    page_names: dict[int, str] = field(default_factory=dict)
     finalize_lock_handle: Optional[object] = None
 
 _sessions: dict[str, Session] = {}
@@ -103,6 +111,14 @@ def _persist_session(session: Session) -> bool:
                 "pages_received": sorted(session.pages_received),
                 "pages_ocr_done": sorted(session.pages_ocr_done),
                 "pages_ocr_failed": sorted(session.pages_ocr_failed),
+                # Page number -> name, so a restart can still tell that a page
+                # resent under a new filename is the *same* page. JSON object keys
+                # are strings, so the numbers are stored as such and coerced back
+                # on load.
+                "page_names": {
+                    str(number): name
+                    for number, name in sorted(session.page_names.items())
+                },
                 "message": session.message,
                 "finalized": session.finalized,
                 # Never persist a provider URL/share token; only the metadata
@@ -246,6 +262,26 @@ def _load_persisted_session(session_id: str, *, sync: bool = True) -> Optional[S
             if _safe_component(value, extension=image_extensions)
         }
 
+    def _page_names(value, extensions) -> dict[int, str]:
+        """
+        Restore page number -> name, dropping anything that is not a safe image.
+
+        Anything unreadable is dropped rather than guessed at: a wrong mapping
+        would let a later re-send delete a page that is actually a different one.
+        """
+        if not isinstance(value, dict):
+            return {}
+        restored: dict[int, str] = {}
+        for number, name in value.items():
+            try:
+                index = int(number)
+            except (TypeError, ValueError):
+                continue
+            if index < 0 or not _safe_component(name, extension=extensions):
+                continue
+            restored[index] = name
+        return restored
+
     message_value = data.get("message")
     if not isinstance(message_value, str) or len(message_value) > 4096:
         message_value = "Restored session"
@@ -257,6 +293,7 @@ def _load_persisted_session(session_id: str, *, sync: bool = True) -> Optional[S
         pages_received=_names("pages_received"),
         pages_ocr_done=_names("pages_ocr_done"),
         pages_ocr_failed=_names("pages_ocr_failed"),
+        page_names=_page_names(data.get("page_names"), image_extensions),
         message=message_value,
         finalized=finalized_value,
         cover_uploaded=_validate_cover_metadata(data.get("cover_uploaded")),

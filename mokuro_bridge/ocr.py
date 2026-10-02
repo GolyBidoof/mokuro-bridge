@@ -952,7 +952,14 @@ def _ocr_batch_fork(
             texts = mpocr.recognize_text(
                 sub_crops,
                 batch_size=ocr_batch_size,
-                num_beams=getattr(gen, "num_beams", 4) or 4,
+                # Greedy decoding, which is what every release before v0.6.0 used.
+                # v0.6.0 changed this to 4 as a side effect of an unrelated commit
+                # about upload accounts, making recognition ~1.8x slower (measured
+                # on MPS: ~23.5 ms/crop at one beam against ~43 ms/crop at four).
+                # The `getattr` made it look configurable, but MokuroGenerator
+                # exposes no `num_beams`, so the fallback always won and nothing
+                # could tune it back down.
+                num_beams=getattr(gen, "num_beams", 1) or 1,
             )
             if not isinstance(texts, (list, tuple)) or len(texts) != len(sub_crops):
                 actual = len(texts) if isinstance(texts, (list, tuple)) else type(texts).__name__
@@ -1017,7 +1024,6 @@ def _json_safe(value):
 
 def _save_page_result(session: Session, volume, filename: str, result: dict) -> None:
     """Write one page's OCR JSON into a no-follow cache path."""
-    dump_json = _mokuro_submodule("utils").dump_json
     root = Path(volume.path_ocr_cache)
     work_root = session.vol_dir.parent.resolve()
     try:

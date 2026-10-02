@@ -23,6 +23,12 @@
     <key>KeepAlive</key>
     <true/>
 
+    <!-- KeepAlive on its own would restart a failing agent at full speed
+         forever: a port clash re-binds 49 sockets per second and the log files
+         grow just as fast. 10s is the floor launchd honours. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
     <key>StandardOutPath</key>
     <string>__HOME__/Library/Logs/mokuro-bridge.log</string>
 
