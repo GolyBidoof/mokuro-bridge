@@ -21,6 +21,29 @@ def _artifact(path: Path, pages: int, title: str = "Series", volume: str = "Seri
     )
 
 
+def test_artifact_validation_does_not_need_the_ocr_engine(tmp_path, monkeypatch):
+    """The validator parses a file the bridge generated; it must not reach for mokuro.
+
+    v0.7.0 routed the read through _mokuro_submodule("utils").load_json, so on a
+    base install with no engine it died on an AttributeError from the
+    missing-package placeholder. CI caught it and a developer's machine did not,
+    because a checkout symlinks the engine in and it imports as a namespace
+    package. Poisoning the helper makes the coupling a hard failure here rather
+    than a crash someone finds on another machine.
+    """
+    def _unavailable(name):
+        raise AssertionError(f"artifact validation reached for the OCR engine: {name}")
+
+    monkeypatch.setattr(api, "_mokuro_submodule", _unavailable)
+
+    path = tmp_path / "book.mokuro"
+    _artifact(path, 2)
+    api._validate_mokuro_artifact(path, 2, "Series", "Series 1")
+
+    with pytest.raises(RuntimeError, match="coverage"):
+        api._validate_mokuro_artifact(path, 3, "Series", "Series 1")
+
+
 def test_mokuro_artifact_validation_checks_coverage_and_identity(tmp_path):
     path = tmp_path / "book.mokuro"
     _artifact(path, 2)

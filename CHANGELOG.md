@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## v0.7.1
+
+The v0.7.0 artifact-validation crash, on a base install.
+
+### Fixed
+
+- **Reading a generated `.mokuro` no longer needs the OCR engine.**
+  `_validate_mokuro_artifact()` loaded the file through
+  `_mokuro_submodule("utils").load_json`, so on an install without the optional
+  engine it raised `AttributeError: 'NoneType' object has no attribute '__name__'`
+  from the missing-package placeholder instead of validating anything. CI caught
+  it; a developer's machine did not, because a checkout symlinks the engine in and
+  it imports as a namespace package. The validator parses a file the bridge
+  generated, so it uses the standard library's `json` and has no business
+  depending on PyTorch.
+- `_mokuro_submodule()` now raises an `ImportError` naming the missing dependency
+  and the command that installs it, rather than an `AttributeError` that pointed
+  at neither the cause nor the fix.
+
 ## v0.7.0
 
 Installable as a package, plus a version check that says when a newer release exists.

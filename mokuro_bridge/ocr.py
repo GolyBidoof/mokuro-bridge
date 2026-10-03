@@ -171,7 +171,17 @@ except ImportError:  # pragma: no cover - health reports this
     _mokuro_pkg = None
 
 def _mokuro_submodule(name: str):
-    """Import a submodule of the pinned mokuro package."""
+    """Import a submodule of the pinned mokuro package.
+
+    The engine is an optional install, so its absence is an ordinary outcome:
+    say which dependency is missing rather than raising AttributeError from the
+    None placeholder, which pointed at neither the cause nor the fix.
+    """
+    if _mokuro_pkg is None:
+        raise ImportError(
+            "the mokuro OCR engine is not installed; "
+            'pip install "mokuro @ git+https://github.com/GolyBidoof/mokuro"'
+        )
     return importlib.import_module(f"{_mokuro_pkg.__name__}.{name}")
 
 _generator_lock = threading.Lock()

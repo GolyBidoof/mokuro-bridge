@@ -1797,7 +1797,14 @@ def _validate_mokuro_artifact(
 ) -> None:
     if not path.is_file() or path.is_symlink():
         raise RuntimeError("generated .mokuro is missing or unsafe")
-    data = _mokuro_submodule("utils").load_json(path)
+    # stdlib json, not mokuro's loader: this only parses a file the bridge
+    # generated, so routing it through the optional OCR engine meant a base
+    # install with no engine died on an AttributeError from the None
+    # placeholder rather than validating anything.
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"generated .mokuro is unreadable: {error}") from error
     if not isinstance(data, dict):
         raise RuntimeError("generated .mokuro is not an object")
     pages = data.get("pages")
