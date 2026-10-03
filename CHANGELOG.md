@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.7.4
+
+### Fixed
+
+- The local-ingest root list was defined twice in `config.py`, so every
+  `MOKURO_BRIDGE_INGEST_ROOTS` entry was appended twice. Shipped in 0.7.3.
+
+
 ## v0.7.3
 
 ### Fixed
