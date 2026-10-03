@@ -21,6 +21,32 @@ def _artifact(path: Path, pages: int, title: str = "Series", volume: str = "Seri
     )
 
 
+def test_ingest_roots_accept_extra_absolute_paths_only(monkeypatch, tmp_path):
+    """MOKURO_BRIDGE_INGEST_ROOTS widens the local-ingest gate, absolutes only.
+
+    A Windows library on a second drive had no supported way in: the defaults are
+    the home directory plus POSIX temp paths, which resolve to C:\tmp on Windows
+    and never match. A relative entry is refused rather than resolved, because it
+    would anchor the gate to whatever directory the server was started in.
+    """
+    import importlib
+
+    from mokuro_bridge import config as config_module
+
+    absolute = tmp_path / "books"
+    absolute.mkdir()
+
+    monkeypatch.setenv("MOKURO_BRIDGE_INGEST_ROOTS", f"{absolute}, relative/books")
+    importlib.reload(config_module)
+    try:
+        roots = [str(root) for root in config_module._LOCAL_INGEST_ROOTS]
+        assert str(absolute.resolve()) in roots, roots
+        assert not any(root.endswith("relative/books") for root in roots), roots
+    finally:
+        monkeypatch.delenv("MOKURO_BRIDGE_INGEST_ROOTS", raising=False)
+        importlib.reload(config_module)
+
+
 def test_artifact_validation_does_not_need_the_ocr_engine(tmp_path, monkeypatch):
     """The validator parses a file the bridge generated; it must not reach for mokuro.
 

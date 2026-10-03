@@ -19,6 +19,7 @@ name: publish
 on:
   push:
     tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
     inputs:
       repository:
@@ -76,6 +77,10 @@ jobs:
 
   publish:
     name: upload to PyPI
+    # A tag publishes, and so does a manual dispatch (the TestPyPI dry run).
+    # A plain push to main only builds and checks, so packaging breaks are caught
+    # on the commit that caused them rather than at release time.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     environment:

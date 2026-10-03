@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## v0.7.2
+
+The local-ingest gate can be widened, and the build runs on `main`.
+
+### Fixed
+
+- **`MOKURO_BRIDGE_INGEST_ROOTS` widens the local-ingest roots.** The routes that
+  accept a filesystem path were confined to the home directory plus the POSIX temp
+  paths. Those resolve to `C:\tmp` and friends on Windows and never match, so a
+  Windows library on a second drive had no supported way in and `/session/resume`
+  answered 403 with nothing to change. The variable takes a comma-separated list of
+  absolute paths. A relative entry is ignored rather than resolved, because it would
+  anchor the gate to whatever directory the server was started in.
+
+### Changed
+
+- The `publish` workflow's build job now also runs on pushes to `main`, so the
+  sdist and wheel are built and `twine check`ed on every commit instead of only at
+  tag time. Publishing still requires a `v*` tag.
+
 ## v0.7.1
 
 The v0.7.0 artifact-validation crash, on a base install.

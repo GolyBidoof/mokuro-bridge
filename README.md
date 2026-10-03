@@ -228,6 +228,18 @@ and applying it stays your call, because a restart mid-OCR loses work.
   confined to your home and the system temp locations, and uploads are
   extension-checked before anything is read. A caller can drive the bridge; it cannot
   read arbitrary files off your disk.
+- **A library outside those roots needs one setting.** The local-ingest routes are
+  confined to your home directory and the platform temp locations. On Windows that
+  means `C:\Users\<you>\...`; a library on `D:\` is refused with a 403 until you
+  add it:
+
+  ```bash
+  MOKURO_BRIDGE_INGEST_ROOTS='D:\manga' mokuro-bridge
+  ```
+
+  Comma-separated, absolute paths only. A relative entry is ignored rather than
+  resolved against the working directory, so it cannot quietly widen the gate to
+  wherever the server happened to start.
 - **The page-fetch proxy is not restricted to one CDN by default.** It refuses
   loopback, private and link-local targets, so it cannot reach your network -- but
   any public host is fetchable. `MOKURO_BRIDGE_FETCH_ALLOWED_HOSTS` closes it to one.

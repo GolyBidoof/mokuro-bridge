@@ -138,6 +138,14 @@ Stated plainly, because it is a deliberate design and not an oversight:
   locations, and uploads are extension-checked before anything is read. A caller can
   drive the bridge; it cannot read arbitrary files off the disk.
 
+The home-and-temp confinement is what those two bullets describe, and it was the
+whole allowlist until 0.7.2. **`MOKURO_BRIDGE_INGEST_ROOTS` widens it** with
+comma-separated absolute paths, for the common case of a library that is not where
+the bridge assumes: a second drive on Windows, say, where `C:\tmp` and friends
+resolve to paths that never match. A relative entry is ignored rather than
+resolved, because that would anchor the gate to whatever directory the server was
+started in.
+
 ## The update check
 
 `update.py` compares the running version against the latest release, from a cache
