@@ -230,6 +230,45 @@ _LOCAL_INGEST_ROOTS = [
     Path("/var/folders").resolve(),
     Path("/private/var/folders").resolve(),
 ]
+# Local path ingest (same-machine clients, e.g. headless scrapers). These routes
+# hand the bridge a filesystem path instead of uploading bytes, so it has to be
+# confined or any local caller could aim it at an arbitrary file.
+#
+# The defaults cover the home directory and the platform temp locations. The
+# hardcoded POSIX paths resolve to C:\tmp and friends on Windows and never match
+# there, which left a Windows library on a second drive with no supported way in.
+# MOKURO_BRIDGE_INGEST_ROOTS adds roots, comma-separated; setting it is the user
+# choosing to widen the gate.
+_LOCAL_INGEST_ROOTS = [
+    Path.home().resolve(),
+    Path("/tmp").resolve(),
+    Path("/private/tmp").resolve(),
+    Path("/var/folders").resolve(),
+    Path("/private/var/folders").resolve(),
+]
+
+
+def _extra_ingest_roots() -> list[Path]:
+    raw = os.environ.get("MOKURO_BRIDGE_INGEST_ROOTS", "")
+    roots = []
+    for entry in raw.split(","):
+        entry = entry.strip().strip('"').strip("'")
+        if not entry:
+            continue
+        candidate = Path(entry).expanduser()
+        if not candidate.is_absolute():
+            # A relative entry would resolve against the working directory and
+            # quietly widen the gate to wherever the server runs from.
+            continue
+        try:
+            roots.append(candidate.resolve())
+        except (OSError, RuntimeError):
+            # A bad entry must not take the bridge down at import.
+            continue
+    return roots
+
+
+_LOCAL_INGEST_ROOTS.extend(_extra_ingest_roots())
 
 
 def _extra_ingest_roots() -> list[Path]:

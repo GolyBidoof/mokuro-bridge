@@ -5,6 +5,8 @@ Everything runs against a temporary ACCOUNTS_DIR, so no test touches the real
 """
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from mokuro_bridge import accounts
@@ -84,6 +86,12 @@ def test_save_and_list_roundtrip(registry):
     assert again.label == "Work account"
     assert again.root == "/Root/work"
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows has no POSIX mode bits: st_mode reports 0o666 for any writable "
+           "file and chmod only toggles read-only. The boundary there is the "
+           "user profile ACL, which already confines the file.",
+)
 def test_metadata_file_is_private(registry):
     accounts.save_instance("drive", "main")
     path = accounts.meta_path("drive", "main")

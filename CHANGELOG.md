@@ -2,44 +2,41 @@
 
 ## Unreleased
 
-## v0.7.2
-
-The local-ingest gate can be widened, and the build runs on `main`.
+## v0.7.3
 
 ### Fixed
 
-- **`MOKURO_BRIDGE_INGEST_ROOTS` widens the local-ingest roots.** The routes that
-  accept a filesystem path were confined to the home directory plus the POSIX temp
-  paths. Those resolve to `C:\tmp` and friends on Windows and never match, so a
-  Windows library on a second drive had no supported way in and `/session/resume`
-  answered 403 with nothing to change. The variable takes a comma-separated list of
-  absolute paths. A relative entry is ignored rather than resolved, because it would
-  anchor the gate to whatever directory the server was started in.
+- `test_metadata_file_is_private` is skipped on Windows, which has no POSIX mode
+  bits: `st_mode` reports `0o666` for any writable file and `chmod` only toggles
+  read-only. The boundary there is the user profile ACL.
 
 ### Changed
 
-- The `publish` workflow's build job now also runs on pushes to `main`, so the
-  sdist and wheel are built and `twine check`ed on every commit instead of only at
-  tag time. Publishing still requires a `v*` tag.
+## v0.7.2
+
+### Added
+
+- `MOKURO_BRIDGE_INGEST_ROOTS`: comma-separated absolute paths added to the
+  local-ingest allowlist, which is otherwise the home directory plus the POSIX
+  temp paths. Those resolve to `C:\tmp` on Windows and never match, so a library
+  on a second drive had no way in. Relative entries are ignored.
+
+### Changed
+
+- The `publish` workflow's build job runs on pushes to `main` as well as tags, so
+  the sdist and wheel are built and `twine check`ed on every commit. Uploading
+  still requires a `v*` tag or a manual dispatch.
 
 ## v0.7.1
 
-The v0.7.0 artifact-validation crash, on a base install.
-
 ### Fixed
 
-- **Reading a generated `.mokuro` no longer needs the OCR engine.**
-  `_validate_mokuro_artifact()` loaded the file through
-  `_mokuro_submodule("utils").load_json`, so on an install without the optional
-  engine it raised `AttributeError: 'NoneType' object has no attribute '__name__'`
-  from the missing-package placeholder instead of validating anything. CI caught
-  it; a developer's machine did not, because a checkout symlinks the engine in and
-  it imports as a namespace package. The validator parses a file the bridge
-  generated, so it uses the standard library's `json` and has no business
-  depending on PyTorch.
-- `_mokuro_submodule()` now raises an `ImportError` naming the missing dependency
-  and the command that installs it, rather than an `AttributeError` that pointed
-  at neither the cause nor the fix.
+- `_validate_mokuro_artifact()` reads with the standard library instead of
+  `_mokuro_submodule("utils").load_json`. Without the optional OCR engine the
+  latter raised `AttributeError` from a `None` placeholder. The validator parses a
+  file the bridge generated and does not need PyTorch.
+- `_mokuro_submodule()` raises an `ImportError` naming the missing dependency
+  rather than an `AttributeError`.
 
 ## v0.7.0
 
@@ -47,7 +44,7 @@ Installable as a package, plus a version check that says when a newer release ex
 
 ### Added
 
-- **`pipx install mokuro-bridge`** (or `uv tool install`). `pyproject.toml` builds a wheel carrying two console scripts, `mokuro-bridge` and `mokuro-bridge-ocr`. The git-checkout install is unchanged: `server.py` and `ocr_folder.py` stay as wrappers, so existing launchers, the launchd plist and the README keep working.
+- **`pipx install mokuro-bridge`** (or `uv tool install`). Two console scripts: `mokuro-bridge`, `mokuro-bridge-ocr`. `server.py` and `ocr_folder.py` stay as wrappers, so the checkout install is unchanged.
 - `--check-update` prints the newest published release and the upgrade command for the way *this* copy was installed (pipx, pip or a git checkout). Exit codes: 0 up to date, 1 update available, 2 the check could not be completed. `--version` prints the running version.
 - `/health` gained `update_check`, `latest_version`, `update_available`, `update_url` and `update_error`, read from a cache so the request never waits on a socket. The check runs in the background at startup and is refreshed at most every six hours (`MOKURO_BRIDGE_UPDATE_TTL_S`). A failure is cached too, so an offline machine does not retry in a loop. `MOKURO_BRIDGE_UPDATE_CHECK=0` turns it off.
 - `python -m mokuro_bridge` runs the bridge, for an install whose script directory is not on `PATH`.
@@ -57,9 +54,9 @@ Installable as a package, plus a version check that says when a newer release ex
 
 ### Fixed
 
-- **`/session/resume` answered 500 on every call.** The module called `_safe_component()` without importing it, so folder ingest failed with a `NameError` and no volume could be handed over from an existing directory. The import is there now, and `tests/test_endpoints.py` locks the endpoint.
-- **OCR is about 1.8x faster again.** v0.6.0 raised `num_beams` to 4 as a side effect of an unrelated commit, costing ~43 ms/crop against ~23.5 ms/crop at one beam (measured on MPS). The default is back to one beam.
-- **A page resent under a new name no longer duplicates the volume.** A 249-page volume was once finalized as 498 pages, a complete book followed by a jumbled partial copy, and shipped that way. A resend now supersedes the old page instead of sitting beside it.
+- **`/session/resume` answered 500 on every call.** `_safe_component()` was called without being imported. Fixed, and locked by `tests/test_endpoints.py`.
+- **OCR is about 1.8x faster again.** v0.6.0 raised `num_beams` to 4, costing ~43 ms/crop against ~23.5 at one beam (measured on MPS). Back to one beam.
+- **A page resent under a new name supersedes the old one** instead of sitting beside it. A 249-page volume was once finalized as 498 and shipped that way.
 - **A volume wedged by the bridge's own staging can be finalized again.** Remote uploads stage in `<vol>/_mega_upload` and the ingest walk rejects images in subdirectories, so that debris made every later attempt fail too. It is cleared on the next attempt.
 - **A volume could never be reused.** The collision check ran *after* the work
   directory was created, so it was always true and every fresh volume was given a

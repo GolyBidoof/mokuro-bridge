@@ -64,7 +64,7 @@ jobs:
       # exists" rather than skipping. Pinning the epoch to the tagged commit
       # makes the artefact a function of the source, so a re-run is genuinely a
       # no-op and a changed artefact is a changed build.
-      - name: Reproducible build
+      - name: Build
         run: python -m build
         env:
           SOURCE_DATE_EPOCH: ${{ github.event.repository.pushed_at }}
