@@ -182,7 +182,13 @@ def _file_url_path(url: str) -> Optional[Path]:
         return None
     if parsed.scheme != "file":
         return None
-    return Path(unquote(parsed.path))
+    path = unquote(parsed.path)
+    # A file URL spells a Windows drive as /C:/..., and Path() keeps that leading slash,
+    # so the path names nothing, the checkout walk finds no .git, and an installed fork
+    # reports itself as upstream.
+    if os.name == "nt" and len(path) > 2 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    return Path(path)
 
 
 def _checkout_is_fork(path) -> bool:
