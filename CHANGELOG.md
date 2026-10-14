@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.8.1
+
+### Fixed
+
+- **Windows reported an installed fork as upstream.** A `file:` URL spells a Windows drive as `/C:/...`, and the path was built without unwrapping that leading slash, so it named nothing, the checkout walk found no `.git`, and `mokuro-flavor` answered `upstream` for a fork install. Found by the Windows CI job, which had been red on every platform run since the check was added.
+
 ## v0.8.0
 
 ### Added
