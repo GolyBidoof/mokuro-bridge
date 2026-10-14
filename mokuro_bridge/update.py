@@ -35,6 +35,7 @@ import time
 from typing import Any, Optional
 
 from . import APP_NAME, __version__
+from . import log
 
 # The canonical repo. Kept as a module constant so tests can point the fetcher
 # at a stub server without patching the global urllib opener.
@@ -58,8 +59,6 @@ _VERSION_RE = re.compile(r"^[vV]?(\d+(?:\.\d+)*)(.*)$")
 class UpdateError(RuntimeError):
     """The release list could not be fetched or understood."""
 
-
-# ── version comparison ──────────────────────────────────────────────────
 
 
 def parse_version(text: str) -> Optional[tuple[int, ...]]:
@@ -99,8 +98,6 @@ def is_newer(candidate: str, current: str) -> bool:
     return left > right
 
 
-# ── configuration ───────────────────────────────────────────────────────
-
 
 def _env_flag(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
@@ -129,8 +126,6 @@ def timeout_s() -> float:
 def ttl_s() -> float:
     return _env_float("MOKURO_BRIDGE_UPDATE_TTL_S", DEFAULT_TTL_S)
 
-
-# ── fetching ────────────────────────────────────────────────────────────
 
 
 def _http_get_json(url: str, timeout: float) -> dict[str, Any]:
@@ -242,8 +237,6 @@ def check_for_update(
     return result
 
 
-# ── cache, for /health ──────────────────────────────────────────────────
-#
 # /health reads this cache and never opens a socket. The cache is filled by an
 # explicit --check-update, or by the daemon thread the CLI starts at boot.
 # Auto-checks stay off until enable_auto_checks() is called, so importing the
@@ -254,6 +247,10 @@ _cached: Optional[dict[str, Any]] = None
 _cached_at: float = 0.0
 _inflight = False
 _auto = False
+# The version already announced at startup, so a second background refresh in
+# the same process does not repeat the same line. /health polls
+# maybe_refresh_async() on every request.
+_announced: Optional[str] = None
 
 
 def enable_auto_checks() -> None:
@@ -322,7 +319,7 @@ def _refresh_in_background(*, force: bool = False) -> None:
     def _work() -> None:
         global _inflight
         try:
-            refresh(force=force)
+            _run_background_refresh(force=force)
         finally:
             with _lock:
                 _inflight = False
@@ -367,3 +364,53 @@ def health_fields() -> dict[str, Any]:
     fields["update_url"] = result.get("url") or RELEASES_PAGE_URL
     fields["update_error"] = error
     return fields
+
+
+# One line, once, on the daemon thread the CLI already starts: the user is
+# told a newer release exists and the single command that gets it. Nothing is
+# downloaded or installed here, and a failure of any kind is silence.
+
+
+def notice_line(result: Optional[dict[str, Any]] = None) -> Optional[str]:
+    """One line naming a newer release and the command that gets it, or None.
+
+    ``mokuro-bridge --update`` is the same command whatever install method is
+    in play, so this needs no knowledge of how this copy was installed. It is
+    None when checks are off, when nothing has been checked yet, when the last
+    check failed, and when the running version is already the newest one.
+    """
+    if not checks_enabled():
+        return None
+    if result is None:
+        result = cached()
+    if not result or result.get("error") or not result.get("update_available"):
+        return None
+    latest = str(result.get("latest") or "").strip()
+    if not latest:
+        return None
+    return f"a newer version {latest} is available: run mokuro-bridge --update"
+
+
+def announce_update(result: Optional[dict[str, Any]] = None) -> Optional[str]:
+    """Log the notice line if there is one. Never raises. Returns the line."""
+    global _announced
+    try:
+        line = notice_line(result)
+        if line is None or line == _announced:
+            return None
+        _announced = line
+        log.info("update", line)
+        return line
+    except Exception:  # noqa: BLE001 - a notice must never break startup
+        return None
+
+
+def _run_background_refresh(force: bool = False) -> dict[str, Any]:
+    """The daemon thread's work: refresh the cache, then log any notice.
+
+    Kept as a plain function (rather than a closure) so a test can run the
+    startup path without racing a thread.
+    """
+    result = refresh(force=force)
+    announce_update(result)
+    return result

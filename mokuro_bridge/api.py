@@ -46,6 +46,7 @@ from .config import (
     _remember_local_dir,
 )
 from .creds import _mega_creds_source
+from . import mokuro_flavor
 from . import ocr as _ocr
 from .ocr import (
     _MOKURO_REPO,
@@ -73,6 +74,7 @@ from .providers import (
     method_label,
     method_provider,
     method_root,
+    remote_file_exists,
     resolve_upload_method,
     upload_file,
 )
@@ -81,6 +83,7 @@ from .sessions import (
     _delete_persisted_session,
     _find_session_by_safe_title,
     _get_session,
+    _restore_persisted_sessions,
     _persist_session,
     # Used by the resume ingest to decide which files in a source directory are
     # pages. It lives in sessions.py and ocr.py already imports it from there;
@@ -102,7 +105,6 @@ def _cors_origin_regex() -> Optional[str]:
 
 app = FastAPI(title=APP_NAME, version=__version__)
 
-# ── Activity tracker ───────────────────────────────────────────────────
 # A lightweight, thread-safe record of what the bridge is doing right now.
 # health() reads it to report `busy` + `busy_stage` so a polling client can
 # tell "idle" from "OCR running" from "uploading" without parsing sessions.
@@ -428,7 +430,10 @@ def _upload_progress_event(
     "mega_path" keeps its historical name for backward compatibility even
     though it now holds `remote_path` for any method.
     """
-    percent = 100.0 if total_bytes <= 0 else round(bytes_done * 100.0 / total_bytes, 2)
+    # An unknown total must not read as finished. Reporting 100 here made the client's
+    # progress bar sit full for the whole transfer while the speed was still moving,
+    # because the total only arrives with the first byte count.
+    percent = 0.0 if total_bytes <= 0 else round(bytes_done * 100.0 / total_bytes, 2)
     speed_human = f"{speed_bps / 1024 / 1024:.2f} MiB/s" if speed_bps >= 1024**2 else f"{speed_bps / 1024:.1f} KiB/s" if speed_bps else "—"
     upload = {
         "file": remote_name,
@@ -888,7 +893,6 @@ def _effective_local_output_base(explicit_local_dir: str) -> Optional[Path]:
     try:
         return _resolve_local_output_dir(remembered)
     except HTTPException:
-        # Remembered dir no longer usable — drop it and fall back to OUTPUT_DIR.
         try:
             _LOCAL_DIR_STATE_FILE.unlink(missing_ok=True)
         except OSError:
@@ -1189,27 +1193,31 @@ async def _session_resume_body(title: str, source_dir: str, safe_title: str):
                     raise HTTPException(status_code=400, detail=f"Invalid destination page: {safe_name}")
                 if _has_stem_collision(vol_dir, dest):
                     raise HTTPException(status_code=409, detail=f"Image filename stem already exists with another extension: {safe_name}")
+                source_digest = _file_digest(img)
+                if source_digest is None:
+                    raise HTTPException(status_code=400, detail=f"Could not read source image: {safe_name}")
+                existing_digest = _file_digest(dest) if dest.exists() else None
+                if dest.exists() and existing_digest is None:
+                    raise HTTPException(status_code=400, detail=f"Could not read existing page: {safe_name}")
                 reserved = False
                 try:
                     # Admission is short; the potentially large digest/copy runs
                     # without the global OCR condition held.
                     with _ocr_cv:
-                        if (session.session_id, safe_name) in _ocr_processing:
-                            raise HTTPException(status_code=409, detail=f"Page is currently being OCR'd: {safe_name}")
                         with session.lock:
+                            failed_page = safe_name in session.pages_ocr_failed
+                            # A retry commonly races OCR for the exact same page
+                            # bytes. It is safe and idempotent to leave that image
+                            # alone; checking for active OCR first turned that
+                            # harmless case into a 409 and failed the whole volume.
+                            if dest.exists() and not failed_page and source_digest == existing_digest:
+                                return False
+                            if (session.session_id, safe_name) in _ocr_processing:
+                                raise HTTPException(status_code=409, detail=f"Page is currently being OCR'd: {safe_name}")
                             if safe_name in session.page_reservations:
                                 raise HTTPException(status_code=409, detail=f"Page is already being ingested: {safe_name}")
                             session.page_reservations.add(safe_name)
                             reserved = True
-                            failed_page = safe_name in session.pages_ocr_failed
-                    source_digest = _file_digest(img)
-                    if source_digest is None:
-                        raise HTTPException(status_code=400, detail=f"Could not read source image: {safe_name}")
-                    existing_digest = _file_digest(dest) if dest.exists() else None
-                    if dest.exists() and existing_digest is None:
-                        raise HTTPException(status_code=400, detail=f"Could not read existing page: {safe_name}")
-                    if dest.exists() and not failed_page and source_digest == existing_digest:
-                        return False
                     if not _looks_like_image(_read_source_limited(img)):
                         raise HTTPException(status_code=400, detail=f"Source is not a recognized image: {safe_name}")
                     if dest.exists():
@@ -1433,33 +1441,47 @@ async def session_page(
     _ensure_ocr_worker()
     reserved = False
     try:
-        with _ocr_cv:
-            if (session.session_id, safe_name) in _ocr_processing:
-                raise HTTPException(status_code=409, detail=f"Page is currently being OCR'd: {safe_name}")
-            with session.lock:
-                if session.finalized or session.finalizing or session.cover_uploading or session.ingesting:
-                    raise HTTPException(status_code=400, detail="Session is finalizing or already finalized")
-                if safe_name in session.page_reservations:
-                    raise HTTPException(status_code=409, detail=f"Page is currently being ingested: {safe_name}")
-                if _has_stem_collision(session.vol_dir, dest):
-                    raise HTTPException(status_code=409, detail="Image filename stem already exists with another extension")
-                if safe_name in session.pages_ocr_done:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=f"Page already has completed OCR: {safe_name}",
-                    )
-                if dest.exists() and safe_name not in session.pages_ocr_failed and safe_name in session.pages_received:
-                    raise HTTPException(status_code=409, detail=f"Page is already queued or present: {safe_name}")
-                # The page number is the identity: if this page already lives here
-                # under an older name, retire that copy before admitting this one,
-                # so the volume never packages both.
-                _supersede_stale_page(session, page_num, safe_name)
-                session.page_reservations.add(safe_name)
-                reserved = True
         async with _upload_memory_slot():
             data = await _read_upload_limited(page)
             if not _looks_like_image(data):
                 raise HTTPException(status_code=400, detail="Uploaded page is not a recognized image")
+            incoming_digest = hashlib.sha256(data).hexdigest()
+            existing_digest = await asyncio.to_thread(_file_digest, dest) if dest.exists() else None
+            with _ocr_cv:
+                with session.lock:
+                    if session.finalized or session.finalizing or session.cover_uploading or session.ingesting:
+                        raise HTTPException(status_code=400, detail="Session is finalizing or already finalized")
+                    # Retrying a page after Ctrl+C is common. If the bridge already
+                    # has the exact bytes, leave the queued/processing OCR item alone
+                    # and acknowledge this request as an idempotent retry.
+                    if (
+                        dest.is_file()
+                        and safe_name in session.pages_received
+                        and safe_name not in session.pages_ocr_failed
+                        and existing_digest == incoming_digest
+                    ):
+                        snap = session_snapshot(session)
+                        snap.update({"filename": safe_name, "page_num": page_num, "already_present": True})
+                        return JSONResponse(snap)
+                    if (session.session_id, safe_name) in _ocr_processing:
+                        raise HTTPException(status_code=409, detail=f"Page is currently being OCR'd: {safe_name}")
+                    if safe_name in session.page_reservations:
+                        raise HTTPException(status_code=409, detail=f"Page is currently being ingested: {safe_name}")
+                    if _has_stem_collision(session.vol_dir, dest):
+                        raise HTTPException(status_code=409, detail="Image filename stem already exists with another extension")
+                    if safe_name in session.pages_ocr_done:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"Page already has completed OCR: {safe_name}",
+                        )
+                    if dest.exists() and safe_name not in session.pages_ocr_failed and safe_name in session.pages_received:
+                        raise HTTPException(status_code=409, detail=f"Page is already queued or present: {safe_name}")
+                    # The page number is the identity: if this page already lives here
+                    # under an older name, retire that copy before admitting this one,
+                    # so the volume never packages both.
+                    _supersede_stale_page(session, page_num, safe_name)
+                    session.page_reservations.add(safe_name)
+                    reserved = True
             await _run_thread_owned(_write_atomic_no_follow, dest, data)
         with _ocr_cv:
             with session.lock:
@@ -1768,6 +1790,10 @@ async def session_cover(
 async def list_sessions():
     """Active pipelined sessions (useful when several capture clients run at once)."""
     def _snapshot_all():
+        _restore_persisted_sessions()
+        queue = ocr_queue_metrics()
+        if queue.get("queue_depth", 0) or queue.get("processing_depth", 0):
+            _ensure_ocr_worker()
         with _sessions_lock:
             return [session_snapshot(s) for s in _sessions.values()]
     snaps = await asyncio.to_thread(_snapshot_all)
@@ -1896,7 +1922,6 @@ async def session_finalize(
             )
             await asyncio.sleep(0)
 
-            # Force-flush remaining pages, poll until done
             wait_task = asyncio.create_task(asyncio.to_thread(wait_for_session_ocr, session))
             with session.lock:
                 session.finalize_wait_task = wait_task
@@ -2374,14 +2399,12 @@ async def session_finalize(
                                         remote_dir, method,
                                     )
                                 )
-                                # Console: in-place upload progress.
                                 pct = (bytes_done * 100.0 / total_bytes) if total_bytes else 0.0
                                 _log.progress(
                                     "upload",
                                     f"Uploading {_name}: {pct:.0f}% "
                                     f"({bytes_done/1048576:.1f}/{total_bytes/1048576:.1f} MiB)",
                                 )
-                                # Live session state for GET /session/{id}/status.
                                 speed_human = (
                                     f"{speed_bps / 1024 / 1024:.2f} MiB/s"
                                     if speed_bps >= 1024**2
@@ -2439,7 +2462,6 @@ async def session_finalize(
                         await asyncio.sleep(0)
                     await asyncio.sleep(0.02)
                 upload_results = await asyncio.shield(upload_task)
-                # Drain any frames emitted right at completion.
                 while True:
                     try:
                         yield ev_queue.get_nowait()
@@ -2739,7 +2761,6 @@ async def upload_methods():
             "default": m.default,
             **m.extra,
         }
-        # current folder per method
         entry["current_folder"] = _method_current_folder(m.id)
         methods.append(entry)
     return JSONResponse(
@@ -2749,6 +2770,54 @@ async def upload_methods():
             "methods": methods,
         }
     )
+
+@app.post("/destination/check")
+async def destination_check(
+    method: str = Form("local"),
+    title: str = Form(...),
+    local_dir: str = Form(""),
+):
+    """Read-only check for a completed CBZ before a client downloads/OCRs it."""
+    try:
+        method_id = resolve_upload_method(method)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    # Mirror /session/start: an unusable title falls back to a generated one
+    # rather than 400-ing, so a client that checks before it names the volume
+    # gets the same answer the capture itself would produce.
+    title_safe = _validate_volume_title(
+        sanitize_filename(title) or f"manga_{uuid.uuid4().hex[:8]}"
+    )
+    series = _validated_series(series_title_from_volume(title_safe))
+    filename = f"{title_safe}.cbz"
+    if method_id == "local":
+        base = (
+            _resolve_local_output_dir(local_dir)
+            if str(local_dir).strip()
+            else (_effective_local_output_base("") or OUTPUT_DIR)
+        )
+        destination = base / series / filename
+        exists = destination.is_file() and not destination.is_symlink()
+        return JSONResponse({"method": method_id, "title": title_safe, "file": filename, "exists": exists})
+
+    method_info = _build_upload_methods().get(method_id)
+    if method_info is None or not method_info.configured:
+        raise HTTPException(status_code=400, detail=f"destination {method_id!r} is not configured")
+    remote_dir = f"{method_root(method_id).rstrip('/')}/{series}".strip("/")
+    try:
+        exists = await asyncio.to_thread(remote_file_exists, method_id, remote_dir, filename)
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"destination check failed: {_safe_provider_error(error)}",
+        ) from error
+    return JSONResponse({
+        "method": method_id,
+        "title": title_safe,
+        "file": filename,
+        "remote_dir": remote_dir,
+        "exists": exists,
+    })
 
 @app.get("/queue")
 async def queue_status():
@@ -2770,8 +2839,11 @@ async def health():
         "app": APP_NAME,
         "version": __version__,
         "status": "ok",
-        # Cache-only update state; see the note above about network I/O.
         **update.health_fields(),
+        # Which mokuro this is: upstream, the faster fork, absent or unknown.
+        # Read from install provenance in a thread (local files only), so a
+        # client can tell the two engines apart without trusting a version.
+        **await asyncio.to_thread(mokuro_flavor.health_fields),
         "mokuro_installed": False,
         "mokuro_custom_fork": _MOKURO_REPO is not None,
         "mokuro_repo": str(_MOKURO_REPO) if _MOKURO_REPO is not None else None,

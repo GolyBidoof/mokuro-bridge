@@ -18,7 +18,6 @@ elif [[ -n "${MOKURO_BRIDGE_PYTHON:-}" && -x "${MOKURO_BRIDGE_PYTHON}" ]]; then
 elif [[ -x "$DIR/.venv/bin/python" ]]; then
   PYTHON3="$DIR/.venv/bin/python"
 else
-  # Pick a python3 that has the server deps importable.
   PYTHON3="$(which python3)"
   if ! "$PYTHON3" -c 'import fastapi, uvicorn' >/dev/null 2>&1; then
     echo "error: $PYTHON3 lacks fastapi/uvicorn." >&2
@@ -53,7 +52,6 @@ SERVER_ESC="$(sed_replacement "$SERVER")"
 DIR_ESC="$(sed_replacement "$DIR")"
 HOME_ESC="$(sed_replacement "$HOME")"
 
-# Rewrite plist with absolute paths for this machine
 mkdir -p "$HOME/Library/LaunchAgents"
 sed \
   -e "s|__PYTHON3__|${PYTHON3_ESC}|g" \
@@ -63,7 +61,6 @@ sed \
   -e "s|__PORT__|${PORT}|g" \
   "$PLIST_SRC" > "$PLIST_DST"
 
-# Unload any previous install of this label
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 
 launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"

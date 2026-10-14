@@ -60,6 +60,7 @@ from .config import (
 )
 from .ocr import _MOKURO_REPO, _fork_supported, _mokuro_pkg
 from . import accounts
+from . import mokuro_flavor
 from . import update
 from .creds import _delete_mega_creds_keychain
 from .providers import (
@@ -67,9 +68,7 @@ from .providers import (
     _build_upload_methods,
     _default_upload_method,
     _method_current_folder,
-    _run_setup_drive,
-    _run_setup_mega,
-    _run_setup_onedrive,
+    setup_runner,
 )
 
 
@@ -88,7 +87,7 @@ def _list_uploads() -> None:
         ))
     if not rows:
         print("no remote upload accounts configured")
-        print("add one with: python server.py --setup-upload mega|drive|onedrive")
+        print("add one with: mokuro-bridge --setup-upload mega|drive|onedrive")
         return
     width = max(len(r[0]) for r in rows)
     print(f"{'ACCOUNT'.ljust(width)}  {'READY':5}  {'CREDS':11}  REMOTE ROOT")
@@ -150,48 +149,281 @@ def _repo_root():
     return root if (root / ".git").exists() else None
 
 
-def _install_shape() -> str:
-    """How this copy was installed: "git", "pipx" or "pip".
+# Lets a caller say "not a checkout" to _install_method; None means "detect".
+_AUTO = object()
 
-    The upgrade command differs per shape, and guessing wrong is worse than
-    saying nothing: `pip install -U` inside a pipx venv fights pipx, while
-    `git pull` in a wheel install has no checkout to pull.
+
+def _is_externally_managed(prefix=None) -> bool:
+    """True for a system Python whose packages pip refuses to touch (PEP 668).
+
+    Homebrew and Debian mark their interpreter this way, and
+    ``pip install --upgrade`` there stops with "externally-managed-environment".
+    That is the one plain-install case where guessing would be wrong, so the
+    caller prints the candidate commands instead of running one.
+    """
+    import sysconfig
+    from pathlib import Path
+
+    if prefix is None:
+        prefix = sys.prefix
+    if prefix != getattr(sys, "base_prefix", prefix):
+        return False  # a virtualenv always owns its own site-packages
+    stdlib = sysconfig.get_path("stdlib")
+    return bool(stdlib) and (Path(stdlib) / "EXTERNALLY-MANAGED").exists()
+
+
+def _install_method(executable=None, prefix=None, *, repo_root=_AUTO,
+                    env=None, externally_managed=None) -> str:
+    """How this copy was installed: "git", "uv", "pipx", "pip" or "unknown".
+
+    The upgrade command differs per method, and guessing wrong is worse than
+    saying nothing: ``pip install --upgrade`` inside a pipx venv fights pipx,
+    while ``uv tool upgrade`` on a wheel pip installed by hand finds no tool
+    environment. The markers are the paths each tool leaves behind, and
+    *executable*/*prefix* are injectable so the tests can pose a pipx venv, a
+    uv tool path or a plain site-packages interpreter without this machine.
+
+    Order matters when several tools exist: a git checkout wins, because a
+    checkout run with ``./run.sh`` must never be upgraded by a package
+    manager, and uv tool is checked before pipx so a path carrying both
+    markers still resolves the same way every time.
     """
     from pathlib import Path
 
-    if _repo_root() is not None:
+    if repo_root is _AUTO:
+        repo_root = _repo_root()
+    if repo_root is not None:
         return "git"
-    parts = set(Path(sys.executable).parts) | set(Path(sys.prefix).parts)
-    if "pipx" in parts or os.environ.get("PIPX_HOME"):
+
+    executable = executable or sys.executable
+    prefix = prefix or sys.prefix
+    env = os.environ if env is None else env
+    parts = {part.lower() for part in Path(executable).parts}
+    parts |= {part.lower() for part in Path(prefix).parts}
+    if "uv" in parts and "tools" in parts:
+        return "uv"
+    if "pipx" in parts:
         return "pipx"
-    return "pip"
+    # A tool directory can be moved with its variable, so that is the only
+    # marker left when the default path is not in use.
+    if env.get("UV_TOOL_DIR"):
+        return "uv"
+    if env.get("PIPX_HOME") or env.get("PIPX_LOCAL_VENVS"):
+        return "pipx"
+    if externally_managed is None:
+        externally_managed = _is_externally_managed(prefix)
+    return "unknown" if externally_managed else "pip"
 
 
-def _update_commands() -> list:
-    """The shell lines that upgrade this particular install, quoted for a shell."""
+def _update_commands(method: str, *, executable=None) -> list:
+    """The exact shell lines that upgrade an install of *method*.
+
+    Empty for "unknown": an install that could not be told apart gets the
+    candidate commands printed for a human to choose, never a guessed runner.
+    """
     import shlex
 
-    shape = _install_shape()
-    if shape == "git":
+    python = shlex.quote(executable or sys.executable)
+    if method == "git":
         root = _repo_root()
+        if root is None:
+            return []
         return [
             f"git -C {shlex.quote(str(root))} pull --ff-only",
-            f"{sys.executable} -m pip install -r {shlex.quote(str(root / 'requirements.txt'))}",
+            f"{python} -m pip install -r {shlex.quote(str(root / 'requirements.txt'))}",
         ]
-    if shape == "pipx":
+    if method == "pipx":
         return ["pipx upgrade mokuro-bridge"]
-    return [f"{sys.executable} -m pip install -U mokuro-bridge"]
+    if method == "uv":
+        return ["uv tool upgrade mokuro-bridge"]
+    if method == "pip":
+        return [f"{python} -m pip install --upgrade mokuro-bridge"]
+    return []
+
+
+def _candidate_update_commands(*, executable=None) -> list:
+    """Every upgrade line that could apply, for the cannot-tell fallback."""
+    return [
+        *_update_commands("pipx"),
+        *_update_commands("uv"),
+        *_update_commands("pip", executable=executable),
+    ]
 
 
 def _restart_hint() -> None:
-    """On macOS, remind the user to bounce the launchd agent after upgrading."""
+    """Print the one command that restarts a service this install belongs to.
+
+    mokuro-bridge is often started by launchd or systemd, and nothing here
+    restarts it: bouncing a unit from inside the process that the unit runs is
+    surprising, and a restart mid-OCR loses work.
+    """
     from pathlib import Path
 
     plist = Path.home() / "Library" / "LaunchAgents" / "com.mokuro-bridge.plist"
     if plist.exists():
-        print()
-        print("Then restart the agent:")
-        print("  launchctl kickstart -k gui/$(id -u)/com.mokuro-bridge")
+        print("restart the bridge with: launchctl kickstart -k gui/$(id -u)/com.mokuro-bridge")
+        return
+    unit = Path.home() / ".config" / "systemd" / "user" / "mokuro-bridge.service"
+    if unit.exists():
+        print("restart the bridge with: systemctl --user restart mokuro-bridge")
+        return
+    print("restart the bridge to pick up the update: stop it and run mokuro-bridge again")
+
+
+def _run_shell(command: str, *, capture: bool = False):
+    """Run one already-quoted line, returning its exit status.
+
+    With *capture* the return is ``(status, output)``: verifying a mokuro
+    install has to read the subprocess's own report, and keeping one runner
+    means one place that knows how a command line is split and run.
+    """
+    import shlex
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            shlex.split(command), check=False, capture_output=capture, text=capture
+        )
+    except OSError as exc:
+        print(f"could not run: {command} ({exc})")
+        return (1, "") if capture else 1
+    if capture:
+        return completed.returncode, (completed.stdout or "") + (completed.stderr or "")
+    return completed.returncode
+
+
+def _run_update() -> int:
+    """Upgrade this install to the newest release, then say how to restart.
+
+    The user asked for this explicitly, so it acts, unlike the startup notice.
+    It prints every command before running any of them, and it runs nothing
+    that was not detected: an install that cannot be told apart exits 2 with
+    the candidate commands instead.
+    """
+    method = _install_method()
+    commands = _update_commands(method)
+    if not commands:
+        print("could not tell how this copy was installed, so nothing was run; upgrade with one of:")
+        for command in _candidate_update_commands():
+            print(f"  {command}")
+        return 2
+    for command in commands:
+        print(f"about to run: {command}")
+    for command in commands:
+        code = _run_shell(command)
+        if code != 0:
+            print(f"update failed ({code}) at: {command}")
+            return code if code > 0 else 1
+    print(f"updated mokuro-bridge ({method}); restart it to pick up the new version")
+    _restart_hint()
+    return 0
+
+
+def _mokuro_install_commands(method: str, *, executable=None, target=None) -> list:
+    """The exact shell lines that replace mokuro with the fork for *method*.
+
+    Empty for a method this refuses to touch. The uninstall comes first on
+    purpose: the fork declares the same distribution name, ``mokuro``, so pip
+    only treats it as the replacement (and swaps the console script) when the
+    old copy is gone first. An install of a differently named package would
+    coexist and the two would share files.
+
+    Each method gets the tool that owns its environment. A uv tool environment
+    has no pip of its own and ``pip install`` in a pipx venv fights pipx's own
+    bookkeeping, so those two use ``uv tool install --with`` and
+    ``pipx runpip`` rather than a guessed ``python -m pip``.
+    """
+    import shlex
+
+    python = shlex.quote(executable or sys.executable)
+    quoted = shlex.quote(target or mokuro_flavor.INSTALL_TARGET)
+    if method in ("pip", "git"):
+        return [
+            f"{python} -m pip uninstall -y mokuro",
+            f"{python} -m pip install --upgrade {quoted}",
+        ]
+    if method == "pipx":
+        return [
+            "pipx runpip mokuro-bridge uninstall -y mokuro",
+            f"pipx runpip mokuro-bridge install --upgrade {quoted}",
+        ]
+    if method == "uv":
+        # --force is what makes this a replacement rather than an addition: uv
+        # recreates the tool environment, so the old mokuro cannot linger.
+        return [f"uv tool install --force --with {quoted} mokuro-bridge"]
+    return []
+
+
+def _print_mokuro_state(label: str, state: dict) -> None:
+    """One block describing a detected or probed mokuro install."""
+    version = state.get("version") or "none"
+    present = "yes" if (state.get("distribution") or state.get("path")) else "no"
+    print(
+        f"{label}: mokuro distribution={present} "
+        f"flavor={state.get('flavor')} version={version}"
+    )
+    if state.get("direct_url"):
+        print(f"  installed from: {state['direct_url']}")
+    if state.get("module_path") or state.get("path"):
+        print(f"  module:         {state.get('module_path') or state.get('path')}")
+
+
+def _run_install_mokuro() -> int:
+    """Replace the installed mokuro with the faster fork, then verify it.
+
+    Exit 0 installed and verified, 1 the install or the verification failed, 2
+    refused: an externally managed interpreter (PEP 668) or a mokuro-bridge
+    install this cannot safely change. Nothing runs without the explicit flag,
+    and every command is printed before it is run.
+    """
+    before = mokuro_flavor.detect(refresh=True)
+    _print_mokuro_state("before", before)
+    if before["flavor"] == "fork":
+        print("the fast mokuro fork is already installed; nothing to do")
+        return 0
+
+    if _is_externally_managed():
+        print("refusing: this interpreter is externally managed (PEP 668), so pip must not")
+        print("install mokuro into it. Create a virtualenv, or install the bridge with")
+        print(f"pipx or uv, and run {mokuro_flavor.SWITCH_COMMAND} there. To do it by hand:")
+        print(f"  {mokuro_flavor.INSTALL_TARGET}")
+        return 2
+
+    method = _install_method(externally_managed=False)
+    commands = _mokuro_install_commands(method)
+    if not commands:
+        print("refusing: could not tell how this mokuro-bridge was installed, so there is")
+        print("no environment this can safely change. Install the fork by hand with:")
+        print(f"  {mokuro_flavor.INSTALL_TARGET}")
+        return 2
+
+    print(f"mokuro-bridge install method: {method}")
+    for command in commands:
+        print(f"about to run: {command}")
+    for command in commands:
+        code = _run_shell(command)
+        if code != 0:
+            print(f"install failed ({code}) at: {command}")
+            return code if code > 0 else 1
+
+    # A separate interpreter is the only honest check: this process already
+    # imported whatever mokuro was there when it started.
+    verify = mokuro_flavor.probe_command()
+    print(f"verifying: {verify}")
+    status, output = _run_shell(verify, capture=True)
+    after = mokuro_flavor.parse_probe(output)
+    if status != 0:
+        print(f"verification failed ({status}): could not import mokuro")
+        if output.strip():
+            print(output.strip())
+        return 1
+    _print_mokuro_state("after", after)
+    if after.get("flavor") != "fork":
+        print("mokuro was installed, but the import does not report the fork; leaving it as is")
+        return 1
+    print("done: the fast mokuro fork is installed and importable")
+    print("restart the bridge to load it: stop the service and run mokuro-bridge again")
+    return 0
 
 
 def _check_update() -> int:
@@ -209,16 +441,18 @@ def _check_update() -> int:
 
     latest = result.get("latest") or "?"
     if not result.get("update_available"):
-        print(f"latest:  {latest} (up to date)")
+        # A build ahead of the newest published release is the normal state while
+        # preparing one. Calling the older tag "latest" reads as a downgrade, so
+        # name the situation instead.
+        if latest != "?" and update.is_newer(__version__, latest):
+            print(f"latest:  {latest} (this build, {__version__}, is ahead of it)")
+        else:
+            print(f"latest:  {latest} (up to date)")
         return 0
 
     print(f"latest:  {latest} (newer than {__version__})")
     print(f"release: {result.get('url')}")
-    print()
-    print("Update with:")
-    for line in _update_commands():
-        print(f"  {line}")
-    _restart_hint()
+    print("update with: mokuro-bridge --update")
     return 1
 
 
@@ -272,10 +506,7 @@ def main() -> None:
     parser.add_argument(
         "--setup-mega",
         action="store_true",
-        help="[alias for --setup-upload mega] Interactively store MEGA "
-        "credentials in the OS keychain / credential store (macOS Keychain, "
-        "Windows Credential Manager, Linux Secret Service) or, failing that, "
-        "a 0600 credentials file.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--host", default=os.environ.get("MOKURO_BRIDGE_HOST", "127.0.0.1"))
     parser.add_argument(
@@ -290,12 +521,34 @@ def main() -> None:
         "exit. Exit codes: 0 up to date, 1 update available, 2 check failed.",
     )
     parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Upgrade this install to the newest release, then print how to "
+        "restart the service. Detects pipx, uv tool, a plain pip install and a "
+        "git checkout; prints the candidate commands instead of running one "
+        "when it cannot tell. Exit 0 when upgraded, 2 when not attempted.",
+    )
+    parser.add_argument(
+        "--install-mokuro",
+        action="store_true",
+        help="Replace the installed mokuro with the faster GolyBidoof fork and "
+        "verify it imports. Reports the current distribution, version and "
+        "flavor first, prints every command before running it, and refuses "
+        "(exit 2) on an externally managed interpreter or an install it cannot "
+        "safely change. Exit codes: 0 installed and verified, 1 install or "
+        "verification failed, 2 refused.",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
     )
     args = parser.parse_args()
 
+    if args.install_mokuro:
+        raise SystemExit(_run_install_mokuro())
+    if args.update:
+        raise SystemExit(_run_update())
     if args.check_update:
         raise SystemExit(_check_update())
     if args.list_uploads:
@@ -323,11 +576,10 @@ def main() -> None:
             )
             raise SystemExit(2)
         chosen = explicit or (name if name != accounts.DEFAULT_NAME else "")
-        runner = {
-            "mega": _run_setup_mega,
-            "drive": _run_setup_drive,
-            "onedrive": _run_setup_onedrive,
-        }[provider]
+        runner = setup_runner(provider)
+        if runner is None:
+            print(f"error: no setup wizard is registered for '{provider}'")
+            raise SystemExit(2)
         runner(chosen or None, root=args.root, label=args.label)
         return
 
@@ -384,6 +636,12 @@ def main() -> None:
     elif fetchproxy.FETCH_PORTS > 0 and reload_on:
         print("  fetch proxy: off (UVICORN_RELOAD=1 is incompatible with extra ports)")
     print("=" * 60)
+
+    # One line when the engine is the slower upstream build or one this cannot
+    # name, naming the single command that switches to the faster fork. It
+    # reads local metadata only, so it cannot delay startup, and it is off with
+    # MOKURO_BRIDGE_MOKURO_NOTICE=0. See mokuro_bridge/mokuro_flavor.py.
+    mokuro_flavor.announce()
 
     # A version check is never a reason to delay startup: this only arms the
     # daemon thread that /health reads from, and it is skipped entirely when

@@ -1,22 +1,42 @@
 # Changelog
 
-## Unreleased
+## v0.8.0
+
+### Added
+
+- `POST /destination/check` answers, without creating a folder or uploading a byte, whether a finished volume is already at a destination: a `.cbz` stat for `local`, a folder walk for MEGA, Drive and OneDrive. It is what lets a client decide whether to re-download and re-OCR a volume at all.
+- `GET /sessions` restores persisted sessions after the service restarts, so a client that reconnects can still see work it had started. The session snapshot carries `ingesting` and `finalizing` so "pages are still arriving" is distinguishable from "the volume is being packaged".
+- `mokuro-bridge --update` upgrades this install to the newest release in one command. It reads the install method from the paths the tool left behind (`pipx`, `uv tool`, a plain pip install or a git checkout), prints every command before running it, and prints how to restart the service afterwards. It never restarts the service itself, and it runs nothing for an install it cannot tell apart: that case prints the candidate commands instead.
+- The service logs a one-line notice at startup when a newer release exists, naming the exact command that gets it. The notice rides the background check the CLI already starts, so it never blocks startup, it is silent when offline, and `MOKURO_BRIDGE_UPDATE_CHECK=0` turns it off.
+- `mokuro-bridge --install-mokuro` replaces the installed `mokuro` with the faster [GolyBidoof fork](https://github.com/GolyBidoof/mokuro) in one command, installing the wheel attached to its `v0.4.0` release (the git tag is the fallback if that asset is ever removed). It reports the current distribution, version metadata and flavor first, uninstalls the old distribution before installing the fork (the two share the distribution name, which is what makes the swap clean), prints every command before running it, and verifies the result by importing `mokuro` in a fresh interpreter. It refuses with exit 2 on an externally managed interpreter (PEP 668) or an install it cannot safely change, and exits 1 when the install or the verification fails. The per-environment commands and the way back to upstream are in [docs/mokuro.md](docs/mokuro.md).
+- `/health` reports which `mokuro` is installed as `mokuro_flavor`: `upstream`, `fork`, `absent` or `unknown`. It is read from the install provenance in `direct_url.json` and from the module path, never from the version string, because a fork editable install reported stale metadata on a real machine. `mokuro_installed` keeps working.
+- When the installed engine is upstream or unrecognised, the service logs one line at startup naming `mokuro-bridge --install-mokuro`, the single command that switches to the faster fork. It reads local metadata only, never blocks startup, never raises, is silent when the fork is already installed, and `MOKURO_BRIDGE_MOKURO_NOTICE=0` turns it off.
+
+### Fixed
+
+- `--check-update` called the newest *published* tag "latest" even when the running build was newer than it, which reads as a downgrade while preparing a release. It now says the build is ahead of that tag.
+- **A provider error no longer hands the caller a live credential.** `/destination/check` interpolated the raw provider exception, and Graph and Drive errors embed the request URL, which for those providers carries an access token in the query string. It now goes through the same redaction as finalize.
+- **Re-sending a page the bridge already has no longer fails.** The digest compare runs before the "already has completed OCR" branch, so a capture client that retries its last page after a restart is acknowledged as an idempotent retry instead of refused. Bytes that *differ* are still a 409: the stored OCR result no longer matches the image.
+- `/sessions` re-read and re-logged every session JSON on every poll; a session that is already live is now served from memory.
+- `/destination/check` falls back to a generated title for a blank one, matching `/session/start`, instead of answering 400.
+
+### Changed
+
+- `--setup-mega` stays accepted but is no longer advertised; the message in `providers/mega.py` and `setup-keychain.sh` now points at `mokuro-bridge --setup-upload mega`.
+- `--check-update` now names the single `mokuro-bridge --update` command instead of printing the raw per-method upgrade lines; `--update` still prints each line, right before it runs it.
+- Documented the sticky upload default, which remembers the last explicit `upload_method` for every later request, in `docs/architecture.md`. The endpoint list in that document also caught up with the twelve routes that now exist.
 
 ## v0.7.4
 
 ### Fixed
 
-- The local-ingest root list was defined twice in `config.py`, so every
-  `MOKURO_BRIDGE_INGEST_ROOTS` entry was appended twice. Shipped in 0.7.3.
-
+- The local-ingest root list was defined twice in `config.py`, so every `MOKURO_BRIDGE_INGEST_ROOTS` entry was appended twice. Shipped in 0.7.3.
 
 ## v0.7.3
 
 ### Fixed
 
-- `test_metadata_file_is_private` is skipped on Windows, which has no POSIX mode
-  bits: `st_mode` reports `0o666` for any writable file and `chmod` only toggles
-  read-only. The boundary there is the user profile ACL.
+- `test_metadata_file_is_private` is skipped on Windows, which has no POSIX mode bits: `st_mode` reports `0o666` for any writable file and `chmod` only toggles read-only. The boundary there is the user profile ACL.
 
 ### Changed
 
@@ -24,27 +44,18 @@
 
 ### Added
 
-- `MOKURO_BRIDGE_INGEST_ROOTS`: comma-separated absolute paths added to the
-  local-ingest allowlist, which is otherwise the home directory plus the POSIX
-  temp paths. Those resolve to `C:\tmp` on Windows and never match, so a library
-  on a second drive had no way in. Relative entries are ignored.
+- `MOKURO_BRIDGE_INGEST_ROOTS`: comma-separated absolute paths added to the local-ingest allowlist, which is otherwise the home directory plus the POSIX temp paths. Those resolve to `C:\tmp` on Windows and never match, so a library on a second drive had no way in. Relative entries are ignored.
 
 ### Changed
 
-- The `publish` workflow's build job runs on pushes to `main` as well as tags, so
-  the sdist and wheel are built and `twine check`ed on every commit. Uploading
-  still requires a `v*` tag or a manual dispatch.
+- The `publish` workflow's build job runs on pushes to `main` as well as tags, so the sdist and wheel are built and `twine check`ed on every commit. Uploading still requires a `v*` tag or a manual dispatch.
 
 ## v0.7.1
 
 ### Fixed
 
-- `_validate_mokuro_artifact()` reads with the standard library instead of
-  `_mokuro_submodule("utils").load_json`. Without the optional OCR engine the
-  latter raised `AttributeError` from a `None` placeholder. The validator parses a
-  file the bridge generated and does not need PyTorch.
-- `_mokuro_submodule()` raises an `ImportError` naming the missing dependency
-  rather than an `AttributeError`.
+- `_validate_mokuro_artifact()` reads with the standard library instead of `_mokuro_submodule("utils").load_json`. Without the optional OCR engine the latter raised `AttributeError` from a `None` placeholder. The validator parses a file the bridge generated and does not need PyTorch.
+- `_mokuro_submodule()` raises an `ImportError` naming the missing dependency rather than an `AttributeError`.
 
 ## v0.7.0
 
@@ -66,12 +77,7 @@ Installable as a package, plus a version check that says when a newer release ex
 - **OCR is about 1.8x faster again.** v0.6.0 raised `num_beams` to 4, costing ~43 ms/crop against ~23.5 at one beam (measured on MPS). Back to one beam.
 - **A page resent under a new name supersedes the old one** instead of sitting beside it. A 249-page volume was once finalized as 498 and shipped that way.
 - **A volume wedged by the bridge's own staging can be finalized again.** Remote uploads stage in `<vol>/_mega_upload` and the ingest walk rejects images in subdirectories, so that debris made every later attempt fail too. It is cleared on the next attempt.
-- **A volume could never be reused.** The collision check ran *after* the work
-  directory was created, so it was always true and every fresh volume was given a
-  random `<title>_<6 hex>` suffix. A later `reuse_existing` start looked the
-  session up by the plain title, found nothing, and created yet another directory,
-  so the volume and its OCR cache were thrown away on every run. The check now
-  happens before the directory is made.
+- **A volume could never be reused.** The collision check ran *after* the work directory was created, so it was always true and every fresh volume was given a random `<title>_<6 hex>` suffix. A later `reuse_existing` start looked the session up by the plain title, found nothing, and created yet another directory, so the volume and its OCR cache were thrown away on every run. The check now happens before the directory is made.
 - Imprint and edition tags no longer split one series across folders. `サンプル作品(1) (サンプルコミックス)` now derives a single series rather than one per volume.
 
 ### Changed
@@ -80,12 +86,7 @@ Installable as a package, plus a version check that says when a newer release ex
 - The fetch proxy serves `/_bwdd/<host>/<path>` and advertises it as `pathUpstream` in `/health` (`fetchPathUpstream`), for clients that need a fixed origin.
 - `MOKURO_BRIDGE_FETCH_UPSTREAM` and `MOKURO_BRIDGE_FETCH_ALLOWED_HOSTS` are now documented in the README and `.env.example`. The allow-list still defaults to `*`; `_target_is_safe()` is the gate that rejects loopback, private, link-local, multicast and reserved targets.
 - The CLI moved from `server.py` into `mokuro_bridge/cli.py`. `server.py` is now a wrapper that also re-exports the ASGI app, so `python server.py` and `uvicorn server:app` behave as before. `ocr_folder.py` moved into the package for the same reason, with a wrapper left behind.
-- **The recommended OCR engine is now the mokuro fork** rather than the stock
-  package, since it adds batched recognition and is worth roughly 1.8x on a
-  measured workload. It installs in one line, `pip install "mokuro @ git+https://github.com/GolyBidoof/mokuro"`,
-  and the bridge detects its batch API by introspection, so there is nothing to
-  configure. Stock mokuro from PyPI still works and remains the fallback in
-  `requirements-ocr.txt`.
+- **The recommended OCR engine is now the mokuro fork** rather than the stock package, since it adds batched recognition and is worth roughly 1.8x on a measured workload. It installs in one line, `pip install "mokuro @ git+https://github.com/GolyBidoof/mokuro"`, and the bridge detects its batch API by introspection, so there is nothing to configure. Stock mokuro from PyPI still works and remains the fallback in `requirements-ocr.txt`.
 - The version check uses httpx rather than urllib. httpx is already a base dependency and verifies TLS against certifi, where a python.org macOS build ships no CA store of its own and fails the request with `CERTIFICATE_VERIFY_FAILED`.
 - The default output directory now depends on how the bridge was installed. A git checkout keeps using `<repo>/output`; an installed wheel uses `~/mokuro-bridge/output`, because the old default resolved to the parent of `site-packages` and would have put the user's volumes inside the virtualenv, where a `pipx upgrade` rebuild can strand them. `MOKURO_BRIDGE_OUTPUT_DIR` still overrides both.
 - `./mokuro` is excluded from the distribution explicitly. A wheel shipping a top-level `mokuro` package would shadow the real OCR engine that users install from PyPI.
@@ -103,7 +104,7 @@ Several accounts per upload provider, and a fix for the keychain lookup that mad
 
 ### Added
 
-- **Named upload accounts.** Every provider can now hold more than one account: `python server.py --setup-upload mega --name work` adds a second MEGA account, and it is addressed as `mega:work` (`upload_method=mega:work`, `ocr_folder.py --upload-method mega:work`, `MOKURO_BRIDGE_UPLOAD_DEFAULT=mega:work`). A bare provider id still means the default account, so existing clients and configs are untouched.
+- **Named upload accounts.** Every provider can now hold more than one account: `mokuro-bridge --setup-upload mega --name work` adds a second MEGA account, and it is addressed as `mega:work` (`upload_method=mega:work`, `ocr_folder.py --upload-method mega:work`, `MOKURO_BRIDGE_UPLOAD_DEFAULT=mega:work`). A bare provider id still means the default account, so existing clients and configs are untouched.
 - Each account has its own remote root (`--root`), display label (`--label`) and credential store: one keychain item per MEGA email, a 0600 credential or token file per Drive/OneDrive account. Non-secret metadata lives in `~/.config/mokuro-bridge/accounts/<provider>__<name>.json` (`MOKURO_BRIDGE_ACCOUNTS_DIR`).
 - `python server.py --list-uploads` prints every account with its readiness, credential source and remote root; `--remove-upload mega:work` forgets one.
 - `/upload-methods` and `/health` list one entry per account, each with `provider`, `account`, its own root and `current_folder`.
@@ -170,4 +171,4 @@ Turns the bridge into a page-fetch accelerator for the downloader userscript. Ch
 
 - `UVICORN_RELOAD=1` disables the fetch proxy: the reloader spawns a second process that would contend for the same ports.
 - The proxy resolves every host it is given and refuses loopback, private, link-local, multicast and reserved addresses, so it cannot reach the local network or the bridge itself. Its host allow-list defaults to `*`; `MOKURO_BRIDGE_FETCH_ALLOWED_HOSTS` narrows it. See the README for what that does and does not cover.
-- Downloading never depends on the bridge. With it stopped, the userscript falls back to its own page and background-context lanes. 
+- Downloading never depends on the bridge. With it stopped, the userscript falls back to its own page and background-context lanes.

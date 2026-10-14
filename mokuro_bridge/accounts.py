@@ -176,8 +176,6 @@ class Instance:
         """The account's email/handle, when the provider records one."""
         return str(self.extra.get("email", "") or "")
 
-# ── storage ───────────────────────────────────────────────────────────────
-
 def accounts_dir() -> Path:
     """The account directory (created lazily by writers, never on read).
 

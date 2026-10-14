@@ -21,6 +21,7 @@ from ..creds import (
     _store_mega_creds_os,
     _write_creds_file,
 )
+from .base import Provider, ProviderAccount, provider_account_lock
 
 def _mega_configured(name: str = DEFAULT_NAME) -> bool:
     """Whether one MEGA account is usable right now."""
@@ -51,7 +52,7 @@ def _get_mega_creds(name: str = DEFAULT_NAME) -> tuple[str, str]:
             return keychain_creds
         raise RuntimeError(
             "MEGA credentials not configured. Set MEGA_EMAIL + MEGA_PASSWORD "
-            "environment variables, run `python server.py --setup-mega` (stores "
+            "environment variables, run `mokuro-bridge --setup-upload mega` (stores "
             "them in your OS keychain/credential store or a 0600 file), or write "
             "them to the credentials file."
         )
@@ -60,7 +61,7 @@ def _get_mega_creds(name: str = DEFAULT_NAME) -> tuple[str, str]:
     if instance is None:
         raise RuntimeError(
             f"MEGA account '{name}' is not configured. Add it with "
-            f"`python server.py --setup-upload mega --name {name}`."
+            f"`mokuro-bridge --setup-upload mega --name {name}`."
         )
     email = instance.email
     if email:
@@ -93,7 +94,7 @@ def _run_setup_mega(
             "MEGA upload needs the megatools command-line tool. "
             "Install it with:  brew install megatools   (macOS)\n"
             "                   apt install megatools   (Debian/Ubuntu)\n"
-            "then re-run: python server.py --setup-upload mega"
+            "then re-run: mokuro-bridge --setup-upload mega"
         )
         return
 
@@ -345,10 +346,16 @@ def _mega_remote_exists(megarc_path: Path, remote_path: str) -> bool:
             text=True,
             timeout=30,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"MEGA existence check timed out for {remote_path}") from error
+    except FileNotFoundError as error:
+        raise RuntimeError("megatools is not installed") from error
+    if result.returncode == 0:
+        return bool(result.stdout.strip())
+    detail = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
+    if re.search(r"no such file|not found|does not exist|doesn't exist", detail, re.I):
         return False
-    # ls succeeds and lists the node when it exists; fails when missing.
-    return result.returncode == 0 and bool(result.stdout.strip())
+    raise RuntimeError(f"MEGA existence check failed for {remote_path}: {detail[:300]}")
 
 def _mega_upload_file(
     megarc_path: Path,
@@ -459,7 +466,6 @@ def _mega_upload_file(
         proc.wait()
     if not success and error_msg is None:
         error_msg = f"megatools exited with code {proc.returncode}" if proc.returncode else "no completion line"
-    # Shareable link for the uploaded file (best-effort; None on failure).
     url = None
     if success:
         try:
@@ -474,3 +480,80 @@ def _mega_upload_file(
         except (subprocess.TimeoutExpired, FileNotFoundError):
             url = None
     return success, error_msg, url
+
+
+def _mega_account_view(instance: accounts.Instance) -> ProviderAccount:
+    """Labels and health fields for one MEGA account."""
+    extra = {"library_root": instance.root_path}
+    if instance.email:
+        extra["email"] = instance.email
+    return ProviderAccount(
+        label=instance.display_name_for("MEGA (megatools)"),
+        extra=extra,
+        current_folder=instance.root_path,
+    )
+
+
+def _mega_upload(
+    name: str,
+    root: str,
+    remote_dir: str,
+    local_path: Path,
+    on_progress: Optional[callable],
+    overwrite: str = "fail",
+) -> tuple[bool, Optional[str], Optional[str]]:
+    """Upload one file for one account, managing its own temporary megarc.
+
+    The megarc is created from the account's credentials and deleted in a
+    finally block, and the megatools run is serialized per account. A missing
+    credential raises rather than returning a failure tuple, which is MEGA's
+    long-standing behaviour; the caller in ``providers/__init__.py`` does not
+    catch it.
+    """
+    email, password = _get_mega_creds(name)
+    megarc_path = create_megarc(email, password)
+    try:
+        with provider_account_lock("mega", name):
+            for dir_to_make in (root, remote_dir):
+                mkdir_result = mega_mkdir(megarc_path, dir_to_make)
+                if mkdir_result.returncode != 0:
+                    err = (mkdir_result.stderr or mkdir_result.stdout or "").strip()
+                    if "exist" not in err.lower():
+                        print(f"[mokuro-bridge] mkdir {dir_to_make}: {err}")
+            return _mega_upload_file(
+                megarc_path,
+                local_path,
+                f"{remote_dir}/{local_path.name}",
+                on_progress,
+                overwrite,
+            )
+    finally:
+        megarc_path.unlink(missing_ok=True)
+
+
+def _mega_account_remote_exists(name: str, remote_dir: str, filename: str) -> bool:
+    """Whether a file exists at ``remote_dir/filename`` for one account.
+
+    Creates a temporary megarc for the check and deletes it afterwards; the
+    remote folder is never created.
+    """
+    email, password = _get_mega_creds(name)
+    megarc_path = create_megarc(email, password)
+    try:
+        remote_path = f"{str(remote_dir).rstrip('/')}/{filename}"
+        with provider_account_lock("mega", name):
+            return _mega_remote_exists(megarc_path, remote_path)
+    finally:
+        megarc_path.unlink(missing_ok=True)
+
+
+PROVIDER = Provider(
+    id="mega",
+    label="MEGA (megatools)",
+    configured=_mega_configured,
+    creds_source=_mega_creds_source,
+    upload=_mega_upload,
+    remote_exists=_mega_account_remote_exists,
+    run_setup=_run_setup_mega,
+    account=_mega_account_view,
+)

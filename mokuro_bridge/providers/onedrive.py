@@ -11,6 +11,7 @@ from .. import accounts
 from ..accounts import DEFAULT_NAME
 from ..util import _chmod_fd_private
 from ..config import ONEDRIVE_CLIENT_ID, ONEDRIVE_TOKEN_FILE, _GRAPH_BASE, _ONEDRIVE_SCOPES
+from .base import Provider, ProviderAccount, provider_account_lock, walk_folders
 
 _ONEDRIVE_IMPORT_HINT = (
     "OneDrive upload needs the msal and requests libraries. "
@@ -50,8 +51,8 @@ def _onedrive_token_path(name: str = DEFAULT_NAME) -> Path:
 def _onedrive_setup_hint(name: str = DEFAULT_NAME) -> str:
     """The command that signs this account in (for error messages)."""
     if name == DEFAULT_NAME:
-        return "python server.py --setup-upload onedrive"
-    return f"python server.py --setup-upload onedrive --name {name}"
+        return "mokuro-bridge --setup-upload onedrive"
+    return f"mokuro-bridge --setup-upload onedrive --name {name}"
 
 def _onedrive_configured(name: str = DEFAULT_NAME) -> bool:
     """Whether one OneDrive account is usable right now."""
@@ -142,7 +143,7 @@ def _run_setup_onedrive(
         print(
             "OneDrive setup needs the msal + requests libraries. "
             "Install them with:\n  pip install -r requirements-onedrive.txt\n"
-            "then re-run: python server.py --setup-upload onedrive"
+            "then re-run: mokuro-bridge --setup-upload onedrive"
         )
         return
 
@@ -229,22 +230,52 @@ def _graph_request(sess, method: str, url: str, **kwargs):
         )
     return resp
 
-def _onedrive_ensure_folder(
-    sess, headers: dict, parent_id: str, name: str
-) -> str:
-    """Find (or create) a folder named `name` under parent_id; return its id.
-
-    GET 200 → exists; GET 404 → create via POST children; create 409 →
-    already exists → re-GET to resolve the id. Any other status raises.
-    """
+def _onedrive_item_url(name: str, parent_id: str) -> str:
+    """Graph address of one child by name, under parent_id ("root" or an id)."""
     quoted = urllib.parse.quote(name, safe="")
     if parent_id == "root":
-        check_url = f"{_GRAPH_BASE}/me/drive/root:/{quoted}:"
-        create_url = f"{_GRAPH_BASE}/me/drive/root/children"
-    else:
-        check_url = f"{_GRAPH_BASE}/me/drive/items/{parent_id}:/{quoted}:"
-        create_url = f"{_GRAPH_BASE}/me/drive/items/{parent_id}/children"
-    resp = sess.get(check_url, headers=headers, timeout=30)
+        return f"{_GRAPH_BASE}/me/drive/root:/{quoted}:"
+    return f"{_GRAPH_BASE}/me/drive/items/{parent_id}:/{quoted}:"
+
+def _onedrive_children_url(parent_id: str) -> str:
+    """Graph collection address to create a child under parent_id."""
+    if parent_id == "root":
+        return f"{_GRAPH_BASE}/me/drive/root/children"
+    return f"{_GRAPH_BASE}/me/drive/items/{parent_id}/children"
+
+def _onedrive_folder_id(
+    sess, headers: dict, parent_id: str, name: str
+) -> Optional[str]:
+    """Read-only lookup: a folder id, or None when absent or not a folder.
+
+    This is the probe the read-only walk uses. A name that resolves to a file
+    returns None (the walk treats it as a missing folder), while a Graph error
+    other than 404 raises.
+    """
+    url = _onedrive_item_url(name, parent_id)
+    resp = sess.get(url, headers=headers, timeout=30)
+    if resp.status_code == 200:
+        info = resp.json()
+        if info.get("folder") is None:
+            return None
+        folder_id = info.get("id")
+        if not folder_id:
+            raise RuntimeError(f"Graph returned a folder without an id for {name!r}")
+        return folder_id
+    if resp.status_code == 404:
+        return None
+    raise RuntimeError(f"Graph GET {url} → {resp.status_code}: {(resp.text or '')[:300]}")
+
+def _onedrive_probe_folder(
+    sess, headers: dict, parent_id: str, name: str
+) -> Optional[str]:
+    """Probe used by the create walk: an id, or None when the child is missing.
+
+    It mirrors the old ensure lookup: a 200 response whose item carries an id is
+    accepted, and only a response with neither a folder nor an id raises.
+    """
+    url = _onedrive_item_url(name, parent_id)
+    resp = sess.get(url, headers=headers, timeout=30)
     if resp.status_code == 200:
         info = resp.json()
         if info.get("folder") is not None or info.get("id"):
@@ -252,10 +283,19 @@ def _onedrive_ensure_folder(
         raise RuntimeError(f"Graph path exists but is not a folder: {name}")
     if resp.status_code != 404:
         raise RuntimeError(
-            f"Graph GET {check_url} → {resp.status_code}: "
-            f"{(resp.text or '')[:300]}"
+            f"Graph GET {url} → {resp.status_code}: {(resp.text or '')[:300]}"
         )
-    # Missing → create.
+    return None
+
+def _onedrive_create_folder(
+    sess, headers: dict, parent_id: str, name: str
+) -> str:
+    """Create a folder under parent_id; return its id.
+
+    A 409 means another creator won the race, so the existing id is resolved
+    with a re-GET.
+    """
+    create_url = _onedrive_children_url(parent_id)
     create_resp = sess.post(
         create_url,
         headers={**headers, "Content-Type": "application/json"},
@@ -265,8 +305,9 @@ def _onedrive_ensure_folder(
     if create_resp.status_code in (200, 201):
         return create_resp.json()["id"]
     if create_resp.status_code == 409:
-        # Raced with another creator — resolve the existing id.
-        retry = sess.get(check_url, headers=headers, timeout=30)
+        retry = sess.get(
+            _onedrive_item_url(name, parent_id), headers=headers, timeout=30
+        )
         if retry.status_code == 200:
             return retry.json()["id"]
         raise RuntimeError(
@@ -283,9 +324,8 @@ def _onedrive_item_by_name(
     sess, headers: dict, parent_id: str, name: str
 ) -> Optional[str]:
     """Resolve a file id by name under parent_id (None when missing)."""
-    quoted = urllib.parse.quote(name, safe="")
-    check_url = f"{_GRAPH_BASE}/me/drive/items/{parent_id}:/{quoted}:"
-    resp = sess.get(check_url, headers=headers, timeout=30)
+    url = _onedrive_item_url(name, parent_id)
+    resp = sess.get(url, headers=headers, timeout=30)
     if resp.status_code == 200:
         info = resp.json()
         if info.get("folder") is None and info.get("id"):
@@ -294,8 +334,15 @@ def _onedrive_item_by_name(
     if resp.status_code == 404:
         return None
     raise RuntimeError(
-        f"Graph GET {check_url} → {resp.status_code}: "
+        f"Graph GET {url} → {resp.status_code}: "
         f"{(resp.text or '')[:300]}"
+    )
+
+def _onedrive_remote_dir_exists(sess, headers: dict, remote_dir: str) -> Optional[str]:
+    """Resolve an existing remote folder without creating any part of it."""
+    return walk_folders(
+        remote_dir,
+        find=lambda parent, name: _onedrive_folder_id(sess, headers, parent, name),
     )
 
 def _onedrive_ensure_remote_dir(
@@ -303,16 +350,18 @@ def _onedrive_ensure_remote_dir(
 ) -> str:
     """Ensure the OneDrive folder chain for remote_dir; return deepest folder id.
 
-    First segment is created under drive root, later segments nest under the
-    previously resolved folder id.
+    The shared walk in base.py finds or creates each segment: the first segment
+    is created under the drive root and later segments nest under the previously
+    resolved folder id, so OneDrive is a creating provider.
     """
-    segments = [seg for seg in str(remote_dir or "").strip("/").split("/") if seg]
-    if not segments:
-        raise ValueError(f"empty OneDrive remote path: {remote_dir!r}")
-    parent_id = "root"
-    for seg in segments:
-        parent_id = _onedrive_ensure_folder(sess, headers, parent_id, seg)
-    return parent_id
+    folder_id = walk_folders(
+        remote_dir,
+        find=lambda parent, name: _onedrive_probe_folder(sess, headers, parent, name),
+        make=lambda parent, name: _onedrive_create_folder(sess, headers, parent, name),
+        require_nonempty=True,
+    )
+    assert folder_id is not None
+    return folder_id
 
 def _onedrive_upload_file(
     token: str,
@@ -479,3 +528,60 @@ def _onedrive_upload_file(
         return False, "OneDrive upload ended without a final 2xx response", None
     except Exception as exc:
         return False, str(exc), None
+
+
+def _onedrive_account_view(instance: accounts.Instance) -> ProviderAccount:
+    """Labels and health fields for one OneDrive account."""
+    return ProviderAccount(
+        label=instance.display_name_for("OneDrive"),
+        extra={"root": instance.root_path},
+        current_folder=f"{instance.root_path} (a folder in that account's drive)",
+    )
+
+
+def _onedrive_upload(
+    name: str,
+    root: str,
+    remote_dir: str,
+    local_path: Path,
+    on_progress: Optional[callable],
+    overwrite: str = "fail",
+) -> tuple[bool, Optional[str], Optional[str]]:
+    """Upload one file for one OneDrive account.
+
+    Acquires a token, then runs the chunked upload session (which ensures the
+    folder chain itself). Any failure, including a missing or unrefreshable
+    token, becomes a failure tuple.
+    """
+    try:
+        with provider_account_lock("onedrive", name):
+            token = _onedrive_token(name)
+            return _onedrive_upload_file(token, local_path, remote_dir, on_progress, overwrite)
+    except Exception as error:
+        return False, str(error), None
+
+
+def _onedrive_account_remote_exists(name: str, remote_dir: str, filename: str) -> bool:
+    """Whether a file exists at ``remote_dir/filename`` for one OneDrive account.
+
+    The folder walk is read-only, so no part of the path is created.
+    """
+    import requests
+
+    with provider_account_lock("onedrive", name):
+        sess = requests.Session()
+        headers = _onedrive_headers(name)
+        folder_id = _onedrive_remote_dir_exists(sess, headers, remote_dir)
+        return bool(folder_id and _onedrive_item_by_name(sess, headers, folder_id, filename))
+
+
+PROVIDER = Provider(
+    id="onedrive",
+    label="OneDrive",
+    configured=_onedrive_configured,
+    creds_source=lambda name: "token" if _onedrive_configured(name) else None,
+    upload=_onedrive_upload,
+    remote_exists=_onedrive_account_remote_exists,
+    run_setup=_run_setup_onedrive,
+    account=_onedrive_account_view,
+)

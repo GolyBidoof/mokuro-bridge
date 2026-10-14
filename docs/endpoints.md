@@ -1,0 +1,154 @@
+# HTTP endpoints
+
+The bridge exposes twelve routes, all on the same loopback server (default `http://127.0.0.1:62642`). There is no authentication: binding to `127.0.0.1` is the entire access control, and every route is meant to be reachable only from the machine that runs it. Request bodies are `application/x-www-form-urlencoded` except where a file upload is noted. The upload body limit is 100 MiB for pages and covers.
+
+The routes the capture loop needs are `POST /session/start`, `POST /session/{id}/page` (or `POST /session/{id}/page-local`) and `POST /session/{id}/finalize`. Everything else exists so a client does not have to guess or repeat work.
+
+## The session snapshot
+
+Several routes return the same snapshot, produced by `sessions.session_snapshot()`. It carries counts and state flags so a client can tell "pages are still arriving" from "the volume is being packaged" without inferring it from a counter that has stopped moving.
+
+| Field | Meaning |
+| --- | --- |
+| `session_id`, `title`, `safe_title` | Identity of the session and the filesystem-safe volume name |
+| `pages_received` | Pages accepted so far |
+| `pages_ocr_done` | Pages whose OCR result is cached |
+| `pages_ocr_failed` | Pages whose OCR failed |
+| `pages_ocr_pending` | Queued or in-flight pages, including reserved ingests |
+| `pages_ingesting` | Filenames currently reserved by an ingest |
+| `ingesting` | True while a source directory is being synced or a page is being ingested |
+| `finalizing` | True from the moment finalize takes its exclusive lease |
+| `message` | Human-readable progress line |
+| `finalized` | True once the session reached its terminal state |
+| `upload` | Live upload progress during finalize, or null |
+| `cover_uploaded` | Metadata for an early cover upload, or null (never a share URL) |
+
+## POST /session/start
+
+Creates a session and its volume working directory. This is the first call of a streaming capture.
+
+| Form field | Default | Meaning |
+| --- | --- | --- |
+| `title` | `manga` | Volume title; the series folder and artifact names derive from it |
+| `reuse_existing` | `false` | When truthy, pick up an existing volume with the same safe title instead of making a new one |
+
+Response `200` adds `session_id`, `vol_dir`, `ocr_chunk_size`, `reused`, `pages_received` and `pages_ocr_done` to a fresh snapshot.
+
+Errors: `400` when the title is reserved or invalid (reserved names include `_ocr`, `output`, `local_dir_default.json` and `upload_method_default.json`), `400` when reusing a session that is already finalized, finalizing, cover-uploading or ingesting, and `409` when another request created the same title concurrently.
+
+A fresh volume keeps the clean title. The name gets a short random suffix (`<volume>_a1b2c3`) only when that directory genuinely already exists, so a later `reuse_existing` lookup still finds it by the plain title. Covered by `tests/test_endpoints.py`.
+
+## POST /session/resume
+
+Hands over a folder of pages that already exist on disk. A same-machine client uses this instead of uploading bytes, so the pages never cross a socket. With no `source_dir` it simply reopens the volume as a session.
+
+| Form field | Required | Meaning |
+| --- | --- | --- |
+| `title` | yes | Volume title |
+| `source_dir` | no | Folder of page images to sync into the volume and queue for OCR |
+
+Response `200` adds `vol_dir`, `synced_from_source`, `queued_for_ocr`, `ocr_cached` and `resumed: true` to the snapshot.
+
+Errors: `400` for a reserved or invalid title, `403` when `source_dir` resolves outside the allowed ingest roots (home directory, the system temp locations, plus `MOKURO_BRIDGE_INGEST_ROOTS`), and `400` when the source is not a directory. Covered by `tests/test_endpoints.py`.
+
+## POST /session/{session_id}/page
+
+Streams one captured page into the session and queues it for OCR immediately. The request is multipart.
+
+| Form field | Required | Meaning |
+| --- | --- | --- |
+| `page` | yes | The image file |
+| `filename` | yes | Destination name; must be a plain filename with an image extension |
+| `page_num` | no | Advisory page identity, used to supersede an older copy of the same page |
+
+Response `200` is the snapshot plus `filename` and `page_num`. Re-sending the exact bytes the bridge already holds is an idempotent retry: the response carries `already_present: true` and the queued OCR item is left alone.
+
+Errors: `400` when the session is finalizing or finalized, when the bytes are not a recognized image, when the destination is a symlink, or when the OCR cache path is unsafe; `404` for an unknown session; `409` when the page is currently being OCR'd, is currently being ingested, collides on stem with another extension, already has completed OCR with different bytes, or is already queued or present; `413` when the image exceeds 100 MiB. Covered by `tests/test_endpoints.py`.
+
+## POST /session/{session_id}/page-local
+
+Same-machine ingest: copies a page from a path on this machine instead of accepting bytes.
+
+| Form field | Required | Meaning |
+| --- | --- | --- |
+| `path` | yes | Source file path, under an allowed root |
+| `filename` | yes | Destination name in the volume |
+| `page_num` | no | Advisory page identity |
+
+Response `200` is the snapshot plus `filename`, `page_num`, `source` and `copied`.
+
+Errors: `403` when the path is outside the allowed roots, `400` when the source is a symlink, is not a file, has an unsupported extension, is not a recognized image, or when the session is finalizing or the destination is unsafe; `409` for the same per-page conflicts as `POST /page`; `413` when the source exceeds 100 MiB. Not covered by an HTTP test; the ingest guards are exercised indirectly through `/session/resume`.
+
+## POST /session/{session_id}/cover
+
+Pushes the cover `.webp` early, before OCR finishes, so the destination receives something immediately and the client can show upload progress. The request is multipart.
+
+| Form field | Required | Meaning |
+| --- | --- | --- |
+| `cover` | yes | The cover image; normalized to WebP |
+| `upload_method` | no | Destination for this cover; unset uses the current default |
+| `local_dir` | no | Output folder when the method resolves to `local` |
+
+Response `200` is JSON, not a stream: `{ok, method, file, remote_path|path, url|None, size, sha256}`. A later finalize to the same destination and matching digest skips re-uploading the cover.
+
+Errors: `400` when the session is busy, the method is unknown, the cover is not a recognized image, or the local directory is unsafe or overlaps working state; `404` for an unknown session; `502` when the provider upload fails; `500` when the written or uploaded cover cannot be verified or its metadata cannot be persisted. Not covered by an HTTP test.
+
+## GET /sessions
+
+Lists the live sessions, restoring persisted ones from disk first so a client that reconnects after a restart can still see work it had started. Response `200` is `{sessions: [snapshot, ...], count}`. Already-live sessions are served from memory rather than re-read from JSON on every poll. Not covered by an HTTP test; the sessions module has unit tests.
+
+## GET /session/{session_id}/status
+
+Polls one session. Response `200` is the snapshot. `404` for an unknown session, and `400` if a finalized session record is still on disk. Covered by `tests/test_endpoints.py`.
+
+## POST /session/{session_id}/finalize
+
+Waits for the OCR queue, assembles the `.mokuro`, packs the CBZ and cover, then keeps the trio locally or uploads it. The response is `application/x-ndjson`: one JSON frame per event, at least every 750 ms while the queue drains and one per file during an upload, with no caching and no proxy buffering.
+
+| Form field | Default | Meaning |
+| --- | --- | --- |
+| `upload_method` | current default | `local`, `mega`, `mega:work`, `drive`, `drive:main`, `onedrive`, and so on |
+| `upload_to_mega` | empty | Legacy alias: `true` means MEGA, `false` means local |
+| `delete_after_upload` | `true` | Remove the volume's working files once every step succeeded |
+| `local_dir` | empty | Output folder when the resolved method is `local`; remembered as the sticky default |
+| `overwrite` | `fail` | Remote collision policy: `fail`, `skip` or `overwrite` |
+
+Frames carry a `stage` and a `message`: `wait_ocr`, `assemble`, `pack`, `upload`, `upload_progress`, `cleanup`, then a terminal `done` or `error`. A `done` frame has `status: "success"` or `status: "partial_upload"` and carries `title`, `series`, `pages`, `method`, `remote_path`, `output_dir`, `staging`, per-file `uploads` and `reader_url`. An `error` frame is terminal and must be raised by the client: statuses include `ocr_failed`, `ocr_cache_invalid`, `persistence_error`, `finalize_error` and `cleanup_error`. A stream that simply ends without a terminal frame is a truncated upload, not a success.
+
+Errors before the stream starts: `400` for an unknown upload account, `404` for an unknown session, and `409` when a finalization is already in progress for that session. Not covered by an HTTP test; the client-side stream parsing is tested in `tests/test_ocr_folder.py`.
+
+## GET /upload-methods
+
+Lists every upload target and the current default. Response `200` is `{upload_method_default, upload_method_selected: null, methods: [...]}`, where each method carries `id`, `name`, `configured`, `default`, `current_folder` and provider-specific extras (for MEGA, the library root and email; for Drive and OneDrive, the root folder name). Not covered by an HTTP test; the registry is unit-tested in `tests/test_upload_methods.py`.
+
+## POST /destination/check
+
+Answers, read-only, whether a finished CBZ is already at a destination, so a client can decide whether to download and OCR a volume at all. It never creates a folder or uploads a byte.
+
+| Form field | Default | Meaning |
+| --- | --- | --- |
+| `method` | `local` | Destination to check |
+| `title` | required | Volume title; a blank or unusable one falls back to a generated name, matching `/session/start` |
+| `local_dir` | empty | Base folder for a `local` check |
+
+Response `200` is `{method, title, file, exists}`, plus `remote_dir` for a remote destination. For `local` it stats the finished `.cbz`; for a remote account it walks folders. Errors: `400` for an unknown or unconfigured destination, `422` when `title` is missing, and `502` when the provider check fails. Provider failures are redacted, because Graph and Drive errors embed a request URL that carries an access token. Covered by `tests/test_endpoints.py`.
+
+## GET /queue
+
+Read-only OCR queue metrics for backpressure monitoring, with session ids and numeric counts only. Response `200` is the `ocr_queue_metrics()` snapshot: `scheduler` (`round_robin` or `fifo`), `queue_depth`, `processing_depth`, `total_depth`, `per_session` rows, `active_batch_sessions`, `active_sessions`, `source_ingesting_sessions` and a `worker` object with `started`, `alive`, `state` and `model_loaded`. Covered by `tests/test_ocr_scheduling.py`.
+
+## GET /health
+
+The one call a client makes before anything else. It never performs network I/O: the update state comes from a cache the CLI keeps warm. Response `200` includes:
+
+- `app`, `version`, `status`
+- `update_check` (`disabled`, `pending`, `ok` or `error`), `latest_version`, `update_available`, `update_url`, `update_error`
+- `mokuro_installed`, `mokuro_version`, `mokuro_path`, `mokuro_custom_fork`, `mokuro_repo`, `mokuro_fork_api`
+- `megatools_installed`, `mega_configured`, `mega_creds_source`, `mega_library_root`
+- `upload_default` (the legacy boolean), `upload_method_default`, `upload_method_selected`, and one `upload_methods` entry per account
+- `work_dir`, `output_dir`, `cors_origins`
+- `fetchProxyPorts`, `fetchUpstreams`, `fetchPathUpstream`
+- `active_sessions`, `ocr_chunk_size`, `ocr_idle_flush_s`, `ocr_queue_depth`, `ocr_processing_depth`, `ocr_queue_sessions`, `ocr_active_batch_sessions`, `ocr_worker`
+- `busy`, `busy_stage` and `busy_detail`, derived from the activity tracker plus queued work
+
+Covered by `tests/test_optional_ocr.py` at the route level and by `tests/test_update.py` for the update fields.

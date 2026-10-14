@@ -32,6 +32,8 @@ manga_archive.zip
 
 # Bridge output / local OCR work (see MOKURO_BRIDGE_OUTPUT_DIR / WORK_DIR)
 /output/
+library/
+.debug/
 
 # Custom mokuro fork checkout (kept local; use vanilla pip mokuro or point
 # MOKURO_REPO at your own fork elsewhere)
@@ -39,3 +41,6 @@ manga_archive.zip
 
 # Local browser userscripts (kept out of the public repo)
 /*.user.js
+
+# Pytest cache: holds absolute paths and must never be committed
+.pytest_cache/

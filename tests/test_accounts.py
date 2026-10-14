@@ -19,8 +19,6 @@ def registry(tmp_path, monkeypatch):
     return tmp_path / "accounts"
 
 
-# ── id parsing ────────────────────────────────────────────────────────────
-
 def test_default_account_uses_the_bare_provider_id():
     assert accounts.method_id("mega") == "mega"
     assert accounts.method_id("mega", accounts.DEFAULT_NAME) == "mega"
@@ -52,8 +50,6 @@ def test_parse_method_id_rejects_junk(raw):
 def test_local_is_never_an_account():
     with pytest.raises(ValueError, match="local"):
         accounts.parse_method_id("local")
-
-# ── registry contents ─────────────────────────────────────────────────────
 
 def test_every_provider_has_an_implicit_default(registry):
     listed = accounts.list_instances()
@@ -143,8 +139,6 @@ def test_non_account_json_files_are_ignored(registry):
     # A named secret file shares the *.__*.json shape.
     accounts.secret_path("drive", "main", "creds.json").write_text("{}", encoding="utf-8")
     assert [i.id for i in accounts.instances_for("drive")] == ["drive", "drive:main"]
-
-# ── naming helpers ────────────────────────────────────────────────────────
 
 def test_next_instance_name_offers_default_then_account_n(registry):
     assert accounts.next_instance_name("mega") == "default"

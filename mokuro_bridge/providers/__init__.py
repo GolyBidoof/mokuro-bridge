@@ -5,7 +5,7 @@ import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .. import accounts
 from ..accounts import DEFAULT_NAME
@@ -15,30 +15,9 @@ from ..config import (
     _MEGA_UPLOAD_DEFAULT,
     _load_remembered_local_dir,
 )
-from ..creds import _mega_creds_source
 from ..util import _chmod_fd_private, series_title_from_volume
-from .drive import (
-    _drive_configured,
-    _drive_creds_source,
-    _drive_service,
-    _drive_series_folder_id,
-    _drive_upload_file,
-    _run_setup_drive,
-)
-from .mega import (
-    _get_mega_creds,
-    _mega_configured,
-    _mega_upload_file,
-    _run_setup_mega,
-    create_megarc,
-    mega_mkdir,
-)
-from .onedrive import (
-    _onedrive_configured,
-    _onedrive_token,
-    _onedrive_upload_file,
-    _run_setup_onedrive,
-)
+from . import drive, mega, onedrive
+from .base import Provider, ProviderAccount, walk_folders
 
 # Names this package exists to re-export. Everything below is imported here so
 # cli.py (and api.py) can reach the provider internals from one place, not from
@@ -46,11 +25,11 @@ from .onedrive import (
 # re-exports are indistinguishable from leftovers to a linter, and F401 fires
 # on every one of them.
 __all__ = [
-    # The provider setup wizards, re-exported for cli.py.
-    "_run_setup_drive",
-    "_run_setup_mega",
-    "_run_setup_onedrive",
-    # The registry snapshot and the helpers cli.py and api.py build on.
+    "Provider",
+    "ProviderAccount",
+    "walk_folders",
+    "register_provider",
+    "setup_runner",
     "_UPLOAD_METHODS",
     "UploadMethod",
     "_build_upload_methods",
@@ -66,27 +45,41 @@ __all__ = [
     "method_root",
     "resolve_upload_method",
     "upload_file",
+    "remote_file_exists",
 ]
 
-_account_locks_guard = threading.Lock()
-_account_locks: dict[tuple[str, str], threading.Lock] = {}
+# The live provider registry. Dispatch below is a lookup in this mapping, so a
+# new backend is its own module plus one entry here; accounts.py stays the
+# source of truth for which accounts exist and how a method id is spelled. The
+# full contract is in docs/providers.md.
+_PROVIDERS: dict[str, Provider] = {
+    provider.id: provider
+    for provider in (mega.PROVIDER, drive.PROVIDER, onedrive.PROVIDER)
+}
 
 
-def _provider_account_lock(provider: str, name: str) -> threading.Lock:
-    key = (provider, name)
-    with _account_locks_guard:
-        return _account_locks.setdefault(key, threading.Lock())
+def register_provider(provider: Provider) -> None:
+    """Add or replace one provider in the live registry.
+
+    The three shipped providers are registered at import. A test or an out of
+    tree backend calls this to extend dispatch without touching any of the
+    lookup sites in this module.
+    """
+    _PROVIDERS[provider.id] = provider
 
 
-def _mega_account_lock(name: str) -> threading.Lock:
-    return _provider_account_lock("mega", name)
+def setup_runner(provider_id: str) -> Optional[Callable[..., None]]:
+    """The interactive setup wizard for one provider, or None when unknown."""
+    provider = _PROVIDERS.get(provider_id)
+    return provider.run_setup if provider else None
+
 
 @dataclass
 class UploadMethod:
     id: str            # "local" | "mega" | "mega:work" | "drive" | ...
-    name: str          # human label
+    name: str
     configured: bool   # is it usable right now?
-    default: bool      # is it the default target?
+    default: bool
     extra: dict = field(default_factory=dict)  # provider-specific info for /health
 
 # Every account of every provider is a target; "local" is the only non-account
@@ -151,26 +144,16 @@ def _method_configured(method: str) -> bool:
     instance = instance_for(method)
     if instance is None:
         return False
-    if instance.provider == "mega":
-        return _mega_configured(instance.name)
-    if instance.provider == "drive":
-        return _drive_configured(instance.name)
-    if instance.provider == "onedrive":
-        return _onedrive_configured(instance.name)
-    return False
+    provider = _PROVIDERS.get(instance.provider)
+    return bool(provider and provider.configured(instance.name))
 
 def _method_creds_source(method: str) -> Optional[str]:
     """Where that target's credentials come from, for /health."""
     instance = instance_for(method)
     if instance is None:
         return None
-    if instance.provider == "mega":
-        return _mega_creds_source(instance.name)
-    if instance.provider == "drive":
-        return _drive_creds_source(instance.name)
-    if instance.provider == "onedrive":
-        return "token" if _onedrive_configured(instance.name) else None
-    return None
+    provider = _PROVIDERS.get(instance.provider)
+    return provider.creds_source(instance.name) if provider else None
 
 def _env_seeded_method() -> str:
     """The env-seeded default target (MOKURO_BRIDGE_UPLOAD_DEFAULT).
@@ -279,8 +262,7 @@ def resolve_upload_method(value: Optional[str]) -> str:
 
 def mega_series_dir(volume_title: str, name: str = DEFAULT_NAME) -> str:
     """Remote MEGA folder for a volume: <account root>/<series>/."""
-    instance = accounts.load_instance("mega", name)
-    root = instance.root_path if instance is not None else accounts.default_root("mega")
+    root = _PROVIDERS["mega"].root(name)
     series = series_title_from_volume(volume_title)
     return f"{root}/{series}"
 
@@ -303,53 +285,35 @@ def upload_file(
     success (nothing uploaded); "overwrite" → delete-then-upload so the remote
     copy is replaced. Applies uniformly to every provider.
 
-    The MEGA branch manages its own megarc (created from _get_mega_creds(name)
-    and deleted in a finally block), ensuring remote dirs exist first. The
-    megatools run is serialized per account.
+    The provider owns its account lock, the folders it needs to create and its
+    own error policy; this function only resolves the target and looks the
+    provider up in the registry.
     """
     instance = instance_for(method)
     if instance is None:
         raise ValueError(f"unknown upload method: {method}")
-    name = instance.name
-    root = instance.root_path
+    provider = _PROVIDERS.get(instance.provider)
+    if provider is None:
+        raise ValueError(f"unknown upload provider: {instance.provider}")
+    return provider.upload(
+        instance.name,
+        instance.root_path,
+        remote_dir,
+        local_path,
+        on_progress,
+        overwrite,
+    )
 
-    if instance.provider == "mega":
-        email, password = _get_mega_creds(name)
-        megarc_path = create_megarc(email, password)
-        try:
-            with _mega_account_lock(name):
-                for dir_to_make in (root, remote_dir):
-                    mkdir_result = mega_mkdir(megarc_path, dir_to_make)
-                    if mkdir_result.returncode != 0:
-                        err = (mkdir_result.stderr or mkdir_result.stdout or "").strip()
-                        if "exist" not in err.lower():
-                            print(f"[mokuro-bridge] mkdir {dir_to_make}: {err}")
-                return _mega_upload_file(
-                    megarc_path,
-                    local_path,
-                    f"{remote_dir}/{local_path.name}",
-                    on_progress,
-                    overwrite,
-                )
-        finally:
-            megarc_path.unlink(missing_ok=True)
-    if instance.provider == "drive":
-        try:
-            with _provider_account_lock("drive", name):
-                service = _drive_service(name)
-                # remote_dir is like "mokuro-reader/<Series>"
-                folder_id = _drive_series_folder_id(service, remote_dir, root_name=root)
-                return _drive_upload_file(service, folder_id, local_path, on_progress, overwrite)
-        except Exception as e:
-            return False, str(e), None
-    if instance.provider == "onedrive":
-        try:
-            with _provider_account_lock("onedrive", name):
-                token = _onedrive_token(name)
-                return _onedrive_upload_file(token, local_path, remote_dir, on_progress, overwrite)
-        except Exception as e:
-            return False, str(e), None
-    raise ValueError(f"unknown upload provider: {instance.provider}")
+def remote_file_exists(method: str, remote_dir: str, filename: str) -> bool:
+    """Check a provider path without creating remote folders or uploading data."""
+    method = canonical_method_id(method)
+    instance = instance_for(method)
+    if instance is None:
+        raise ValueError("local destinations are checked by the API layer")
+    provider = _PROVIDERS.get(instance.provider)
+    if provider is None:
+        raise ValueError(f"unknown upload provider: {instance.provider}")
+    return provider.remote_exists(instance.name, remote_dir, filename)
 
 def _method_current_folder(method_id: str) -> str:
     """Human-readable 'current folder' for an upload target (for clients)."""
@@ -359,13 +323,8 @@ def _method_current_folder(method_id: str) -> str:
     instance = instance_for(method_id)
     if instance is None:
         return ""
-    if instance.provider == "mega":
-        return instance.root_path
-    if instance.provider == "drive":
-        return f"{instance.root_path} (a folder in that account's My Drive)"
-    if instance.provider == "onedrive":
-        return f"{instance.root_path} (a folder in that account's drive)"
-    return ""
+    provider = _PROVIDERS.get(instance.provider)
+    return provider.account(instance).current_folder if provider else ""
 
 def _build_upload_methods() -> dict[str, UploadMethod]:
     """Build the live upload-target registry (fresh per call).
@@ -384,27 +343,24 @@ def _build_upload_methods() -> dict[str, UploadMethod]:
     }
     default_method = _default_upload_method()
     for instance in accounts.list_instances():
+        provider = _PROVIDERS.get(instance.provider)
+        # accounts.py gates the provider list, so the fallback view is only
+        # reachable for a hand-edited account file; it matches the old default.
+        view = (
+            provider.account(instance)
+            if provider is not None
+            else ProviderAccount(label=instance.display_name)
+        )
         extra: dict = {
             "provider": instance.provider,
             "account": instance.name,
             "creds_source": _method_creds_source(instance.id),
             "tracked": instance.tracked,
         }
-        label = instance.display_name
-        if instance.provider == "mega":
-            # Keep the historical "MEGA (megatools)" wording for the default
-            # account, and put the account name after it for the others.
-            label = instance.display_name_for("MEGA (megatools)")
-            extra["library_root"] = instance.root_path
-            if instance.email:
-                extra["email"] = instance.email
-        elif instance.provider == "drive":
-            extra["root"] = instance.root_path
-        elif instance.provider == "onedrive":
-            extra["root"] = instance.root_path
+        extra.update(view.extra)
         methods[instance.id] = UploadMethod(
             id=instance.id,
-            name=label,
+            name=view.label,
             configured=_method_configured(instance.id),
             default=(default_method == instance.id),
             extra=extra,

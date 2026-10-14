@@ -17,6 +17,7 @@ from ..config import (
     _DRIVE_CLIENT_ID_ENV,
     _DRIVE_CLIENT_SECRET_ENV,
 )
+from .base import Provider, ProviderAccount, provider_account_lock, walk_folders
 
 _DRIVE_IMPORT_HINT = (
     "Google Drive upload needs the google client libraries. "
@@ -28,7 +29,6 @@ _DRIVE_IMPORT_HINT = (
 # optional for installed apps.
 _DRIVE_AUTH_URI = "https://accounts.google.com/o/oauth2/v2/auth"
 _DRIVE_TOKEN_URI = "https://oauth2.googleapis.com/token"
-# Steps the user follows in Google Cloud Console to create their OAuth client.
 _DRIVE_CONSOLE_GUIDE = (
     "1. Open Google Cloud Console Credentials:\n"
     "     https://console.cloud.google.com/apis/credentials\n"
@@ -163,8 +163,8 @@ def _drive_creds_path(name: str = DEFAULT_NAME) -> Path:
 def _drive_setup_hint(name: str = DEFAULT_NAME) -> str:
     """The command that configures this account (for error messages)."""
     if name == DEFAULT_NAME:
-        return "python server.py --setup-upload drive"
-    return f"python server.py --setup-upload drive --name {name}"
+        return "mokuro-bridge --setup-upload drive"
+    return f"mokuro-bridge --setup-upload drive --name {name}"
 
 def _drive_creds_source(name: str = DEFAULT_NAME) -> Optional[str]:
     """Where Drive creds come from: 'oauth', 'service_account', or None.
@@ -277,11 +277,8 @@ def _drive_find_file_id(service, parent_id: str, name: str) -> Optional[str]:
     files = resp.get("files", [])
     return files[0]["id"] if files else None
 
-def _drive_ensure_folder(service, name, parent_id) -> str:
-    """Find a Drive folder under parent_id, creating it when missing."""
-    existing = _drive_find_folder(service, name, parent_id)
-    if existing:
-        return existing
+def _drive_create_folder(service, name, parent_id) -> str:
+    """Create a Drive folder directly under parent_id; return its id."""
     created = (
         service.files()
         .create(
@@ -304,8 +301,9 @@ def _drive_series_folder_id(
 
     remote_dir arrives as e.g. "mokuro-reader/<Series>": the first segment
     must be the account's root folder (created under "root"/My Drive) and each
-    remaining segment is a folder nested under the previous one. Handles 1-2+
-    segments generically. Returns the id of the deepest folder.
+    remaining segment is a folder nested under the previous one. The walk is the
+    shared one in base.py: a miss creates the folder, so Drive is a creating
+    provider. Returns the id of the deepest folder.
     """
     segments = [seg for seg in str(drive_path).strip("/").split("/") if seg]
     if not segments:
@@ -315,10 +313,14 @@ def _drive_series_folder_id(
             f"Google Drive remote path must start with '{root_name}' "
             f"(got {drive_path!r})"
         )
-    parent_id = "root"
-    for seg in segments:
-        parent_id = _drive_ensure_folder(service, seg, parent_id)
-    return parent_id
+    folder_id = walk_folders(
+        drive_path,
+        find=lambda parent, seg: _drive_find_folder(service, seg, parent),
+        make=lambda parent, seg: _drive_create_folder(service, seg, parent),
+        require_nonempty=True,
+    )
+    assert folder_id is not None
+    return folder_id
 
 def _drive_upload_file(
     service,
@@ -343,7 +345,6 @@ def _drive_upload_file(
         raise RuntimeError(_DRIVE_IMPORT_HINT) from exc
     total = local_path.stat().st_size
 
-    # Existing-file policy.
     existing_id = _drive_find_file_id(service, folder_id, local_path.name)
     if existing_id:
         if overwrite == "skip":
@@ -430,7 +431,7 @@ def _run_setup_drive(
         print(
             "Google Drive setup needs the google client libraries. "
             "Install them with:\n  pip install -r requirements-drive.txt\n"
-            "then re-run: python server.py --setup-upload drive"
+            "then re-run: mokuro-bridge --setup-upload drive"
         )
         return
 
@@ -566,3 +567,64 @@ def _run_setup_drive(
     if stored is not None:
         print(f"Remote root: {stored.root_path} (a folder in this account's My Drive)")
         print(f"Account ready: {stored.id}")
+
+
+def _drive_account_view(instance: accounts.Instance) -> ProviderAccount:
+    """Labels and health fields for one Drive account."""
+    return ProviderAccount(
+        label=instance.display_name_for("Google Drive"),
+        extra={"root": instance.root_path},
+        current_folder=f"{instance.root_path} (a folder in that account's My Drive)",
+    )
+
+
+def _drive_upload(
+    name: str,
+    root: str,
+    remote_dir: str,
+    local_path: Path,
+    on_progress: Optional[callable],
+    overwrite: str = "fail",
+) -> tuple[bool, Optional[str], Optional[str]]:
+    """Upload one file for one Drive account.
+
+    The folder chain is ensured first (Drive is a creating provider), then the
+    resumable upload runs. Any failure, including a missing credential file or
+    an unimportable client library, becomes a failure tuple.
+    """
+    try:
+        with provider_account_lock("drive", name):
+            service = _drive_service(name)
+            folder_id = _drive_series_folder_id(service, remote_dir, root_name=root)
+            return _drive_upload_file(service, folder_id, local_path, on_progress, overwrite)
+    except Exception as error:
+        return False, str(error), None
+
+
+def _drive_account_remote_exists(name: str, remote_dir: str, filename: str) -> bool:
+    """Whether a file exists at ``remote_dir/filename`` for one Drive account.
+
+    The walk is read-only: no folder is created, and a missing folder means the
+    file is absent.
+    """
+    with provider_account_lock("drive", name):
+        service = _drive_service(name)
+        folder_id = walk_folders(
+            remote_dir,
+            find=lambda parent, seg: _drive_find_folder(service, seg, parent),
+        )
+        if not folder_id:
+            return False
+        return bool(_drive_find_file_id(service, folder_id, filename))
+
+
+PROVIDER = Provider(
+    id="drive",
+    label="Google Drive",
+    configured=_drive_configured,
+    creds_source=_drive_creds_source,
+    upload=_drive_upload,
+    remote_exists=_drive_account_remote_exists,
+    run_setup=_run_setup_drive,
+    account=_drive_account_view,
+)

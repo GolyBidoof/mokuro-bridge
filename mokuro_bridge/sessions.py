@@ -13,8 +13,6 @@ from fastapi import HTTPException
 from .config import SESSIONS_DIR, WORK_DIR
 from .util import _chmod_fd_private
 
-# ── Session state ──────────────────────────────────────────────────────
-
 @dataclass
 class Session:
     session_id: str
@@ -226,7 +224,9 @@ def _validate_cover_metadata(value: object) -> Optional[dict]:
     return {key: value[key] for key in ("method", "file", "path", "remote_path", "size", "sha256") if key in value}
 
 
-def _load_persisted_session(session_id: str, *, sync: bool = True) -> Optional[Session]:
+def _load_persisted_session(
+    session_id: str, *, sync: bool = True, announce: bool = True
+) -> Optional[Session]:
     path = _session_path(session_id)
     if path is None or not path.is_file():
         return None
@@ -300,8 +300,42 @@ def _load_persisted_session(session_id: str, *, sync: bool = True) -> Optional[S
     )
     if sync:
         _refresh_restored_session(session)
-    print(f"[mokuro-bridge] restored session {session_id} from disk ({session.vol_dir.name})")
+    if announce:
+        print(f"[mokuro-bridge] restored session {session_id} from disk ({session.vol_dir.name})")
     return session
+
+def _restore_persisted_sessions() -> list[Session]:
+    """Load all durable active sessions after a process restart.
+
+    /sessions is the CLI's discovery point for resuming work. Restoring them
+    here also reconciles the OCR cache, which rebuilds the in-memory queue.
+
+    Called on every /sessions poll, so a session that is already live is
+    returned from memory without re-reading (and re-announcing) its JSON.
+    """
+    restored: list[Session] = []
+    for path in sorted(SESSIONS_DIR.glob("*.json")):
+        session_id = path.stem
+        with _sessions_lock:
+            live = _sessions.get(session_id)
+        if live is not None:
+            restored.append(live)
+            continue
+        session = _load_persisted_session(session_id, sync=False, announce=False)
+        if session is None or session.finalized:
+            continue
+        with _sessions_lock:
+            existing = _sessions.get(session_id)
+            if existing is None:
+                _sessions[session_id] = session
+        if existing is None:
+            _refresh_restored_session(session)
+            print(f"[mokuro-bridge] restored session {session_id} from disk ({session.vol_dir.name})")
+            restored.append(session)
+        else:
+            # Another caller registered it between the two lookups.
+            restored.append(existing)
+    return restored
 
 def _get_session(session_id: str) -> Session:
     with _sessions_lock:
@@ -367,6 +401,8 @@ def session_snapshot(session: Session) -> dict:
             "pages_ocr_pending": max(0, pending) + len(reservations),
             "pages_ingesting": reservations,
             "source_ingesting": bool(session.ingesting and not reservations),
+            "ingesting": bool(session.ingesting),
+            "finalizing": bool(session.finalizing),
             "message": session.message,
             "finalized": session.finalized,
             "upload": session.upload,

@@ -17,6 +17,7 @@ from typing import Optional
 from .util import _chmod_fd_private
 from .config import (
     IMAGE_EXTENSIONS,
+    _OCR_BATCH_SIZE,
     _OCR_CHUNK_SIZE,
     _OCR_FAIR_SCHEDULING,
     _OCR_FINALIZE_PRIORITY_RATIO,
@@ -137,7 +138,6 @@ def _quiet_model_load():
         except Exception:
             pass
 
-# ── OCR engine ────────────────────────────────────────────────────────
 # By default the bridge uses the stock mokuro package from PyPI
 # (`pip install mokuro`), imported normally from the environment.
 #
@@ -187,7 +187,7 @@ def _mokuro_submodule(name: str):
 _generator_lock = threading.Lock()
 _assemble_lock = threading.Lock()
 
-_generator = None  # lazy MokuroGenerator
+_generator = None
 _fork_supported_cache: Optional[bool] = None
 
 # Global OCR flush queue (shared across sessions / capture clients)
@@ -661,18 +661,13 @@ def _take_fair_batch_locked(force_batch: bool) -> list[tuple[str, str]]:
 
     forced = [sid for sid in order if sid in _ocr_force_sessions]
     ordinary = [sid for sid in order if sid not in _ocr_force_sessions]
-    active_count = len(order)
     if not forced:
-        # Ordinary idle/queue flushes retain the configured chunk size even
-        # when only one session is active.
-        return _take_fair_items(order, min(_OCR_CHUNK_SIZE, len(_ocr_queue)))
-    # Keep the old 32-page force flush for a lone finalize volume, but use the
-    # configured normal batch size once another volume can make progress.
-    batch_limit = (
-        max(_OCR_CHUNK_SIZE, 32)
-        if force_batch and active_count == 1
-        else _OCR_CHUNK_SIZE
-    )
+        # Ordinary idle/queue flushes take the same batch as a forced one: the worker is
+        # the bottleneck, so leaving it under-filled helped nobody.
+        return _take_fair_items(order, min(_OCR_BATCH_SIZE, len(_ocr_queue)))
+    # One batch size for every case. The finalize share below is what keeps a large
+    # volume from monopolizing the worker, not a smaller batch.
+    batch_limit = _OCR_BATCH_SIZE
 
     global _ocr_force_turn
     if ordinary and batch_limit > 1:
@@ -699,7 +694,7 @@ def _take_ocr_batch_legacy() -> list[tuple[str, str]]:
     if not _ocr_queue:
         return []
 
-    force_cap = max(_OCR_CHUNK_SIZE, 32)
+    force_cap = _OCR_BATCH_SIZE
 
     # Finalize drain: prefer pages for sessions that are waiting on finalize.
     if _ocr_force_sessions:
@@ -853,7 +848,7 @@ def _process_ocr_batch_unlocked(items: list[tuple[str, str]]) -> None:
     if not items:
         return
 
-    gen = _get_generator()  # lazily inits models (quietly) and keeps them warm
+    gen = _get_generator()
     mpocr = gen.mpocr
     use_fork_api = _fork_supported()
 

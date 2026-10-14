@@ -3,7 +3,7 @@
 # (service 'mega.nz', protocol https) for mokuro-bridge / megatools.
 #
 # Cross-platform alternative (works on macOS, Windows and Linux):
-#   python3 server.py --setup-mega
+#   mokuro-bridge --setup-upload mega
 # which stores in the OS keychain/credential store or a 0600 credentials file.
 set -euo pipefail
 

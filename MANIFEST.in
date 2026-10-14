@@ -35,6 +35,7 @@ recursive-include docs *.md
 # disk, and pruning it keeps an sdist built by hand from sweeping it in.
 prune mokuro
 prune output
+prune library
 prune build
 prune dist
 

@@ -64,7 +64,6 @@ for _private_dir in (WORK_DIR, SESSIONS_DIR):
         pass
 IMAGE_EXTENSIONS = {".webp", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".avif", ".tif", ".tiff"}
 
-# request with upload_to_mega=true.
 MEGA_LIBRARY_ROOT = os.environ.get("MEGA_LIBRARY_ROOT", "/Root/mokuro-reader")
 _MEGA_UPLOAD_DEFAULT = str(
     os.environ.get("MOKURO_BRIDGE_UPLOAD_DEFAULT", "false")
@@ -86,7 +85,7 @@ MIN_PAGES_FOR_MEGA = _env_positive_int("MIN_PAGES_FOR_MEGA", 1)
 
 # Google Drive (optional destination via google-api-python-client).
 # Auth is OAuth2: creds live in DRIVE_CREDS_FILE (0600), created by
-# `python server.py --setup-upload drive`. A service-account JSON also works.
+# `mokuro-bridge --setup-upload drive`. A service-account JSON also works.
 DRIVE_ROOT_NAME = os.environ.get("DRIVE_ROOT_NAME", "mokuro-reader")  # folder at My Drive root
 DRIVE_CREDS_FILE = _env_path(
     "DRIVE_CREDS_FILE", Path.home() / ".config" / "mokuro-bridge" / "drive_credentials.json"
@@ -124,6 +123,13 @@ def _env_nonnegative_float(name: str, default: float) -> float:
 
 
 _OCR_CHUNK_SIZE = _env_positive_int("OCR_CHUNK_SIZE", 8)
+# The OCR worker takes this many pages in one batch. It used to be the larger 32 only
+# for a lone finalizing volume and the smaller OCR_CHUNK_SIZE as soon as another volume
+# could make progress, which traded throughput for fairness and left the worker at a
+# quarter of its capacity whenever a series was running. The worker is the bottleneck,
+# so the batch stays large and the finalize priority ratio below still stops one volume
+# from taking the whole batch while others are waiting.
+_OCR_BATCH_SIZE = _env_positive_int("OCR_BATCH_SIZE", max(_OCR_CHUNK_SIZE, 32))
 _OCR_IDLE_FLUSH_S = _env_nonnegative_float("OCR_IDLE_FLUSH_S", 1.5)
 
 # Multi-volume OCR scheduling.  The fair selector is the default because it

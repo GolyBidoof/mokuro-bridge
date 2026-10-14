@@ -7,6 +7,7 @@ provider's "is it configured" hook are patched, so nothing here reads the real
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -33,17 +34,22 @@ def env(tmp_path, monkeypatch):
 
     mega_check, mega_creds = make("mega", "keychain")
     drive_check, drive_creds = make("drive", "oauth")
-    one_check, _ = make("onedrive", "token")
-    monkeypatch.setattr(providers, "_mega_configured", mega_check)
-    monkeypatch.setattr(providers, "_drive_configured", drive_check)
-    monkeypatch.setattr(providers, "_onedrive_configured", one_check)
-    monkeypatch.setattr(providers, "_mega_creds_source", mega_creds)
-    monkeypatch.setattr(providers, "_drive_creds_source", drive_creds)
+    one_check, one_creds = make("onedrive", "token")
+    # The dispatch seam is the provider registry: swap the configured and
+    # creds_source callables of each provider for the controllable doubles.
+    for provider_id, check, creds in (
+        ("mega", mega_check, mega_creds),
+        ("drive", drive_check, drive_creds),
+        ("onedrive", one_check, one_creds),
+    ):
+        monkeypatch.setitem(
+            providers._PROVIDERS,
+            provider_id,
+            replace(providers._PROVIDERS[provider_id], configured=check, creds_source=creds),
+        )
     monkeypatch.delenv("MOKURO_BRIDGE_UPLOAD_DEFAULT", raising=False)
     return configured
 
-
-# ── resolution ────────────────────────────────────────────────────────────
 
 def test_bare_and_default_ids_are_the_same_target(env):
     assert providers.resolve_upload_method("mega") == "mega"
@@ -68,8 +74,6 @@ def test_legacy_booleans_still_map_to_mega_and_local(env):
     # …and an empty request means "whatever the default is".
     assert providers.resolve_upload_method("") == providers._default_upload_method()
     assert providers.resolve_upload_method(None) == providers._default_upload_method()
-
-# ── registry listing ──────────────────────────────────────────────────────
 
 def test_every_account_is_listed_with_its_root(env):
     accounts.save_instance("mega", "work", root="/Root/work", extra={"email": "w@example.com"})
@@ -108,8 +112,6 @@ def test_current_folder_is_per_account(env):
     assert providers._method_current_folder("mega") == accounts.default_root("mega")
     assert "My Drive" in providers._method_current_folder("drive")
 
-# ── sticky default ────────────────────────────────────────────────────────
-
 def test_remembered_target_persists_across_reads(env):
     accounts.save_instance("mega", "work", extra={"email": "w@example.com"})
     env["mega"].add("work")
@@ -145,8 +147,6 @@ def test_env_seed_accepts_an_account_id(env, monkeypatch):
     assert providers._default_upload_method() == "mega"
     monkeypatch.setenv("MOKURO_BRIDGE_UPLOAD_DEFAULT", "mega:ghost")
     assert providers._default_upload_method() == "local"
-
-# ── dispatch guard ────────────────────────────────────────────────────────
 
 def test_upload_file_rejects_an_unknown_target(env, tmp_path):
     payload = tmp_path / "x.cbz"

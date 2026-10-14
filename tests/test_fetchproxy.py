@@ -87,8 +87,6 @@ def proxied(upstream, monkeypatch):
         yield client
 
 
-# --------------------------------------------------------------- binding
-
 def test_bind_sockets_returns_every_free_port():
     ports = free_ports(3)
     sockets, bound = fetchproxy.bind_sockets("127.0.0.1", ports)
@@ -128,8 +126,6 @@ def test_bind_sockets_survives_every_port_being_taken():
     finally:
         busy.close()
 
-
-# ---------------------------------------------------------------- health
 
 def test_health_advertises_the_bound_ports(proxied):
     payload = proxied.get("/__bwdd_health").json()
@@ -184,8 +180,6 @@ def test_private_network_preflight_refuses_others_when_origins_are_narrowed(monk
         assert denied.status_code == 403
 
 
-# ---------------------------------------------------------------- proxying
-
 def test_proxy_forwards_path_and_signed_query(proxied):
     path = "/6_product/abc/1/2/item/xhtml/p-0001.xhtml/deadbeef.jpeg"
     query = "Policy=eyJ&Signature=abc%7Edef&Key-Pair-Id=APKA"
@@ -235,8 +229,6 @@ def test_a_host_outside_the_allow_list_is_refused(proxied, monkeypatch):
     monkeypatch.setattr(fetchproxy, "ALLOWED_HOSTS", set())
     assert proxied.get("/page.jpeg").status_code == 403
 
-
-# ------------------------------------------------- path-named upstream
 
 def _allow_test_host(monkeypatch, netloc):
     """Let a test host stand in for a public CDN.
@@ -335,8 +327,6 @@ def test_path_upstream_is_refused_outside_the_allow_list(proxied, monkeypatch):
     assert proxied.get("/_bwdd/evil.example/page.jpeg").status_code == 403
     assert _Upstream.seen == [], "a refused host must not be fetched"
 
-
-# ------------------------------------------------------------------ env
 
 def _with_env(**env) -> str:
     """Import fetchproxy in a clean interpreter with *env* set."""

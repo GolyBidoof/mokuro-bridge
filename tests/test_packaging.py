@@ -150,9 +150,6 @@ def test_python_dash_m_entry_point_is_shipped():
     assert (REPO_ROOT / "mokuro_bridge" / "__main__.py").is_file()
 
 
-# ── the two checkout entry points must keep working ─────────────────────
-
-
 def test_the_checkout_wrappers_still_resolve():
     """run.sh, the launchd plist and the README all invoke these scripts.
 
@@ -178,9 +175,6 @@ def test_the_launcher_scripts_still_target_server_py():
         assert "server.py" in text, f"{name} no longer launches server.py"
     plist = (REPO_ROOT / "com.mokuro-bridge.plist").read_text(encoding="utf-8")
     assert "__SERVER__" in plist, "the plist template lost its server placeholder"
-
-
-# ── the installed-vs-checkout output directory ──────────────────────────
 
 
 @pytest.mark.parametrize(

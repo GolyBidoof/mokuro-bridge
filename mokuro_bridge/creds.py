@@ -12,9 +12,6 @@ from . import accounts
 from .config import MEGA_CREDS_FILE
 from .util import _chmod_fd_private
 
-# ── MEGA / helpers ─────────────────────────────────────────────────────
-
-# ── MEGA credentials ──────────────────────────────────────────────────
 # Resolution order for the *default* account:
 #   1. MEGA_EMAIL / MEGA_PASSWORD env vars
 #   2. MEGA_CREDS_FILE (KEY=VALUE, chmod 600)
@@ -27,7 +24,7 @@ from .util import _chmod_fd_private
 # 0600 per-account file as the fallback when no OS store is available.
 # All optional: MEGA upload is disabled by default and can be skipped entirely.
 
-_KEYRING_SERVICE = "mokuro-bridge"  # namespace used for keyring-based entries
+_KEYRING_SERVICE = "mokuro-bridge"
 _CREDS_WRITE_LOCK = threading.Lock()
 
 def _keyring():

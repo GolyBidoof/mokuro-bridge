@@ -66,6 +66,7 @@ def queue_state(monkeypatch):
 
 def test_single_volume_keeps_fifo_page_and_idle_order(queue_state, monkeypatch):
     monkeypatch.setattr(ocr, "_OCR_CHUNK_SIZE", 2)
+    monkeypatch.setattr(ocr, "_OCR_BATCH_SIZE", 2)
     with ocr._ocr_cv:
         ocr._ocr_queue.extend(
             [("one", "page-1"), ("one", "page-2"), ("one", "page-3")]
@@ -83,16 +84,16 @@ def test_single_volume_keeps_fifo_page_and_idle_order(queue_state, monkeypatch):
 def test_mixed_finalize_batch_reserves_room_for_active_volume(queue_state):
     with ocr._ocr_cv:
         ocr._ocr_queue.extend(
-            [("finalizing", f"f{i}") for i in range(20)]
-            + [("active", f"a{i}") for i in range(20)]
+            [("finalizing", f"f{i}") for i in range(40)]
+            + [("active", f"a{i}") for i in range(40)]
         )
         ocr._ocr_force_sessions.add("finalizing")
 
         first = ocr._take_ocr_batch()
         second = ocr._take_ocr_batch()
 
-    assert len(first) == len(second) == 4
-    assert sum(sid == "finalizing" for sid, _ in first) == 2
+    assert len(first) == len(second) == 32
+    assert sum(sid == "finalizing" for sid, _ in first) == 16
     assert any(sid == "active" for sid, _ in first)
     # The bounded allotment repeats; the active volume cannot be starved by a
     # continuously draining finalize request.
@@ -103,6 +104,7 @@ def test_one_page_batches_still_make_progress_for_other_sessions(
     queue_state, monkeypatch
 ):
     monkeypatch.setattr(ocr, "_OCR_CHUNK_SIZE", 1)
+    monkeypatch.setattr(ocr, "_OCR_BATCH_SIZE", 1)
     with ocr._ocr_cv:
         ocr._ocr_queue.extend(
             [("forced", "f0"), ("forced", "f1"), ("other", "o0")]

@@ -1,145 +1,140 @@
 # mokuro-bridge
 
-**OCR and delivery for manga capture, plus the accelerator that makes the capture itself fast.**
+**mokuro-bridge is where all three dokuha projects converge.** It is a small local service that runs mokuro OCR on finished pages and uploads the result, producing the `.cbz` / `.mokuro` / `.webp` trio that [reader.mokuro.app](https://reader.mokuro.app/) reads.
 
-I built this to fill one gap. OCR for manga is heavy (the model wants PyTorch) and
-mokuro's own scripts assume you already have a folder of pages. The missing piece is
-the bit in between: something that takes pages *as a download produces them*,
-recognises them while they arrive, and writes the result where you read. Hand it pages,
-get a `.mokuro` back.
+## The three projects
 
-The bridge is the OCR half of a capture pipeline, and only that half: it never touches
-a storefront, and holds no store account, cookie or store code. A client gets the
-images out however it likes and POSTs them here, which is why it does not break when a
-store changes, and why anything that can produce a JPEG can use it.
+- **dokuha-cli** is the engine and the batch downloader. A Node CLI that downloads manga volumes from five stores (BookWalker, CMOA, ebookjapan, Kindle and k-manga) at full resolution, unscrambles them offline, and owns *series* downloads: give it a series URL and it finds the free volumes and previews itself.
+- **dokuha-userscript** is the in-browser companion. What you can install today is the earlier userscript release, [bookwalker-ebookjapan-cmoa-native-downloader](https://github.com/GolyBidoof/bookwalker-ebookjapan-cmoa-native-downloader), which covers BookWalker, CMOA and ebookjapan: it downloads the single volume you already have open, with no install beyond a userscript manager. The rewrite that adds Kindle and k-manga is in development and not published yet.
+- **mokuro-bridge** (this repository) is where all three converge. A small local service that runs mokuro OCR on finished pages and uploads the result to MEGA, Google Drive, OneDrive or a local folder, producing the `.cbz` / `.mokuro` / `.webp` trio that reader.mokuro.app reads. Both downloaders hand finished volumes to it, so OCR and upload are identical no matter which one produced the pages. It is also useful on its own for any client that can produce page images.
 
-## At a glance
+`dokuha-cli` is the batch downloader, `dokuha-userscript` is the browser companion, and this repository is the shared OCR and delivery service. Both downloaders call the same HTTP API here, so a volume captured headlessly and a volume captured in a browser are processed by exactly the same code.
+
+## What this service is responsible for
+
+The bridge owns one half of the capture pipeline and only that half: it never touches a storefront and holds no store account, cookie or store protocol. A client gets the images out however it likes and hands them over, which is why the bridge does not break when a store changes and why anything that can produce a page image can use it.
 
 | | |
 | --- | --- |
-| **What it is** | A local HTTP back end: POST pages in, get `.cbz` + `.mokuro` + cover out |
-| **The accelerator** | Six browser sockets become 288, with nothing to configure |
+| **What it is** | A local FastAPI service: pages in, `.cbz` + `.mokuro` + `.webp` out |
 | **Runs on** | macOS, Windows and Linux, Python 3.10 or newer |
-| **Needs** | Any mokuro plus PyTorch for OCR; the accelerator is in the base install |
-| **Delivery** | Local disk by default, MEGA / Google Drive / OneDrive opt-in |
+| **Needs** | Any mokuro plus PyTorch for OCR; the fetch accelerator is in the base install |
+| **Delivery** | A local folder by default; MEGA, Google Drive and OneDrive opt in |
 | **Exposure** | Loopback only, unauthenticated, and meant to stay that way |
 
-## What it does
-
-**It makes browser capture fast.** A browser allows six connections per origin, and the
-port is part of the origin, so the bridge opens 48 extra localhost ports and advertises
-them on `/health`: 6 sockets become 288, with nothing to configure.
-
-**It OCRs and delivers what you captured**, recognising pages as they arrive rather
-than in one pass at the end, and writes what
-[reader.mokuro.app](https://reader.mokuro.app/) reads:
+The output is always the same three files, under a per-series folder:
 
 ```
 <output>/<series>/
   <volume>.cbz       page images
-  <volume>.mokuro    OCR text + block data
+  <volume>.mokuro    OCR text and block data
   <volume>.webp      cover
 ```
 
-Two clients do the capturing:
-[bookwalker-ebookjapan-cmoa-native-downloader](https://github.com/GolyBidoof/bookwalker-ebookjapan-cmoa-native-downloader)
-in a browser, and [dokuha-cli](https://github.com/GolyBidoof/dokuha-cli) browserless.
+A volume folder keeps a clean name unless that name is genuinely taken, in which case the bridge adds a short random suffix (`<volume>_a1b2c3`) so two different volumes never share a directory.
 
-## Install and run
+## Where it converges with the other two
 
-Install with [pipx](https://pipx.pypa.io/) (or `uv tool install`), which keeps the
-bridge in its own environment:
+dokuha-cli hands over a folder of finished pages with `--mokuro`. dokuha-userscript streams each captured page to the bridge as it downloads, so OCR overlaps the capture. Both end at the same `POST /session/{id}/finalize`, which assembles the trio, uploads it and reports progress as NDJSON on the same connection.
+
+The three projects are documented together under [docs/clients.md](docs/clients.md), which gives the exact request sequence each client uses.
+
+## Key advantages
+
+- **Store-agnostic.** The bridge knows nothing about any store, so a storefront redesign cannot break OCR or delivery.
+- **OCR runs as pages arrive**, in chunks of 8 with an idle flush after 1.5 s, so a long volume is not a capture followed by a separate wait.
+- **Twelve HTTP routes** cover capture, resume, status, queue, health and destination checks; the full table is in [docs/endpoints.md](docs/endpoints.md).
+- **Named destinations.** Each provider can hold several accounts (`mega`, `mega:work`, `drive:personal`), each with its own remote root and credentials. See [docs/destinations.md](docs/destinations.md).
+- **A sticky default.** Once any client names a destination explicitly, that choice becomes the default for every later request, including from other clients, until another explicit choice replaces it.
+- **A page-fetch accelerator for the browser companion.** A browser allows six connections per origin, and the port is part of the origin, so the bridge opens 48 extra localhost ports by default and lists them on `/health`. Each is worth six more sockets, so the userscript gets 288 extra lanes with nothing to configure.
+- **Safe by default.** It binds to `127.0.0.1`, refuses to read outside your home and the system temp locations, and stages uploads inside the work volume.
+
+## Use cases
+
+- **Headless batch capture.** Run dokuha-cli over a series with `--mokuro` and come back to a finished library with OCR text, covers and cloud copies.
+- **One volume from the browser.** Use the userscript on a page you already have open; the bridge supplies the extra fetch lanes, the OCR and the upload.
+- **OCR a folder you already have.** `mokuro-bridge-ocr ./my-volume/ --title "Volume title"` drives a running bridge over HTTP.
+- **Any other client.** Anything that can POST page images can use the bridge; there is no store-specific code to satisfy.
+
+## Install
+
+Install with [pipx](https://pipx.pypa.io/) or `uv tool install`, which keeps the bridge in its own environment:
 
 ```bash
 pipx install mokuro-bridge
 mokuro-bridge
 ```
 
-From a checkout:
+Or from a checkout:
 
 ```bash
 git clone https://github.com/GolyBidoof/mokuro-bridge && cd mokuro-bridge
 python3 -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-./run.sh              # or python server.py on Windows
+./run.sh
 ```
 
-The base install is small: `fastapi`, `uvicorn`, `python-multipart`, `httpx` and
-`keyring`. To OCR a folder of pages you already have:
+The base install is only `fastapi`, `uvicorn`, `python-multipart`, `httpx` and `keyring`. The OCR engine is optional because it pulls in PyTorch, which is several GB. Either engine works:
 
 ```bash
-mokuro-bridge-ocr ./my-volume/ --title 'Volume title'
+pip install "mokuro @ git+https://github.com/GolyBidoof/mokuro"   # the fork, batched, about 1.8x
+pip install -r requirements-ocr.txt                               # stock mokuro, slower
 ```
 
-Or let a client drive the whole pipeline:
+Without an engine the bridge still runs, `/health` reports `mokuro_installed: false`, and only OCR is unavailable. An upload provider's SDK also stays out of the base install, and its setup wizard offers to install the right requirements file when one is missing. `pip install "mokuro-bridge[cloud]"` adds both Google Drive and OneDrive without PyTorch.
 
-```sh
+The fork is the faster engine, and `mokuro-bridge --install-mokuro` replaces whichever `mokuro` is installed in the environment that runs the service, then verifies the import. `/health` reports which engine is loaded as `mokuro_flavor`. The exact commands, how to go back to upstream, and the per-environment caveat are in [docs/mokuro.md](docs/mokuro.md).
+
+## Quick start
+
+Start the bridge, then OCR a folder of pages you already have:
+
+```bash
+mokuro-bridge-ocr ./my-volume/ --title "Volume title"
+```
+
+Or let a client drive the whole pipeline, folder hand-off first and streaming capture second:
+
+```bash
 dokuha --mokuro 'https://bookwalker.jp/de00000000-0000-4000-8000-000000000001/'
 ```
 
-## The OCR engine: any mokuro works
-
-`mokuro` needs PyTorch, which is several GB, so it is not in the base requirements.
-Without it the bridge still runs (`mokuro_installed: false` on `/health`) and only OCR
-is unavailable. Either engine works:
-
-```bash
-pip install "mokuro @ git+https://github.com/GolyBidoof/mokuro"   # my fork, batched, ~1.8x
-pip install -r requirements-ocr.txt                               # kha-white's original, slower
-```
-
-I recommend the fork: batched recognition is worth about 1.8x (roughly 23.5 ms per crop
-against 43 with four beams), and recognition is the slowest part of a long volume.
-Neither needs configuring, and without the batch API you get the slower single-crop
-path.
-
-## Where the output goes
-
-Local disk by default. MEGA, Google Drive and OneDrive are opt-in, with more than one
-account per provider (`mega:work`) and credentials in the OS keychain or 0600 files
-under `~/.config/mokuro-bridge/`:
+Configure a cloud destination once and it stays the default:
 
 ```bash
 mokuro-bridge --setup-upload mega
 mokuro-bridge --list-uploads
 ```
 
-## Running it, and what it will not do
+On macOS, `./install-launchd.sh` installs a launchd agent that starts the bridge at login. When a newer release exists, the service logs one line about it at startup, and `mokuro-bridge --check-update` reports it without changing anything (exit 0 up to date, 1 update available, 2 check failed). `mokuro-bridge --update` is the one command that acts: it detects whether this copy came from pipx, `uv tool`, a plain pip install or a git checkout, prints the exact upgrade command, runs it and prints how to restart the service. Nothing restarts by itself, because a restart mid-OCR loses work.
 
-`./install-launchd.sh` installs a macOS launchd agent that starts on login. Nothing is
-uploaded or updated without you asking: `--check-update` reports a newer release, and
-applying it is your call because a restart mid-OCR loses work.
-
-The bridge is unauthenticated and binds to `127.0.0.1`, which is the whole access
-control. A library outside your home directory needs `MOKURO_BRIDGE_INGEST_ROOTS`; CORS,
-the fetch allowlist and the file-descriptor cost of 48 ports are in
-[docs/architecture.md](https://github.com/GolyBidoof/mokuro-bridge/blob/main/docs/architecture.md).
+The bridge is unauthenticated and binds to `127.0.0.1`, which is the whole access control. A library outside your home directory needs `MOKURO_BRIDGE_INGEST_ROOTS`. CORS, the fetch allowlist and the file-descriptor cost of 48 proxy ports are covered in [docs/architecture.md](docs/architecture.md).
 
 ## Docs
 
 | | |
 | --- | --- |
-| [docs/architecture.md](https://github.com/GolyBidoof/mokuro-bridge/blob/main/docs/architecture.md) | Request lifecycle, sessions, the API surface, security posture |
-| [docs/troubleshooting.md](https://github.com/GolyBidoof/mokuro-bridge/blob/main/docs/troubleshooting.md) | Install failures, missing OCR, file-descriptor limits, 403s |
-| [CHANGELOG.md](https://github.com/GolyBidoof/mokuro-bridge/blob/main/CHANGELOG.md) | What changed, release by release |
+| [docs/endpoints.md](docs/endpoints.md) | Every HTTP route: method, path, form fields, response shape, error codes and test coverage |
+| [docs/destinations.md](docs/destinations.md) | Upload targets, named accounts, credential stores and the sticky default |
+| [docs/clients.md](docs/clients.md) | How dokuha-cli and dokuha-userscript drive the bridge, with the exact request sequence |
+| [docs/architecture.md](docs/architecture.md) | Request lifecycle, sessions, scheduling, the fetch proxy and the security posture |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Install failures, missing OCR, file-descriptor limits, 403s |
+| [docs/mokuro.md](docs/mokuro.md) | The faster mokuro fork: why it is faster, the one install command, going back to upstream |
+| [CHANGELOG.md](CHANGELOG.md) | What changed, release by release |
 | [Releases](https://github.com/GolyBidoof/mokuro-bridge/releases) | The prebuilt wheel and sdist |
 
 ## Development
 
 ```bash
 pip install -r requirements-dev.txt
-python3 -m pytest        # 197 tests, ~10s, hermetic
+python3 -m pytest        # 292 tests, about 10s, hermetic
 python3 -m ruff check .
 ```
 
 ## Credits and licence
 
-MIT. See [LICENSE](https://github.com/GolyBidoof/mokuro-bridge/blob/main/LICENSE).
+MIT, see [LICENSE](LICENSE).
 
-OCR runs on [my fork of mokuro](https://github.com/GolyBidoof/mokuro), which adds
-batched recognition and is the engine I recommend. It forks
-[kha-white's original mokuro](https://github.com/kha-white/mokuro), still supported as
-the slower fallback under its own licence. Cloud delivery uses the MEGA, Google Drive
-and OneDrive clients, each under its own terms.
+OCR runs on [the mokuro fork](https://github.com/GolyBidoof/mokuro), which adds batched recognition and is the recommended engine. It forks [kha-white's original mokuro](https://github.com/kha-white/mokuro), still supported as the slower fallback under its own licence. Cloud delivery uses the MEGA, Google Drive and OneDrive clients, each under its own terms.
 
 The code was written by DeepSeek V4.1 Flash.

@@ -164,7 +164,6 @@ def main() -> int:
     parser.add_argument("--url", default=DEFAULT_URL, help=f"bridge base URL (default: {DEFAULT_URL})")
     args = parser.parse_args()
 
-    # Friendly check that the bridge is up before doing anything.
     try:
         with urllib.request.urlopen(f"{args.url}/health", timeout=5) as resp:
             health = json.loads(resp.read().decode())

@@ -10,7 +10,7 @@ import sys
 import time
 
 _LEVEL_ORDER = {"debug": 10, "info": 20, "warn": 30, "error": 40}
-_LEVEL = "info"  # configurable via set_level()
+_LEVEL = "info"
 _LAST_THROTTLE: dict[str, float] = {}
 _THROTTLE_S = 1.0
 
