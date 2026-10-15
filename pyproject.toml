@@ -95,6 +95,12 @@ version = { attr = "mokuro_bridge.__version__" }
 [tool.setuptools]
 packages = ["mokuro_bridge", "mokuro_bridge.providers"]
 
+# The pinned provenance for the upstream series.json format. It ships with the
+# wheel because `mokuro-bridge --check-series-reference` has to work from a pipx
+# install, where there is no checkout to read a reference file from.
+[tool.setuptools.package-data]
+mokuro_bridge = ["data/*.json"]
+
 # Without this block ruff auto-discovers whatever config is installed on the
 # machine (or in $HOME), so the lint result is not reproducible and is not the
 # one CI runs. E4/E7/E9 are the pycodestyle errors that actually catch bugs;

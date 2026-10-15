@@ -1,0 +1,134 @@
+{
+  "schema": 1,
+  "updated": "2026-10-15T20:29:52Z",
+  "upstream": [
+    {
+      "repo": "Gnathonic/mokuro-reader",
+      "license": "GPL-3.0",
+      "branch": "main",
+      "commit": "bfaeb4823f3f454f63330c5d3144c9521a36f359",
+      "why": "Defines the format, validates it, merges volume entries, and writes the file to the cloud. The Python writer in this repo is a port of these rules.",
+      "files": [
+        {
+          "path": "src/lib/metadata/series-file.ts",
+          "role": "generator",
+          "sha256": "f8c3f416aa18d773f17a96b04f5c0c575fd85822fae726ff49c2ced8265fdd2c",
+          "bytes": 61177
+        },
+        {
+          "path": "src/lib/metadata/sanitize.ts",
+          "role": "sanitize",
+          "sha256": "35529d19708ccf70923c06d2657c68279ae1a93a7e1db17002fb67adacb7029c",
+          "bytes": 6929
+        },
+        {
+          "path": "src/lib/metadata/types.ts",
+          "role": "schema",
+          "sha256": "e05039a7dc414ffe4acabb5cee8c28c9a5ba5dc50ce94b96620fe95c9c2812b5",
+          "bytes": 7023
+        },
+        {
+          "path": "src/lib/metadata/series-key.ts",
+          "role": "identity",
+          "sha256": "d2af3479d753ccca7b18551830d53c2060d519dd52ad0125645891328e74eff4",
+          "bytes": 1356
+        },
+        {
+          "path": "src/lib/metadata/sidecar-pull.ts",
+          "role": "entry-measurement",
+          "sha256": "2b38a0bf68ebd77834aea249a06aad596792d5dacebbe698b5fdcb516249266a",
+          "bytes": 6499
+        },
+        {
+          "path": "src/lib/metadata/series-file-sync.ts",
+          "role": "writer",
+          "sha256": "af9ed46eba4b213786d3ec8a06f6f763e3ca5b90b18aa20805244632f459571a",
+          "bytes": 38548
+        },
+        {
+          "path": "src/lib/util/sync/unified-cloud-manager.ts",
+          "role": "writer",
+          "sha256": "8cec6101f26a2b8471be7e9a3df820cc9cf7bb7b25ebf62b4d738f04eed42a38",
+          "bytes": 102107
+        },
+        {
+          "path": "src/lib/catalog/page-char-counts.ts",
+          "role": "char-counts",
+          "sha256": "a3e08cd8b7594cabcbe64857633f332eb828bbc0b0a94680bb8268287b433160",
+          "bytes": 1214
+        },
+        {
+          "path": "src/lib/catalog/sort-volumes.ts",
+          "role": "ordering",
+          "sha256": "973e21682bfe5036303641221dbb125e86521e2baf3acfbf27c520e0e3b15f3e",
+          "bytes": 336
+        },
+        {
+          "path": "src/lib/catalog/volume-state.ts",
+          "role": "identity",
+          "sha256": "a14974d2b495ea56ac89091278c717e6504701132614716e570b15e1f09e8784",
+          "bytes": 1669
+        },
+        {
+          "path": "src/lib/catalog/mokuro-hash.ts",
+          "role": "sanitize",
+          "sha256": "3d870eb38bdc743ad90d0695ed2348b35fa080e20ba74161c84051fd52ffb260",
+          "bytes": 5246
+        },
+        {
+          "path": "src/lib/util/series-extraction.ts",
+          "role": "identity",
+          "sha256": "06b1d4ee910faa2748c277753ecbe04a68a6149eb1de58c5283393ecd4a3e633",
+          "bytes": 11532
+        }
+      ]
+    },
+    {
+      "repo": "Gnathonic/mokuro-bunko",
+      "license": "MPL-2.0",
+      "branch": "main",
+      "commit": "ed75878a2c1d3266d6a6fd78a87b3b7926731494",
+      "why": "A second implementation of the same file compiled server-side from a local folder, plus the normative format document. Used to cross-check field names, wire order and merge semantics.",
+      "files": [
+        {
+          "path": "docs/rust-port/spec/metadata-catalog.md",
+          "role": "spec",
+          "sha256": "8403fd75a6a5f66a89f6a27dde8e95dece45b74f843058f46b6dbd7c9d22b009",
+          "bytes": 55129
+        },
+        {
+          "path": "crates/bunko-library/src/schema.rs",
+          "role": "generator",
+          "sha256": "e6ce92dcfd368be12ba1d2481f4c4aadaaea1bcf31357ee5e7336d7e44daecb5",
+          "bytes": 13656
+        },
+        {
+          "path": "crates/bunko-library/src/compiler.rs",
+          "role": "entry-measurement",
+          "sha256": "01b73a263b2f60afa0d436c546636ec57e538c9dda125f2970011a85dbb10323",
+          "bytes": 20437
+        },
+        {
+          "path": "crates/bunko-library/src/update.rs",
+          "role": "generator",
+          "sha256": "fe293ab3ad82f12228d7b8c107e722a44e270d643b15c29568489b8941c84708",
+          "bytes": 9324
+        },
+        {
+          "path": "crates/bunko-library/src/sidecar.rs",
+          "role": "entry-measurement",
+          "sha256": "fab9f233b0e621ca835500a13a3d4eef2d1b80526ad44d9e4ccea3fc22e5a881",
+          "bytes": 16389
+        },
+        {
+          "path": "crates/bunko-server/src/library/series_put.rs",
+          "role": "writer",
+          "sha256": "f595c7ba0e183cbe3321ff921db9108577941158d98b0e89e720e24362f3e1b3",
+          "bytes": 6475
+        }
+      ]
+    }
+  ],
+  "note": "Pins the upstream files that define and write the reader's series.json. The bridge ports this contract (mokuro_bridge/series_json.py) instead of vendoring GPL-3.0 or MPL-2.0 source, so the pin, not a copy, is what stays current. `mokuro-bridge --check-series-reference` re-fetches and compares; `--refresh-series-reference` re-pins. Tests check the offline half and the parity fixture in tests/fixtures/series_json/.",
+  "introduced_in": "mokuro-reader v1.9.0 (commit d1670bfe3d66, 2026-08-18; first release carrying series.json: v1.9.0, 2026-08-29). v1.10.0 does not change the format."
+}

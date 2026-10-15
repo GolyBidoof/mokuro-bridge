@@ -25,6 +25,10 @@ include requirements-onedrive.txt
 # The test suite, so `python -m pytest` works from an unpacked sdist.
 recursive-include tests *.py
 
+# The parity fixture test_series_json.py reads. Without it the suite fails on an
+# unpacked sdist, which is the one place `python -m pytest` is documented to work.
+recursive-include tests/fixtures *.json
+
 # The docs the README links to. PyPI renders the README but does not rewrite a
 # relative link, so a reader who follows one from the project page needs these
 # to be in the sdist they downloaded.

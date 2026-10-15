@@ -456,6 +456,55 @@ def _check_update() -> int:
     return 1
 
 
+def _check_series_reference() -> int:
+    """0 pin current, 1 upstream moved, 2 the check could not run."""
+    from . import series_reference
+
+    problems = series_reference.verify()
+    if problems:
+        print("pin is not usable:")
+        for problem in problems:
+            print(f"  {problem}")
+        return 2
+    pin = series_reference.load_pin()
+    for upstream in pin.get("upstream", []):
+        print(f"{upstream['repo']} @ {upstream['commit'][:12]} ({upstream.get('license')})")
+    report = series_reference.check(pin)
+    print(f"pinned files checked: {report['checked']}")
+    for entry in report["mismatched"]:
+        print(f"  MISMATCH {entry['repo']}:{entry['path']} pinned={entry['sha256'][:12]} actual={entry['actual'][:12]}")
+    for entry in report["moved"]:
+        print(f"  MOVED    {entry['repo']} pinned={entry['pinned'][:12]} head={entry['head'][:12]}")
+    for entry in report["drift"]:
+        print(f"  DRIFT    {entry['repo']}:{entry['path']} changed since the pin")
+    for error in report["errors"]:
+        print(f"  ERROR    {error}")
+    if not (report["mismatched"] or report["errors"] or report["drift"] or report["moved"]):
+        print("the pin matches upstream exactly; nothing to refresh")
+    if report["errors"] or report["mismatched"]:
+        return 2
+    return 1 if (report["drift"] or report["moved"]) else 0
+
+
+def _refresh_series_reference() -> int:
+    from . import series_reference
+
+    print(f"pin file: {series_reference.PIN_PATH}")
+    try:
+        refreshed = series_reference.refresh()
+    except Exception as error:
+        print(f"error: {error}")
+        return 2
+    for upstream in refreshed.get("upstream", []):
+        print(f"{upstream['repo']} -> {upstream['commit']}")
+        for entry in upstream.get("files", []):
+            print(f"  {entry['role']:<18} {entry['sha256'][:12]} {entry['bytes']:>8}  {entry['path']}")
+    print("The port in mokuro_bridge/series_json.py and the parity fixture in")
+    print("tests/fixtures/series_json/ describe the OLD pin: review the diff and update")
+    print("both before releasing, then run: python -m pytest tests/test_series_json.py")
+    return 0
+
+
 def main() -> None:
     import argparse
 
@@ -539,6 +588,18 @@ def main() -> None:
         "verification failed, 2 refused.",
     )
     parser.add_argument(
+        "--check-series-reference",
+        action="store_true",
+        help="Re-fetch the pinned upstream files that define series.json. "
+        "Exit codes: 0 matching and current, 1 upstream moved, 2 check failed.",
+    )
+    parser.add_argument(
+        "--refresh-series-reference",
+        action="store_true",
+        help="Re-pin those files at their branches' HEADs. Review the diff: the "
+        "port and the parity fixture describe the previous pin.",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -547,6 +608,10 @@ def main() -> None:
 
     if args.install_mokuro:
         raise SystemExit(_run_install_mokuro())
+    if args.check_series_reference:
+        raise SystemExit(_check_series_reference())
+    if args.refresh_series_reference:
+        raise SystemExit(_refresh_series_reference())
     if args.update:
         raise SystemExit(_run_update())
     if args.check_update:

@@ -135,6 +135,27 @@ def test_the_vendored_fork_is_not_packaged(pyproject):
         assert (REPO_ROOT / VENDOR_DIR / "mokuro").is_dir()
 
 
+def test_the_series_pin_ships_in_the_wheel(pyproject):
+    """`--check-series-reference` must work from a pipx install.
+
+    The pinned provenance is package data, not a checkout file, and a wheel only
+    carries package data that pyproject declares.
+    """
+    import json
+
+    declared = pyproject["tool"]["setuptools"]["package-data"]["mokuro_bridge"]
+    assert any(entry.endswith(".json") for entry in declared), declared
+    pin_path = REPO_ROOT / "mokuro_bridge" / "data" / "series_json_pin.json"
+    assert pin_path.is_file(), "the pinned series.json provenance is missing"
+    pin = json.loads(pin_path.read_text(encoding="utf-8"))
+    assert pin["upstream"], pin
+    # The parity fixture is read by the test suite from a source checkout.
+    fixture = REPO_ROOT / "tests" / "fixtures" / "series_json" / "upstream_parity.json"
+    assert fixture.is_file(), "the parity fixture is missing"
+    manifest = (REPO_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+    assert "recursive-include tests/fixtures *.json" in manifest
+
+
 def test_the_console_scripts_point_at_real_callables(pyproject):
     scripts = pyproject["project"]["scripts"]
     assert set(scripts) == {"mokuro-bridge", "mokuro-bridge-ocr"}
