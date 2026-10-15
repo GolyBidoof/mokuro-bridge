@@ -39,6 +39,10 @@ def _fake_provider(calls: dict) -> Provider:
         calls["download"] = (name, remote_dir, filename)
         return b'{"version":2}'
 
+    def list_folders(name, remote_dir) -> list:
+        calls["list_folders"] = (name, remote_dir)
+        return [{"name": "Series", "path": f"{remote_dir}/Series", "type": "folder"}]
+
     def run_setup(name=None, root="", label=""):
         calls["setup"] = (name, root, label)
 
@@ -57,6 +61,7 @@ def _fake_provider(calls: dict) -> Provider:
         upload=upload,
         remote_exists=remote_exists,
         download=download,
+        list_folders=list_folders,
         run_setup=run_setup,
         account=account,
     )
@@ -117,6 +122,19 @@ def test_download_refuses_a_local_destination(fake):
     """`local` has no provider: the API layer reads and writes that path itself."""
     with pytest.raises(ValueError):
         providers.download_file("local", FAKE_ROOT, "series.json")
+
+
+def test_list_folders_is_dispatched_to_the_registered_provider(fake):
+    entries = providers.list_remote_folders("fake", f"{FAKE_ROOT}/library")
+    assert entries == [
+        {"name": "Series", "path": f"{FAKE_ROOT}/library/Series", "type": "folder"}
+    ]
+    assert fake["list_folders"] == ("default", f"{FAKE_ROOT}/library")
+
+
+def test_list_folders_refuses_a_local_destination(fake):
+    with pytest.raises(ValueError):
+        providers.list_remote_folders("local", FAKE_ROOT)
 
 
 def test_upload_is_dispatched_to_the_registered_provider(fake, tmp_path):

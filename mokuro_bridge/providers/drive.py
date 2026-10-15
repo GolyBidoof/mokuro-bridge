@@ -19,8 +19,10 @@ from ..config import (
 )
 from .base import (
     DOWNLOAD_LIMIT_BYTES,
+    LIST_LIMIT_ENTRIES,
     Provider,
     ProviderAccount,
+    listing_entry,
     provider_account_lock,
     walk_folders,
 )
@@ -659,6 +661,44 @@ def _drive_account_download(name: str, remote_dir: str, filename: str) -> Option
         return bytes(data)
 
 
+def _drive_account_list_folders(name: str, remote_dir: str) -> list[dict]:
+    """List one Drive folder (read-only); "" lists My Drive itself."""
+    base = str(remote_dir).strip("/")
+    with provider_account_lock("drive", name):
+        service = _drive_service(name)
+        folder_id = "root"
+        if base:
+            folder_id = walk_folders(
+                base,
+                find=lambda parent, seg: _drive_find_folder(service, seg, parent),
+            )
+        if not folder_id:
+            return []
+        response = (
+            service.files()
+            .list(
+                q=f"'{folder_id}' in parents and trashed = false",
+                fields="files(id,name,mimeType,size)",
+                pageSize=LIST_LIMIT_ENTRIES,
+                orderBy="folder,name",
+            )
+            .execute()
+        )
+    entries = []
+    for item in response.get("files", []):
+        folder = item.get("mimeType") == "application/vnd.google-apps.folder"
+        raw_size = str(item.get("size", ""))
+        entries.append(
+            listing_entry(
+                str(item.get("name", "")),
+                f"{base}/{item.get('name', '')}".strip("/"),
+                is_folder=folder,
+                size=int(raw_size) if raw_size.isdigit() else None,
+            )
+        )
+    return entries
+
+
 PROVIDER = Provider(
     id="drive",
     label="Google Drive",
@@ -667,6 +707,7 @@ PROVIDER = Provider(
     upload=_drive_upload,
     remote_exists=_drive_account_remote_exists,
     download=_drive_account_download,
+    list_folders=_drive_account_list_folders,
     run_setup=_run_setup_drive,
     account=_drive_account_view,
 )

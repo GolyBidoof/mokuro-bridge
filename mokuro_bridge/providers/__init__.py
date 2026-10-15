@@ -17,7 +17,15 @@ from ..config import (
 )
 from ..util import _chmod_fd_private, series_title_from_volume
 from . import drive, mega, onedrive
-from .base import DOWNLOAD_LIMIT_BYTES, Provider, ProviderAccount, walk_folders
+from .base import (
+    DOWNLOAD_LIMIT_BYTES,
+    LIST_LIMIT_ENTRIES,
+    Provider,
+    ProviderAccount,
+    safe_provider_error,
+    safe_provider_url,
+    walk_folders,
+)
 
 # Names this package exists to re-export. Everything below is imported here so
 # cli.py (and api.py) can reach the provider internals from one place, not from
@@ -47,7 +55,12 @@ __all__ = [
     "upload_file",
     "remote_file_exists",
     "download_file",
+    "list_remote_folders",
+    "safe_provider_error",
+    "safe_provider_url",
+    "forget_account",
     "DOWNLOAD_LIMIT_BYTES",
+    "LIST_LIMIT_ENTRIES",
 ]
 
 # The live provider registry. Dispatch below is a lookup in this mapping, so a
@@ -326,6 +339,48 @@ def download_file(method: str, remote_dir: str, filename: str) -> Optional[bytes
     if provider is None:
         raise ValueError(f"unknown upload provider: {instance.provider}")
     return provider.download(instance.name, remote_dir, filename)
+
+def forget_account(target: str) -> dict:
+    """Remove one account: metadata, its secret files, and its keychain item.
+
+    Returns ``{"id", "removed", "notes"}``. One implementation for the CLI's
+    --remove-upload and the configuration dashboard, so the two cannot disagree
+    about what "remove an account" deletes.
+    """
+    from ..creds import _delete_mega_creds_keychain
+
+    provider, name = accounts.parse_method_id(target)
+    instance = accounts.load_instance(provider, name)
+    label = instance.id if instance is not None else target
+    email = instance.email if instance is not None else ""
+    siblings = accounts.sibling_emails(provider, name) if provider == "mega" else set()
+    notes: list[str] = []
+
+    removed = [str(path) for path in accounts.delete_instance(provider, name)]
+    legacy = accounts.legacy_secret_path(provider, name)
+    if legacy is not None:
+        removed += [str(path) for path in accounts.remove_paths([legacy])]
+
+    if provider == "mega":
+        if email and email in siblings:
+            notes.append(f"{email} is still used by another MEGA account; its keychain item was kept")
+        elif email:
+            if _delete_mega_creds_keychain(email):
+                removed.append(f"keychain:mega.nz/{email}")
+        else:
+            notes.append("no account file records a MEGA email, so any keychain item was left alone")
+    return {"id": label, "removed": removed, "notes": notes}
+
+
+def list_remote_folders(method: str, remote_dir: str) -> list[dict]:
+    """Read one directory listing. Read-only: it never creates a folder."""
+    instance = instance_for(method)
+    if instance is None:
+        raise ValueError("local destinations are listed by the API layer")
+    provider = _PROVIDERS.get(instance.provider)
+    if provider is None:
+        raise ValueError(f"unknown upload provider: {instance.provider}")
+    return provider.list_folders(instance.name, remote_dir)
 
 def _method_current_folder(method_id: str) -> str:
     """Human-readable 'current folder' for an upload target (for clients)."""

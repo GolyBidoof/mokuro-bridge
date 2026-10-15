@@ -13,8 +13,10 @@ from ..util import _chmod_fd_private
 from ..config import ONEDRIVE_CLIENT_ID, ONEDRIVE_TOKEN_FILE, _GRAPH_BASE, _ONEDRIVE_SCOPES
 from .base import (
     DOWNLOAD_LIMIT_BYTES,
+    LIST_LIMIT_ENTRIES,
     Provider,
     ProviderAccount,
+    listing_entry,
     provider_account_lock,
     walk_folders,
 )
@@ -609,6 +611,40 @@ def _onedrive_account_download(name: str, remote_dir: str, filename: str) -> Opt
         return resp.content
 
 
+def _onedrive_account_list_folders(name: str, remote_dir: str) -> list[dict]:
+    """List one OneDrive folder (read-only); "" lists the drive root."""
+    import requests
+
+    base = str(remote_dir).strip("/")
+    with provider_account_lock("onedrive", name):
+        sess = requests.Session()
+        headers = _onedrive_headers(name)
+        parent = "root"
+        if base:
+            parent = _onedrive_remote_dir_exists(sess, headers, base)
+        if not parent:
+            return []
+        resp = _graph_request(
+            sess,
+            "GET",
+            f"{_onedrive_children_url(parent)}"
+            f"?$select=id,name,folder,size&$top={LIST_LIMIT_ENTRIES}",
+            headers=headers,
+        )
+    entries = []
+    for item in (resp.json() or {}).get("value", []):
+        size = item.get("size")
+        entries.append(
+            listing_entry(
+                str(item.get("name", "")),
+                f"{base}/{item.get('name', '')}".strip("/"),
+                is_folder=bool(item.get("folder")),
+                size=size if isinstance(size, int) else None,
+            )
+        )
+    return entries
+
+
 PROVIDER = Provider(
     id="onedrive",
     label="OneDrive",
@@ -617,6 +653,7 @@ PROVIDER = Provider(
     upload=_onedrive_upload,
     remote_exists=_onedrive_account_remote_exists,
     download=_onedrive_account_download,
+    list_folders=_onedrive_account_list_folders,
     run_setup=_run_setup_onedrive,
     account=_onedrive_account_view,
 )

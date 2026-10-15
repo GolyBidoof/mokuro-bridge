@@ -21,7 +21,14 @@ from ..creds import (
     _store_mega_creds_os,
     _write_creds_file,
 )
-from .base import DOWNLOAD_LIMIT_BYTES, Provider, ProviderAccount, provider_account_lock
+from .base import (
+    DOWNLOAD_LIMIT_BYTES,
+    LIST_LIMIT_ENTRIES,
+    Provider,
+    ProviderAccount,
+    listing_entry,
+    provider_account_lock,
+)
 
 def _mega_configured(name: str = DEFAULT_NAME) -> bool:
     """Whether one MEGA account is usable right now."""
@@ -394,6 +401,79 @@ def _mega_read_remote(megarc_path: Path, remote_path: str) -> Optional[bytes]:
             )
         return target.read_bytes()
 
+# `enum { MEGA_NODE_FILE = 0, MEGA_NODE_FOLDER = 1, MEGA_NODE_ROOT = 2,
+# MEGA_NODE_INBOX = 3, MEGA_NODE_TRASH = 4, MEGA_NODE_CONTACT = 8,
+# MEGA_NODE_NETWORK = 9 }` from megatools' lib/mega.h.
+_MEGA_FOLDER_TYPES = frozenset({1, 2, 3, 4, 8, 9})
+
+
+def _parse_mega_listing(text: str, parent: str) -> list[dict]:
+    """Immediate children from `megatools ls -l` output.
+
+    The long format is `handle owner type size date path`, with the type an
+    integer node type, and megatools prints a ruler of '=' characters before
+    the rows. Paths are located by searching for the parent prefix rather than
+    by splitting, because a filename may contain spaces and the modification
+    date column may be blank.
+    """
+    trimmed = str(parent).rstrip("/")
+    prefix = f"{trimmed}/" if trimmed else "/"
+    entries: list[dict] = []
+    seen: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("="):
+            continue
+        index = line.find(prefix)
+        if index < 0:
+            continue
+        path = line[index:].strip()
+        rest = path[len(prefix):].strip("/")
+        if not rest or "/" in rest or rest in seen:
+            continue
+        fields = line.split(None, 3)
+        if len(fields) < 3:
+            continue
+        try:
+            node_type = int(fields[2])
+        except ValueError:
+            continue
+        size_token = fields[3].split()[0] if len(fields) > 3 and fields[3].split() else ""
+        entries.append(
+            listing_entry(
+                rest,
+                path,
+                is_folder=node_type in _MEGA_FOLDER_TYPES,
+                size=int(size_token) if size_token.isdigit() else None,
+            )
+        )
+        seen.add(rest)
+        if len(entries) >= LIST_LIMIT_ENTRIES:
+            break
+    return entries
+
+
+def _mega_list_folders(megarc_path: Path, remote_dir: str) -> list[dict]:
+    parent = str(remote_dir).strip() or "/"
+    try:
+        result = subprocess.run(
+            ["megatools", "ls", "-l", "--config", str(megarc_path), parent],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"MEGA listing timed out for {parent}") from error
+    except FileNotFoundError as error:
+        raise RuntimeError("megatools is not installed") from error
+    if result.returncode != 0:
+        detail = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
+        if re.search(r"no such file|not found|does not exist|doesn't exist", detail, re.I):
+            return []
+        raise RuntimeError(f"MEGA listing failed for {parent}: {detail[:300]}")
+    return _parse_mega_listing(result.stdout, parent)
+
+
 def _mega_upload_file(
     megarc_path: Path,
     local_path: Path,
@@ -603,6 +683,16 @@ def _mega_account_download(name: str, remote_dir: str, filename: str) -> Optiona
         megarc_path.unlink(missing_ok=True)
 
 
+def _mega_account_list_folders(name: str, remote_dir: str) -> list[dict]:
+    email, password = _get_mega_creds(name)
+    megarc_path = create_megarc(email, password)
+    try:
+        with provider_account_lock("mega", name):
+            return _mega_list_folders(megarc_path, remote_dir)
+    finally:
+        megarc_path.unlink(missing_ok=True)
+
+
 PROVIDER = Provider(
     id="mega",
     label="MEGA (megatools)",
@@ -611,6 +701,7 @@ PROVIDER = Provider(
     upload=_mega_upload,
     remote_exists=_mega_account_remote_exists,
     download=_mega_account_download,
+    list_folders=_mega_account_list_folders,
     run_setup=_run_setup_mega,
     account=_mega_account_view,
 )

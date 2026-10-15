@@ -25,10 +25,12 @@ disturbing the others.
 """
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from .. import accounts
 
@@ -38,6 +40,10 @@ UploadResult = tuple[bool, Optional[str], Optional[str]]
 
 # Cap on any sidecar read back; only the series manifest is ever downloaded.
 DOWNLOAD_LIMIT_BYTES = 4 * 1024 * 1024
+
+# Cap on one directory listing, so a role with tens of thousands of files
+# cannot turn "browse to pick a folder" into a multi-megabyte response.
+LIST_LIMIT_ENTRIES = 500
 
 
 @dataclass(frozen=True)
@@ -82,6 +88,12 @@ class Provider:
         None when absent. Never creates folders. It must raise rather than
         guess, because the caller's alternative is to leave the file alone, and
         it refuses anything above ``DOWNLOAD_LIMIT_BYTES``.
+    list_folders:
+        Read one directory listing: (name, remote_dir) → entry dicts, each
+        ``{"name", "path", "type": "folder"|"file", "size"}``. Read-only, and
+        it never creates a folder, so browsing a path that does not exist is
+        an empty listing rather than a side effect. Used by the configuration
+        dashboard to pick a default upload directory.
     run_setup:
         The interactive wizard cli.py calls; its signature is
         (name, root, label).
@@ -96,6 +108,7 @@ class Provider:
     upload: Callable[[str, str, str, Path, Optional[Callable], str], UploadResult]
     remote_exists: Callable[[str, str, str], bool]
     download: Callable[[str, str, str], Optional[bytes]]
+    list_folders: Callable[[str, str], list[dict]]
     run_setup: Callable[..., None]
     account: Callable[[accounts.Instance], ProviderAccount]
 
@@ -110,6 +123,60 @@ class Provider:
         if instance is not None:
             return instance.root_path
         return accounts.default_root(self.id)
+
+
+def safe_provider_url(value: object) -> Optional[str]:
+    """Keep only a public provider locator; never a signed query or fragment token."""
+    try:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        parsed = urlsplit(text)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return None
+        host = parsed.hostname
+        if not host:
+            return None
+        host = host.casefold()
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        try:
+            port = parsed.port
+        except ValueError:
+            return None
+        netloc = host if port is None else f"{host}:{port}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    except Exception:
+        return None
+
+
+def safe_provider_error(value: object) -> str:
+    """Provider error text with every URL stripped back to its public locator.
+
+    Graph and Drive errors embed the request URL, which carries an access token
+    in the query string, so no provider error may reach a client unredacted.
+    """
+    def _redact(match):
+        return safe_provider_url(match.group(0).rstrip(".,);]")) or "[redacted-url]"
+
+    return re.sub(r"https?://[^\s<>\"']+", _redact, str(value or ""))[:2000]
+
+
+def listing_entry(name: str, path: str, *, is_folder: bool, size: Optional[int] = None) -> dict:
+    """One directory-listing row, the shape every provider's `list_folders` returns."""
+    entry = {"name": name, "path": path, "type": "folder" if is_folder else "file"}
+    if size is not None:
+        entry["size"] = size
+    return entry
+
+
+def parent_path(path: str) -> str:
+    """The containing path, or "" at the top. Keeps each provider's own spelling."""
+    text = str(path).rstrip("/")
+    if "/" not in text.lstrip("/"):
+        return ""
+    head = text.rsplit("/", 1)[0]
+    return head or "/"
 
 
 def walk_folders(
