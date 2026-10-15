@@ -15,9 +15,11 @@ The bridge ships four destinations: a local folder, MEGA, Google Drive and OneDr
 
 WebDAV is not a target. A WebDAV provider existed briefly in the v0.3.0 era and was removed before v0.4.0, so no tagged release supports it. Any documentation elsewhere that lists WebDAV as a current destination of this service is out of date.
 
-Each destination receives the same three files under a per-series folder: `<volume>.webp` (cover), `<volume>.cbz` (pages) and `<volume>.mokuro` (OCR text and blocks). The series name is derived from the volume title by dropping edition and imprint tags, so `サンプル作品（２）【電子限定特典付き】` and `サンプル作品 1巻` share one series folder.
+Each destination receives the same four files under a per-series folder: `<volume>.webp` (cover), `<volume>.cbz` (pages), `<volume>.mokuro` (OCR text and blocks) and one shared `series.json` (the reader's per-series index). The series name is derived from the volume title by dropping edition and imprint tags, so `サンプル作品（２）【電子限定特典付き】` and `サンプル作品 1巻` share one series folder.
 
-The remote collision policy is chosen per finalize with `overwrite`: `fail` (the default) errors on an existing destination file, `skip` treats an existing file as success, and `overwrite` deletes and re-uploads.
+`series.json` is what makes a library uploaded by a script, rather than by the reader, visible in reader.mokuro.app: the reader only builds that index itself for series it already knows locally, so the uploader has to publish it. The bridge creates it for the first volume in a series and merges each later volume into it, reading the destination's existing copy first and never overwriting one it could not read. When the destination already holds a correct `series.json` the file is left byte-identical. See [series-json.md](series-json.md) for the format and for the pin on upstream.
+
+The remote collision policy is chosen per finalize with `overwrite`: `fail` (the default) errors on an existing destination file, `skip` treats an existing file as success, and `overwrite` deletes and re-uploads. `series.json` is not governed by that flag: the bridge updates it in place, because a manifest under a new name is a manifest no reader reads.
 
 ## How accounts are named
 

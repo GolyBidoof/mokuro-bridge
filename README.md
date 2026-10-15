@@ -16,26 +16,29 @@ The bridge owns one half of the capture pipeline and only that half: it never to
 
 | | |
 | --- | --- |
-| **What it is** | A local FastAPI service: pages in, `.cbz` + `.mokuro` + `.webp` out |
+| **What it is** | A local FastAPI service: pages in, `.cbz` + `.mokuro` + `.webp` + `series.json` out |
 | **Runs on** | macOS, Windows and Linux, Python 3.10 or newer |
 | **Needs** | Any mokuro plus PyTorch for OCR; the fetch accelerator is in the base install |
 | **Delivery** | A local folder by default; MEGA, Google Drive and OneDrive opt in |
 | **Exposure** | Loopback only, unauthenticated, and meant to stay that way |
 
-The output is always the same three files, under a per-series folder:
+The output is always the same files, under a per-series folder:
 
 ```
 <output>/<series>/
+  series.json        the reader's per-series index, one per series folder
   <volume>.cbz       page images
   <volume>.mokuro    OCR text and block data
   <volume>.webp      cover
 ```
 
+`series.json` is what keeps a library uploaded by a script visible in reader.mokuro.app, which only builds that index itself for series it already knows locally. The bridge writes it for the first volume and merges each later volume into it. The format is [Gnathonic's mokuro-reader](https://github.com/Gnathonic/mokuro-reader) (GPL-3.0), pinned by commit rather than vendored: see [docs/series-json.md](docs/series-json.md).
+
 A volume folder keeps a clean name unless that name is genuinely taken, in which case the bridge adds a short random suffix (`<volume>_a1b2c3`) so two different volumes never share a directory.
 
 ## Where it converges with the other two
 
-dokuha-cli hands over a folder of finished pages with `--mokuro`. dokuha-userscript streams each captured page to the bridge as it downloads, so OCR overlaps the capture. Both end at the same `POST /session/{id}/finalize`, which assembles the trio, uploads it and reports progress as NDJSON on the same connection.
+dokuha-cli hands over a folder of finished pages with `--mokuro`. dokuha-userscript streams each captured page to the bridge as it downloads, so OCR overlaps the capture. Both end at the same `POST /session/{id}/finalize`, which assembles the volume files and the series index, uploads them and reports progress as NDJSON on the same connection.
 
 The three projects are documented together under [docs/clients.md](docs/clients.md), which gives the exact request sequence each client uses.
 
@@ -108,12 +111,15 @@ mokuro-bridge --list-uploads
 
 On macOS, `./install-launchd.sh` installs a launchd agent that starts the bridge at login. When a newer release exists, the service logs one line about it at startup, and `mokuro-bridge --check-update` reports it without changing anything (exit 0 up to date, 1 update available, 2 check failed). `mokuro-bridge --update` is the one command that acts: it detects whether this copy came from pipx, `uv tool`, a plain pip install or a git checkout, prints the exact upgrade command, runs it and prints how to restart the service. Nothing restarts by itself, because a restart mid-OCR loses work.
 
+The `series.json` format is upstream's, so the bridge pins it. `mokuro-bridge --check-series-reference` re-fetches the pinned files and reports whether they still match (exit 0 matching and current, 1 upstream moved, 2 check failed), and `mokuro-bridge --refresh-series-reference` re-pins them.
+
 The bridge is unauthenticated and binds to `127.0.0.1`, which is the whole access control. A library outside your home directory needs `MOKURO_BRIDGE_INGEST_ROOTS`. CORS, the fetch allowlist and the file-descriptor cost of 48 proxy ports are covered in [docs/architecture.md](docs/architecture.md).
 
 ## Docs
 
 | | |
 | --- | --- |
+| [docs/series-json.md](docs/series-json.md) | The `series.json` sidecar: its format, why the uploader writes it, and the pin on upstream |
 | [docs/endpoints.md](docs/endpoints.md) | Every HTTP route: method, path, form fields, response shape, error codes and test coverage |
 | [docs/destinations.md](docs/destinations.md) | Upload targets, named accounts, credential stores and the sticky default |
 | [docs/clients.md](docs/clients.md) | How dokuha-cli and dokuha-userscript drive the bridge, with the exact request sequence |
@@ -127,7 +133,7 @@ The bridge is unauthenticated and binds to `127.0.0.1`, which is the whole acces
 
 ```bash
 pip install -r requirements-dev.txt
-python3 -m pytest        # 292 tests, about 10s, hermetic
+python3 -m pytest        # 364 tests, about 10s, hermetic
 python3 -m ruff check .
 ```
 
@@ -136,5 +142,7 @@ python3 -m ruff check .
 MIT, see [LICENSE](LICENSE).
 
 OCR runs on [the mokuro fork](https://github.com/GolyBidoof/mokuro), which adds batched recognition and is the recommended engine. It forks [kha-white's original mokuro](https://github.com/kha-white/mokuro), still supported as the slower fallback under its own licence. Cloud delivery uses the MEGA, Google Drive and OneDrive clients, each under its own terms.
+
+The `series.json` format is defined by [Gnathonic's mokuro-reader](https://github.com/Gnathonic/mokuro-reader) (GPL-3.0) and implemented a second time by [mokuro-bunko](https://github.com/Gnathonic/mokuro-bunko) (MPL-2.0). Neither codebase is copied here: this project pins the upstream files and ports the contract.
 
 The code was written by DeepSeek V4.1 Flash.

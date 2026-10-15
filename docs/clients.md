@@ -13,7 +13,7 @@ Every client follows the same shape:
 3. Open a session: `POST /session/start` for a streaming capture, or `POST /session/resume` for a folder that already exists on this machine.
 4. Deliver pages: `POST /session/{id}/page` once per page, or one `/session/resume` for the whole folder.
 5. Watch progress with `GET /session/{id}/status`, `GET /queue` and `GET /sessions`.
-6. `POST /session/{id}/finalize`, read the NDJSON stream to its terminal `done` frame, and treat an `error` frame or a stream that ends without `done` as a failure.
+6. `POST /session/{id}/finalize`, read the NDJSON stream to its terminal `done` frame, and treat an `error` frame or a stream that ends without `done` as a failure. The `series_json` frames in that stream report the per-series index the reader needs, and a `partial_upload` terminal frame means the volume files arrived but the index did not, which a client should surface rather than report as success.
 
 ## dokuha-cli
 

@@ -62,6 +62,10 @@ When a newer release exists the service logs one line about it at startup, and `
 launchctl kickstart -k gui/$(id -u)/com.mokuro-bridge
 ```
 
+**A volume uploaded by a script never appears in reader.mokuro.app.** The reader needs the per-series `series.json` beside the volume files, and it only writes that file itself for a series the device already knows locally. Check the series folder at the destination for `series.json`: if it is absent, the upload did not come from this bridge (or came from a release before v0.9.0, which did not write one). Re-finalize the volume to the same destination and the bridge creates it, or merges the volume into an existing one. A finalize that reports `partial_upload` with a `series.json` error in the message saved the volume files but not the index, which is why the reader shows nothing; the reason is in the frame, and the most common ones are a destination the bridge could not read (it refuses to overwrite a manifest it cannot read) and a provider that rejected the upload.
+
+**Has the series.json format changed upstream?** Run `mokuro-bridge --check-series-reference`: exit 0 means the pinned bytes still match and neither repository has moved, 1 means upstream moved, 2 means the check could not run. Nothing breaks until the format itself changes, and the service never checks on its own. See [series-json.md](series-json.md).
+
 ## Still stuck
 
 Read [architecture.md](architecture.md) for how the pieces fit, [endpoints.md](endpoints.md) for the exact route contract, and [CHANGELOG.md](../CHANGELOG.md) for whether it was already fixed. Open an [issue](https://github.com/GolyBidoof/mokuro-bridge/issues) with the `/health` output and the client's error.

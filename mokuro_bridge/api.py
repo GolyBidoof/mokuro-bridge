@@ -67,16 +67,23 @@ from .ocr import (
     wait_for_session_ocr,
 )
 from .providers import (
+    DOWNLOAD_LIMIT_BYTES,
     _build_upload_methods,
     _default_upload_method,
     _method_current_folder,
     _remember_upload_method,
+    download_file,
     method_label,
     method_provider,
     method_root,
     remote_file_exists,
     resolve_upload_method,
     upload_file,
+)
+from .series_json import (
+    SERIES_FILE_NAME,
+    entry_from_mokuro,
+    render as render_series_file,
 )
 from .sessions import (
     Session,
@@ -211,6 +218,98 @@ def _assemble_session_lock(session_id: str) -> _threading.Lock:
 def _drop_assemble_session_lock(session_id: str) -> None:
     with _assemble_locks_guard:
         _assemble_locks.pop(session_id, None)
+
+
+# One lock per destination: publishing series.json is a read-modify-write over
+# a whole series folder, and dropping a held lock would split it in two.
+_series_locks_guard = _threading.Lock()
+_series_locks: dict[tuple[str, str], _threading.Lock] = {}
+
+
+def _series_lock(method: str, destination: str) -> _threading.Lock:
+    with _series_locks_guard:
+        return _series_locks.setdefault((method, destination), _threading.Lock())
+
+
+def _read_local_series_file(destination: Path) -> Optional[bytes]:
+    """Existing manifest bytes, or None. Raises when present but unreadable, so
+    the caller leaves it alone instead of dropping the entries inside it."""
+    if destination.is_symlink():
+        raise RuntimeError("the existing series.json is a symlink")
+    if not destination.exists():
+        return None
+    try:
+        with _open_source_nofollow(destination) as handle:
+            data = handle.read(DOWNLOAD_LIMIT_BYTES + 1)
+    except HTTPException as error:
+        raise RuntimeError(f"the existing series.json could not be read: {error.detail}") from error
+    if len(data) > DOWNLOAD_LIMIT_BYTES:
+        raise RuntimeError(
+            f"the existing series.json is larger than the {DOWNLOAD_LIMIT_BYTES}-byte sidecar limit"
+        )
+    return data
+
+
+def _load_mokuro_data(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"generated .mokuro is unreadable: {error}") from error
+    if not isinstance(data, dict):
+        raise RuntimeError("generated .mokuro is not an object")
+    return data
+
+
+def _series_entry_for_artifacts(
+    mokuro_data: dict,
+    *,
+    volume_title: str,
+    archive_path: Path,
+    mokuro_path: Path,
+    cover_path: Path,
+) -> dict:
+    try:
+        archive_size = archive_path.stat().st_size
+        mokuro_size = mokuro_path.stat().st_size
+        cover_size = cover_path.stat().st_size
+    except OSError as error:
+        raise RuntimeError(f"could not size the staged artifacts: {error}") from error
+    entry = entry_from_mokuro(
+        mokuro_data,
+        volume_title=volume_title,
+        archive_size=archive_size,
+        mokuro_size=mokuro_size,
+        mokuro_sha256=_file_digest(mokuro_path),
+        cover_size=cover_size,
+    )
+    if entry is None:
+        raise RuntimeError("generated .mokuro carries no usable volume_uuid")
+    return entry
+
+
+def _series_payload(
+    existing_raw: Optional[bytes],
+    *,
+    series_title: str,
+    volume_title: str,
+    archive_path: Path,
+    mokuro_path: Path,
+    cover_path: Path,
+) -> tuple[Optional[bytes], Optional[str]]:
+    """(bytes, error). (None, None) = already correct; (None, error) = leave alone."""
+    try:
+        mokuro_data = _load_mokuro_data(mokuro_path)
+        entry = _series_entry_for_artifacts(
+            mokuro_data,
+            volume_title=volume_title,
+            archive_path=archive_path,
+            mokuro_path=mokuro_path,
+            cover_path=cover_path,
+        )
+        content = render_series_file(existing_raw, series_title=series_title, entry=entry)
+    except (RuntimeError, OSError) as error:
+        return None, str(error)
+    return content, None
 
 
 def _set_activity(stage: str, detail: str = "", owner: str = "") -> None:
@@ -2201,80 +2300,113 @@ async def session_finalize(
             titled_cbz = staging / f"{file_base}.cbz"
             titled_cover = staging / f"{file_base}.webp"
             def _package_artifacts():
-                # Build the complete trio in a private directory, then publish
-                # all three with rollback. A cover conversion failure must not
-                # leave a new .mokuro next to an old .cbz/.webp.
                 pack_tmp = Path(tempfile.mkdtemp(prefix=f".{file_base}.pack-", dir=str(staging)))
-                try:
+                outcome = {"series_error": None, "series_published": False, "series_unchanged": False}
+                lock = (
+                    _series_lock(method, str(staging))
+                    if method == "local"
+                    else contextlib.nullcontext()
+                )
+                with lock:
                     try:
-                        os.chmod(pack_tmp, 0o700)
-                    except OSError:
-                        pass
-                    tmp_mokuro = pack_tmp / titled_mokuro.name
-                    tmp_cbz = pack_tmp / titled_cbz.name
-                    tmp_cover = pack_tmp / titled_cover.name
-                    _copy_replace_no_follow(mokuro_file, tmp_mokuro)
-                    _zip_replace_no_follow(tmp_cbz, image_files)
-                    reuse_cover = False
-                    if method == "local":
-                        with session.lock:
-                            cover_meta = (
-                                dict(session.cover_uploaded)
-                                if isinstance(session.cover_uploaded, dict)
-                                else None
-                            )
-                        if (
-                            cover_meta
-                            and cover_meta.get("method") == "local"
-                            and cover_meta.get("file") == f"{file_base}.webp"
-                            and cover_meta.get("path") == str(titled_cover)
-                            and titled_cover.is_file()
-                            and not titled_cover.is_symlink()
-                            and cover_meta.get("sha256") == _file_digest(titled_cover)
-                        ):
-                            _copy_replace_no_follow(titled_cover, tmp_cover)
-                            reuse_cover = True
-                    if not reuse_cover:
-                        webp_pages = [p for p in image_files if p.suffix.lower() == ".webp"]
-                        _cover_replace(webp_pages[0] if webp_pages else image_files[0], tmp_cover)
-                    destinations = (titled_mokuro, titled_cbz, titled_cover)
-                    staged = (tmp_mokuro, tmp_cbz, tmp_cover)
-                    if any(
-                        not source.is_file() or source.is_symlink() or source.stat().st_size <= 0
-                        for source in staged
-                    ):
-                        raise RuntimeError("packaging produced an incomplete artifact")
-                    if any(
-                        dest.is_symlink()
-                        or (dest.exists() and (not dest.is_file() or dest.is_dir()))
-                        for dest in destinations
-                    ):
-                        raise RuntimeError("unsafe or non-regular packaging output path")
-                    backups: list[tuple[Path, Path]] = []
-                    published: list[Path] = []
-                    try:
-                        for destination in destinations:
-                            if destination.exists():
-                                backup = destination.with_name(
-                                    f".{destination.name}.backup-{uuid.uuid4().hex}"
+                        try:
+                            os.chmod(pack_tmp, 0o700)
+                        except OSError:
+                            pass
+                        tmp_mokuro = pack_tmp / titled_mokuro.name
+                        tmp_cbz = pack_tmp / titled_cbz.name
+                        tmp_cover = pack_tmp / titled_cover.name
+                        _copy_replace_no_follow(mokuro_file, tmp_mokuro)
+                        _zip_replace_no_follow(tmp_cbz, image_files)
+                        reuse_cover = False
+                        if method == "local":
+                            with session.lock:
+                                cover_meta = (
+                                    dict(session.cover_uploaded)
+                                    if isinstance(session.cover_uploaded, dict)
+                                    else None
                                 )
-                                os.replace(destination, backup)
-                                backups.append((destination, backup))
-                        for source, destination in zip(staged, destinations):
-                            os.replace(source, destination)
-                            published.append(destination)
-                    except BaseException:
-                        for destination in reversed(published):
-                            destination.unlink(missing_ok=True)
-                        for destination, backup in reversed(backups):
-                            if backup.exists():
-                                os.replace(backup, destination)
-                        raise
-                    else:
-                        for _destination, backup in backups:
-                            backup.unlink(missing_ok=True)
-                finally:
-                    shutil.rmtree(pack_tmp, ignore_errors=True)
+                            if (
+                                cover_meta
+                                and cover_meta.get("method") == "local"
+                                and cover_meta.get("file") == f"{file_base}.webp"
+                                and cover_meta.get("path") == str(titled_cover)
+                                and titled_cover.is_file()
+                                and not titled_cover.is_symlink()
+                                and cover_meta.get("sha256") == _file_digest(titled_cover)
+                            ):
+                                _copy_replace_no_follow(titled_cover, tmp_cover)
+                                reuse_cover = True
+                        if not reuse_cover:
+                            webp_pages = [p for p in image_files if p.suffix.lower() == ".webp"]
+                            _cover_replace(webp_pages[0] if webp_pages else image_files[0], tmp_cover)
+                        # Local publishes the manifest with the volume files;
+                        # remote publishes it after them, from
+                        # _publish_remote_series_json.
+                        destinations = [titled_mokuro, titled_cbz, titled_cover]
+                        staged = [tmp_mokuro, tmp_cbz, tmp_cover]
+                        if method == "local":
+                            series_path = staging / SERIES_FILE_NAME
+                            try:
+                                existing_raw = _read_local_series_file(series_path)
+                            except (RuntimeError, OSError) as error:
+                                outcome["series_error"] = str(error)
+                            else:
+                                content, series_error = _series_payload(
+                                    existing_raw,
+                                    series_title=series_dir_name,
+                                    volume_title=file_base,
+                                    archive_path=tmp_cbz,
+                                    mokuro_path=tmp_mokuro,
+                                    cover_path=tmp_cover,
+                                )
+                                if series_error is not None:
+                                    outcome["series_error"] = series_error
+                                elif content is None:
+                                    outcome["series_unchanged"] = True
+                                else:
+                                    tmp_series = pack_tmp / SERIES_FILE_NAME
+                                    _write_atomic_no_follow(tmp_series, content)
+                                    destinations.append(series_path)
+                                    staged.append(tmp_series)
+                                    outcome["series_published"] = True
+                        if any(
+                            not source.is_file() or source.is_symlink() or source.stat().st_size <= 0
+                            for source in staged
+                        ):
+                            raise RuntimeError("packaging produced an incomplete artifact")
+                        if any(
+                            dest.is_symlink()
+                            or (dest.exists() and (not dest.is_file() or dest.is_dir()))
+                            for dest in destinations
+                        ):
+                            raise RuntimeError("unsafe or non-regular packaging output path")
+                        backups: list[tuple[Path, Path]] = []
+                        published: list[Path] = []
+                        try:
+                            for destination in destinations:
+                                if destination.exists():
+                                    backup = destination.with_name(
+                                        f".{destination.name}.backup-{uuid.uuid4().hex}"
+                                    )
+                                    os.replace(destination, backup)
+                                    backups.append((destination, backup))
+                            for source, destination in zip(staged, destinations):
+                                os.replace(source, destination)
+                                published.append(destination)
+                        except BaseException:
+                            for destination in reversed(published):
+                                destination.unlink(missing_ok=True)
+                            for destination, backup in reversed(backups):
+                                if backup.exists():
+                                    os.replace(backup, destination)
+                            raise
+                        else:
+                            for _destination, backup in backups:
+                                backup.unlink(missing_ok=True)
+                    finally:
+                        shutil.rmtree(pack_tmp, ignore_errors=True)
+                return outcome
 
             pack_task = asyncio.create_task(
                 asyncio.to_thread(_package_artifacts), name=f"package-{session_id}"
@@ -2282,11 +2414,12 @@ async def session_finalize(
             with session.lock:
                 session.finalize_pack_task = pack_task
             try:
-                await asyncio.shield(pack_task)
+                pack_outcome = await asyncio.shield(pack_task)
             finally:
                 with session.lock:
                     if pack_task.done() and session.finalize_pack_task is pack_task:
                         session.finalize_pack_task = None
+            pack_outcome = pack_outcome or {}
 
             if method == "local":
                 _log.info(
@@ -2298,7 +2431,38 @@ async def session_finalize(
                     f"Saved local pack → {staging}",
                     output_dir=str(staging),
                     series=series_dir_name,
+                    files=(
+                        [f"{file_base}.webp", f"{file_base}.cbz", f"{file_base}.mokuro"]
+                        + ([SERIES_FILE_NAME] if pack_outcome.get("series_published") else [])
+                    ),
                 )
+                await asyncio.sleep(0)
+                if pack_outcome.get("series_error"):
+                    yield ndjson(
+                        "series_json",
+                        f"Could not update {SERIES_FILE_NAME}: {pack_outcome['series_error']}. "
+                        "The volume files were saved; the series folder was left untouched.",
+                        ok=False,
+                        file=SERIES_FILE_NAME,
+                        output_dir=str(staging),
+                    )
+                elif pack_outcome.get("series_published"):
+                    yield ndjson(
+                        "series_json",
+                        f"Wrote {SERIES_FILE_NAME} → {staging}",
+                        ok=True,
+                        file=SERIES_FILE_NAME,
+                        output_dir=str(staging),
+                    )
+                elif pack_outcome.get("series_unchanged"):
+                    yield ndjson(
+                        "series_json",
+                        f"{SERIES_FILE_NAME} is already up to date",
+                        ok=True,
+                        unchanged=True,
+                        file=SERIES_FILE_NAME,
+                        output_dir=str(staging),
+                    )
                 await asyncio.sleep(0)
 
             series = _validated_series(series_title_from_volume(session.safe_title))
@@ -2306,6 +2470,27 @@ async def session_finalize(
             target_label = method_label(method)
             upload_results = []
             all_success = True
+
+            if method == "local":
+                series_size = 0
+                if pack_outcome.get("series_published"):
+                    try:
+                        series_size = (staging / SERIES_FILE_NAME).stat().st_size
+                    except OSError:
+                        series_size = 0
+                upload_results = [
+                    {
+                        "file": SERIES_FILE_NAME,
+                        "size": series_size,
+                        "success": not pack_outcome.get("series_error"),
+                        "stderr": pack_outcome.get("series_error"),
+                        "url": None,
+                        "duration_s": None,
+                        "unchanged": bool(pack_outcome.get("series_unchanged")),
+                        "path": str(staging / SERIES_FILE_NAME),
+                    }
+                ]
+                all_success = upload_results[0]["success"]
 
             if method != "local":
                 _set_activity("uploading", f"{target_label} → {remote_dir}", session_id)
@@ -2339,6 +2524,100 @@ async def session_finalize(
                 # so clients see real-time upload progress, not a burst after
                 # every file finishes.
                 ev_queue = _queue.Queue()
+
+                def _publish_remote_series_json():
+                    """Create or update `<series>/series.json` at the destination.
+
+                    Under the destination's lock (one read-modify-write), and
+                    only when the existing file could be read: a manifest this
+                    process cannot read is never overwritten.
+                    """
+                    started = time.monotonic()
+                    with _series_lock(method, remote_dir):
+                        try:
+                            existing = download_file(method, remote_dir, SERIES_FILE_NAME)
+                        except Exception as error:
+                            return {
+                                "file": SERIES_FILE_NAME,
+                                "size": 0,
+                                "success": False,
+                                "stderr": _safe_provider_error(error),
+                                "url": None,
+                                "duration_s": round(time.monotonic() - started, 2),
+                                "stage": "read",
+                            }
+                        try:
+                            content, series_error = _series_payload(
+                                existing,
+                                series_title=series_dir_name,
+                                volume_title=file_base,
+                                archive_path=titled_cbz,
+                                mokuro_path=titled_mokuro,
+                                cover_path=titled_cover,
+                            )
+                        except (RuntimeError, OSError) as error:
+                            content, series_error = None, str(error)
+                        if series_error is not None:
+                            return {
+                                "file": SERIES_FILE_NAME,
+                                "size": 0,
+                                "success": False,
+                                "stderr": series_error,
+                                "url": None,
+                                "duration_s": round(time.monotonic() - started, 2),
+                                "stage": "build",
+                            }
+                        if content is None:
+                            return {
+                                "file": SERIES_FILE_NAME,
+                                "size": len(existing or b""),
+                                "success": True,
+                                "stderr": None,
+                                "url": None,
+                                "duration_s": round(time.monotonic() - started, 2),
+                                "unchanged": True,
+                            }
+                        staged_series = staging / SERIES_FILE_NAME
+                        _write_atomic_no_follow(staged_series, content)
+                        try:
+                            ok, err, url = upload_file(
+                                method, staged_series, remote_dir, None, "replace"
+                            )
+                        except Exception as error:
+                            ok, err, url = False, str(error)[:1000], None
+                        if not ok and existing is not None:
+                            # "replace" can delete before it writes (MEGA has no
+                            # atomic swap). Put the bytes read at the start back;
+                            # the file name must be exactly SERIES_FILE_NAME,
+                            # because providers take the remote name from it.
+                            restore_dir = Path(
+                                tempfile.mkdtemp(prefix=".series-restore-", dir=str(staging))
+                            )
+                            try:
+                                restore_path = restore_dir / SERIES_FILE_NAME
+                                _write_atomic_no_follow(restore_path, existing)
+                                restored, restore_err, _ = upload_file(
+                                    method, restore_path, remote_dir, None, "replace"
+                                )
+                            except Exception as restore_error:
+                                restored, restore_err = False, str(restore_error)[:1000]
+                            finally:
+                                shutil.rmtree(restore_dir, ignore_errors=True)
+                            err = (
+                                f"{err} (the previous series.json could not be restored "
+                                f"either: {_safe_provider_error(restore_err)})"
+                                if not restored
+                                else f"{err} (the previous series.json was put back)"
+                            )
+                        return {
+                            "file": SERIES_FILE_NAME,
+                            "size": len(content),
+                            "success": bool(ok),
+                            "stderr": _safe_provider_error(err) if not ok else None,
+                            "url": _safe_provider_url(url) if ok else None,
+                            "duration_s": round(time.monotonic() - started, 2),
+                            "unchanged": False,
+                        }
 
                 def _upload_batch():
                     results = []
@@ -2497,6 +2776,57 @@ async def session_finalize(
                     await asyncio.sleep(0)
 
                 all_success = all(r["success"] for r in upload_results)
+
+                # Published only once its volume is there. A failure here fails
+                # the finalize: a folder with no index is the bug being fixed.
+                if all_success:
+                    yield ndjson(
+                        "series_json",
+                        f"Updating {SERIES_FILE_NAME}…",
+                        file=SERIES_FILE_NAME,
+                        remote_path=remote_dir,
+                    )
+                    await asyncio.sleep(0)
+                    series_result = await asyncio.to_thread(_publish_remote_series_json)
+                    upload_results.append(series_result)
+                    all_success = bool(series_result["success"])
+                    if series_result["success"] and series_result.get("unchanged"):
+                        yield ndjson(
+                            "series_json",
+                            f"{SERIES_FILE_NAME} is already up to date",
+                            ok=True,
+                            unchanged=True,
+                            file=SERIES_FILE_NAME,
+                            remote_path=remote_dir,
+                        )
+                    elif series_result["success"]:
+                        _log.info(
+                            "upload",
+                            f"{session.safe_title}: uploaded {SERIES_FILE_NAME}",
+                        )
+                        yield ndjson(
+                            "upload",
+                            f"Uploaded {SERIES_FILE_NAME}",
+                            file=SERIES_FILE_NAME,
+                            method=method,
+                            url=series_result.get("url"),
+                        )
+                    else:
+                        _log.error(
+                            "upload",
+                            f"{session.safe_title}: {SERIES_FILE_NAME} failed: "
+                            f"{series_result.get('stderr') or 'unknown'}",
+                        )
+                        yield ndjson(
+                            "series_json",
+                            f"Could not update {SERIES_FILE_NAME}: "
+                            f"{series_result.get('stderr') or 'unknown'}",
+                            ok=False,
+                            file=SERIES_FILE_NAME,
+                            remote_path=remote_dir,
+                        )
+                    await asyncio.sleep(0)
+
                 if all_success:
                     _log.info(
                         "upload",
@@ -2519,12 +2849,30 @@ async def session_finalize(
                     error=None if all_success else "one or more files failed",
                 )
 
-            if method != "local" and not all_success:
+            if not all_success:
                 failed = [r for r in upload_results if not r["success"]]
+                detail = "; ".join(
+                    f"{r['file']}: {r.get('stderr') or 'unknown'}" for r in failed
+                )
+                if method == "local":
+                    yield ndjson(
+                        "done",
+                        f"Saved locally, but the series index was not updated: {detail}",
+                        status="partial_upload",
+                        title=session.safe_title,
+                        series=series_dir_name,
+                        pages=len(image_files),
+                        output_dir=str(staging),
+                        staging=str(staging),
+                        remote_path=None,
+                        mega_path=None,
+                        uploads=upload_results,
+                        method=method,
+                    )
+                    return
                 yield ndjson(
                     "done",
-                    f"{target_label} upload partially completed: "
-                    + "; ".join(f"{r['file']}: {r.get('stderr') or 'unknown'}" for r in failed),
+                    f"{target_label} upload partially completed: " + detail,
                     status="partial_upload",
                     title=session.safe_title,
                     pages=len(image_files),
@@ -2569,6 +2917,9 @@ async def session_finalize(
             done_msg = (
                 f"Done! {len(image_files)} pages → {target_label} {remote_dir}/"
                 f"{file_base}.{{cbz,mokuro,webp}}"
+                + (f" + {SERIES_FILE_NAME}" if any(
+                    r["file"] == SERIES_FILE_NAME and r["success"] for r in upload_results
+                ) else "")
                 if method != "local"
                 else f"Done! {len(image_files)} pages OCR'd → {staging}"
             )

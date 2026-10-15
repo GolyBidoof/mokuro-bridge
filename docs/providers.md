@@ -14,12 +14,13 @@ A provider module ends with a module level `PROVIDER` value, an instance of the 
 | `creds_source` | `(name) -> str or None` | A short description of where that account's secret comes from, for `/health`, such as `oauth`, `keychain` or `token`. |
 | `upload` | `(name, root, remote_dir, local_path, on_progress, overwrite) -> (ok, error, url)` | Upload one file and return the three tuple. The provider owns its account lock, the folders it needs to create and its own error policy. |
 | `remote_exists` | `(name, remote_dir, filename) -> bool` | Whether the file is already there, without creating a folder or uploading a byte. |
+| `download` | `(name, remote_dir, filename) -> bytes or None` | Read one small sidecar back: `None` when the file is absent, a raise when the read fails, and a refusal above `DOWNLOAD_LIMIT_BYTES` (4 MiB) rather than pulling an arbitrary remote file into memory. Used only to merge into an existing `series.json`, and it must never create a folder. It is fail-closed on purpose: the caller's alternative to reading the file is to leave it alone, because the entries every other volume published live in it. |
 | `run_setup` | `(name, root, label) -> None` | The interactive wizard that `--setup-upload` calls. |
 | `account` | `(instance) -> ProviderAccount` | The presentation view described below. |
 
 The `root(name)` method on `Provider` is not a field: it resolves the account through `accounts.py` and falls back to the provider default, so a provider never duplicates the root mapping.
 
-`upload` receives the account name rather than the account instance, so a provider stays decoupled from the account registry. The provider also receives `overwrite`, whose meaning is uniform across backends: `fail` reports an existing file as an error, `skip` treats it as success, and `overwrite` replaces it.
+`upload` receives the account name rather than the account instance, so a provider stays decoupled from the account registry. The provider also receives `overwrite`, whose meaning is uniform across backends: `fail` reports an existing file as an error, `skip` treats it as success, `overwrite` replaces it, and `replace` replaces it under the same name. `overwrite` is what a volume artifact wants, because the versioned sibling MEGA produces keeps the prior valid copy. `replace` exists for a file the caller regenerates from local state, which today is only the series manifest: a manifest renamed to `series.json.replace-abc123` is a manifest no reader reads. MEGA implements `replace` by deleting and re-uploading; Drive and OneDrive treat it exactly like `overwrite`, which already replaces in place.
 
 ## The account view
 

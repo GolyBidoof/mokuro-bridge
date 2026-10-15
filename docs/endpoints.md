@@ -103,7 +103,7 @@ Polls one session. Response `200` is the snapshot. `404` for an unknown session,
 
 ## POST /session/{session_id}/finalize
 
-Waits for the OCR queue, assembles the `.mokuro`, packs the CBZ and cover, then keeps the trio locally or uploads it. The response is `application/x-ndjson`: one JSON frame per event, at least every 750 ms while the queue drains and one per file during an upload, with no caching and no proxy buffering.
+Waits for the OCR queue, assembles the `.mokuro`, packs the CBZ and cover, publishes the series `series.json`, then keeps the output locally or uploads it. The response is `application/x-ndjson`: one JSON frame per event, at least every 750 ms while the queue drains and one per file during an upload, with no caching and no proxy buffering.
 
 | Form field | Default | Meaning |
 | --- | --- | --- |
@@ -111,11 +111,13 @@ Waits for the OCR queue, assembles the `.mokuro`, packs the CBZ and cover, then 
 | `upload_to_mega` | empty | Legacy alias: `true` means MEGA, `false` means local |
 | `delete_after_upload` | `true` | Remove the volume's working files once every step succeeded |
 | `local_dir` | empty | Output folder when the resolved method is `local`; remembered as the sticky default |
-| `overwrite` | `fail` | Remote collision policy: `fail`, `skip` or `overwrite` |
+| `overwrite` | `fail` | Collision policy for the volume files: `fail`, `skip` or `overwrite`. `series.json` is always updated in place, see [series-json.md](series-json.md) |
 
-Frames carry a `stage` and a `message`: `wait_ocr`, `assemble`, `pack`, `upload`, `upload_progress`, `cleanup`, then a terminal `done` or `error`. A `done` frame has `status: "success"` or `status: "partial_upload"` and carries `title`, `series`, `pages`, `method`, `remote_path`, `output_dir`, `staging`, per-file `uploads` and `reader_url`. An `error` frame is terminal and must be raised by the client: statuses include `ocr_failed`, `ocr_cache_invalid`, `persistence_error`, `finalize_error` and `cleanup_error`. A stream that simply ends without a terminal frame is a truncated upload, not a success.
+Frames carry a `stage` and a `message`: `wait_ocr`, `assemble`, `pack`, `series_json`, `upload`, `upload_progress`, `cleanup`, then a terminal `done` or `error`. The `series_json` frames report the series index: `ok: true` with `unchanged: true` when the destination already described this volume, `ok: true` when it was written or uploaded, and `ok: false` with the reason when it could not be, in which case the destination's existing file is left untouched. A `done` frame has `status: "success"` or `status: "partial_upload"` and carries `title`, `series`, `pages`, `method`, `remote_path`, `output_dir`, `staging`, per-file `uploads` (which include the `series.json` entry for both local and remote finals) and `reader_url`. An `error` frame is terminal and must be raised by the client: statuses include `ocr_failed`, `ocr_cache_invalid`, `persistence_error`, `finalize_error` and `cleanup_error`. A stream that simply ends without a terminal frame is a truncated upload, not a success.
 
-Errors before the stream starts: `400` for an unknown upload account, `404` for an unknown session, and `409` when a finalization is already in progress for that session. Not covered by an HTTP test; the client-side stream parsing is tested in `tests/test_ocr_folder.py`.
+A destination that received the volume files but not the index is reported as `partial_upload`, not success: a folder without `series.json` is a series the reader cannot build. The working files are kept in that case, so a retry is cheap.
+
+Errors before the stream starts: `400` for an unknown upload account, `404` for an unknown session, and `409` when a finalization is already in progress for that session. The stream is covered end to end by `tests/test_finalize_series_json.py` for a local folder and for a remote destination with the provider seam faked; the client-side stream parsing is tested in `tests/test_ocr_folder.py`.
 
 ## GET /upload-methods
 
