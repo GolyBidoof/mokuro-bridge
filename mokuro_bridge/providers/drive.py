@@ -17,7 +17,13 @@ from ..config import (
     _DRIVE_CLIENT_ID_ENV,
     _DRIVE_CLIENT_SECRET_ENV,
 )
-from .base import Provider, ProviderAccount, provider_account_lock, walk_folders
+from .base import (
+    DOWNLOAD_LIMIT_BYTES,
+    Provider,
+    ProviderAccount,
+    provider_account_lock,
+    walk_folders,
+)
 
 _DRIVE_IMPORT_HINT = (
     "Google Drive upload needs the google client libraries. "
@@ -335,9 +341,8 @@ def _drive_upload_file(
     (the caller throttles upstream NDJSON emission). Returns
     (success, error_message).
 
-    overwrite: "fail" → an existing file with the same name is an error;
-    "skip" → existing file counts as success (nothing uploaded);
-    "overwrite" → the existing file is updated in place by Drive's resumable API.
+    overwrite: "fail" → existing file is an error; "skip" → success without
+    uploading; "overwrite" and "replace" → in-place update.
     """
     try:
         from googleapiclient.http import MediaFileUpload
@@ -349,7 +354,7 @@ def _drive_upload_file(
     if existing_id:
         if overwrite == "skip":
             return True, None, f"https://drive.google.com/file/d/{existing_id}/view"
-        if overwrite != "overwrite":
+        if overwrite not in ("overwrite", "replace"):
             return (
                 False,
                 f"destination already exists: {local_path.name} "
@@ -618,6 +623,42 @@ def _drive_account_remote_exists(name: str, remote_dir: str, filename: str) -> b
         return bool(_drive_find_file_id(service, folder_id, filename))
 
 
+def _drive_account_download(name: str, remote_dir: str, filename: str) -> Optional[bytes]:
+    """Read ``remote_dir/filename`` for one Drive account; None when absent.
+    The size is checked from the file's metadata before the content is asked
+    for, so an oversized file is refused rather than downloaded."""
+    with provider_account_lock("drive", name):
+        service = _drive_service(name)
+        folder_id = walk_folders(
+            remote_dir,
+            find=lambda parent, seg: _drive_find_folder(service, seg, parent),
+        )
+        if not folder_id:
+            return None
+        file_id = _drive_find_file_id(service, folder_id, filename)
+        if not file_id:
+            return None
+        meta = service.files().get(fileId=file_id, fields="size").execute()
+        try:
+            declared = int(meta.get("size") or 0)
+        except (TypeError, ValueError):
+            declared = 0
+        if declared > DOWNLOAD_LIMIT_BYTES:
+            raise RuntimeError(
+                f"refusing to read {remote_dir}/{filename}: {declared} bytes exceeds the "
+                f"{DOWNLOAD_LIMIT_BYTES}-byte sidecar limit"
+            )
+        data = service.files().get_media(fileId=file_id).execute()
+        if not isinstance(data, (bytes, bytearray)):
+            raise RuntimeError(f"Google Drive returned no content for {remote_dir}/{filename}")
+        if len(data) > DOWNLOAD_LIMIT_BYTES:
+            raise RuntimeError(
+                f"refusing to read {remote_dir}/{filename}: {len(data)} bytes exceeds the "
+                f"{DOWNLOAD_LIMIT_BYTES}-byte sidecar limit"
+            )
+        return bytes(data)
+
+
 PROVIDER = Provider(
     id="drive",
     label="Google Drive",
@@ -625,6 +666,7 @@ PROVIDER = Provider(
     creds_source=_drive_creds_source,
     upload=_drive_upload,
     remote_exists=_drive_account_remote_exists,
+    download=_drive_account_download,
     run_setup=_run_setup_drive,
     account=_drive_account_view,
 )

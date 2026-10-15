@@ -21,7 +21,7 @@ from ..creds import (
     _store_mega_creds_os,
     _write_creds_file,
 )
-from .base import Provider, ProviderAccount, provider_account_lock
+from .base import DOWNLOAD_LIMIT_BYTES, Provider, ProviderAccount, provider_account_lock
 
 def _mega_configured(name: str = DEFAULT_NAME) -> bool:
     """Whether one MEGA account is usable right now."""
@@ -357,6 +357,43 @@ def _mega_remote_exists(megarc_path: Path, remote_path: str) -> bool:
         return False
     raise RuntimeError(f"MEGA existence check failed for {remote_path}: {detail[:300]}")
 
+def _mega_read_remote(megarc_path: Path, remote_path: str) -> Optional[bytes]:
+    """Read one small remote file back; None when absent. Lands in a temp file
+    so the size can be checked before the bytes are held."""
+    if not _mega_remote_exists(megarc_path, remote_path):
+        return None
+    with tempfile.TemporaryDirectory(prefix="mokuro-bridge-read-") as tmp:
+        target = Path(tmp) / "sidecar.json"
+        try:
+            result = subprocess.run(
+                [
+                    "megatools",
+                    "get",
+                    "--config",
+                    str(megarc_path),
+                    "--no-progress",
+                    "--path",
+                    str(target),
+                    remote_path,
+                ],
+                capture_output=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(f"MEGA download timed out for {remote_path}") from error
+        except FileNotFoundError as error:
+            raise RuntimeError("megatools is not installed") from error
+        if result.returncode != 0 or not target.is_file():
+            detail = (result.stderr or result.stdout or b"").decode("utf-8", "replace").strip()
+            raise RuntimeError(f"MEGA download failed for {remote_path}: {detail[:300]}")
+        size = target.stat().st_size
+        if size > DOWNLOAD_LIMIT_BYTES:
+            raise RuntimeError(
+                f"refusing to read {remote_path}: {size} bytes exceeds the "
+                f"{DOWNLOAD_LIMIT_BYTES}-byte sidecar limit"
+            )
+        return target.read_bytes()
+
 def _mega_upload_file(
     megarc_path: Path,
     local_path: Path,
@@ -372,15 +409,12 @@ def _mega_upload_file(
     speed_bps)` fires live (the caller derives the percent). Returns
     (success, error_message).
 
-    overwrite: "fail" → an existing remote file is an error (a clear,
-    method-agnostic message is returned); "skip" → existing file counts as
-    success (nothing uploaded); "overwrite" → upload a versioned sibling and
-    keep the prior valid copy (MEGA CLI has no atomic replace operation).
+    overwrite: "fail" → existing file is an error; "skip" → success without
+    uploading; "overwrite" → upload a versioned sibling; "replace" → delete then
+    upload under the same name (for a file the caller regenerates locally).
     """
     total_bytes = local_path.stat().st_size
 
-    # Existing-file policy. megatools put refuses to overwrite (exit code 2,
-    # "File already exists"), so implement skip/overwrite explicitly here.
     exists = _mega_remote_exists(megarc_path, remote_path)
     staged_path = ""
     if exists:
@@ -399,7 +433,17 @@ def _mega_upload_file(
             except (subprocess.TimeoutExpired, FileNotFoundError):
                 url = None
             return True, None, url
-        if overwrite != "overwrite":
+        if overwrite == "replace":
+            removed = subprocess.run(
+                ["megatools", "rm", "--config", str(megarc_path), remote_path],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if removed.returncode != 0:
+                detail = (removed.stderr or removed.stdout or "").strip()
+                return False, f"MEGA could not replace {remote_path}: {detail[:300]}", None
+        elif overwrite != "overwrite":
             return (
                 False,
                 f"destination already exists: {remote_path} "
@@ -407,10 +451,10 @@ def _mega_upload_file(
                 "to keep the existing copy)",
                 None,
             )
-        # megatools 1.x has no move/replace command.  Never delete the old
-        # valid artifact before the replacement has uploaded successfully;
-        # expose a versioned sibling instead.
-        staged_path = f"{remote_path}.replace-{uuid.uuid4().hex[:10]}"
+        else:
+            # No atomic replace in megatools 1.x: keep the old copy and expose a
+            # versioned sibling.
+            staged_path = f"{remote_path}.replace-{uuid.uuid4().hex[:10]}"
 
     put_path = staged_path or remote_path
     proc = subprocess.Popen(
@@ -547,6 +591,18 @@ def _mega_account_remote_exists(name: str, remote_dir: str, filename: str) -> bo
         megarc_path.unlink(missing_ok=True)
 
 
+def _mega_account_download(name: str, remote_dir: str, filename: str) -> Optional[bytes]:
+    """Read ``remote_dir/filename`` for one account; None when absent."""
+    email, password = _get_mega_creds(name)
+    megarc_path = create_megarc(email, password)
+    try:
+        remote_path = f"{str(remote_dir).rstrip('/')}/{filename}"
+        with provider_account_lock("mega", name):
+            return _mega_read_remote(megarc_path, remote_path)
+    finally:
+        megarc_path.unlink(missing_ok=True)
+
+
 PROVIDER = Provider(
     id="mega",
     label="MEGA (megatools)",
@@ -554,6 +610,7 @@ PROVIDER = Provider(
     creds_source=_mega_creds_source,
     upload=_mega_upload,
     remote_exists=_mega_account_remote_exists,
+    download=_mega_account_download,
     run_setup=_run_setup_mega,
     account=_mega_account_view,
 )

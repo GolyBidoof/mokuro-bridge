@@ -17,7 +17,7 @@ from ..config import (
 )
 from ..util import _chmod_fd_private, series_title_from_volume
 from . import drive, mega, onedrive
-from .base import Provider, ProviderAccount, walk_folders
+from .base import DOWNLOAD_LIMIT_BYTES, Provider, ProviderAccount, walk_folders
 
 # Names this package exists to re-export. Everything below is imported here so
 # cli.py (and api.py) can reach the provider internals from one place, not from
@@ -46,6 +46,8 @@ __all__ = [
     "resolve_upload_method",
     "upload_file",
     "remote_file_exists",
+    "download_file",
+    "DOWNLOAD_LIMIT_BYTES",
 ]
 
 # The live provider registry. Dispatch below is a lookup in this mapping, so a
@@ -314,6 +316,16 @@ def remote_file_exists(method: str, remote_dir: str, filename: str) -> bool:
     if provider is None:
         raise ValueError(f"unknown upload provider: {instance.provider}")
     return provider.remote_exists(instance.name, remote_dir, filename)
+
+def download_file(method: str, remote_dir: str, filename: str) -> Optional[bytes]:
+    """Read one sidecar back. None = absent, raise = could not find out."""
+    instance = instance_for(method)
+    if instance is None:
+        raise ValueError("local destinations are read by the API layer")
+    provider = _PROVIDERS.get(instance.provider)
+    if provider is None:
+        raise ValueError(f"unknown upload provider: {instance.provider}")
+    return provider.download(instance.name, remote_dir, filename)
 
 def _method_current_folder(method_id: str) -> str:
     """Human-readable 'current folder' for an upload target (for clients)."""

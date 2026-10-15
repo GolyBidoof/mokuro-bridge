@@ -11,7 +11,13 @@ from .. import accounts
 from ..accounts import DEFAULT_NAME
 from ..util import _chmod_fd_private
 from ..config import ONEDRIVE_CLIENT_ID, ONEDRIVE_TOKEN_FILE, _GRAPH_BASE, _ONEDRIVE_SCOPES
-from .base import Provider, ProviderAccount, provider_account_lock, walk_folders
+from .base import (
+    DOWNLOAD_LIMIT_BYTES,
+    Provider,
+    ProviderAccount,
+    provider_account_lock,
+    walk_folders,
+)
 
 _ONEDRIVE_IMPORT_HINT = (
     "OneDrive upload needs the msal and requests libraries. "
@@ -377,9 +383,8 @@ def _onedrive_upload_file(
     upload URL. Handles 202 continuation, 416 resume, 404 expiry, and
     429/5xx retries. Returns (success, error_message).
 
-    overwrite: "fail" → an existing file with the same name is an error;
-    "skip" → existing file counts as success (nothing uploaded);
-    "overwrite" → conflictBehavior replace (fresh copy replaces the old).
+    overwrite: "fail" → existing file is an error; "skip" → success without
+    uploading; "overwrite" and "replace" → conflictBehavior replace.
     """
     try:
         import requests
@@ -396,7 +401,7 @@ def _onedrive_upload_file(
     if existing:
         if overwrite == "skip":
             return True, None, None
-        if overwrite != "overwrite":
+        if overwrite not in ("overwrite", "replace"):
             return (
                 False,
                 f"destination already exists: {local_path.name} "
@@ -409,7 +414,7 @@ def _onedrive_upload_file(
         f"{_GRAPH_BASE}/me/drive/items/{series_folder_id}:/"
         f"{quoted_name}:/createUploadSession"
     )
-    conflict = "replace" if overwrite == "overwrite" else "fail"
+    conflict = "replace" if overwrite in ("overwrite", "replace") else "fail"
     try:
         resp = sess.post(
             create_url,
@@ -575,6 +580,35 @@ def _onedrive_account_remote_exists(name: str, remote_dir: str, filename: str) -
         return bool(folder_id and _onedrive_item_by_name(sess, headers, folder_id, filename))
 
 
+def _onedrive_account_download(name: str, remote_dir: str, filename: str) -> Optional[bytes]:
+    """Read ``remote_dir/filename`` for one OneDrive account; None when absent.
+    Graph redirects to the download URL; the size is checked after the body."""
+    import requests
+
+    with provider_account_lock("onedrive", name):
+        sess = requests.Session()
+        headers = _onedrive_headers(name)
+        folder_id = _onedrive_remote_dir_exists(sess, headers, remote_dir)
+        if not folder_id:
+            return None
+        item_id = _onedrive_item_by_name(sess, headers, folder_id, filename)
+        if not item_id:
+            return None
+        resp = _graph_request(
+            sess,
+            "GET",
+            f"{_GRAPH_BASE}/me/drive/items/{item_id}/content",
+            headers=headers,
+            allow_redirects=True,
+        )
+        if len(resp.content or b"") > DOWNLOAD_LIMIT_BYTES:
+            raise RuntimeError(
+                f"refusing to read {remote_dir}/{filename}: {len(resp.content)} bytes "
+                f"exceeds the {DOWNLOAD_LIMIT_BYTES}-byte sidecar limit"
+            )
+        return resp.content
+
+
 PROVIDER = Provider(
     id="onedrive",
     label="OneDrive",
@@ -582,6 +616,7 @@ PROVIDER = Provider(
     creds_source=lambda name: "token" if _onedrive_configured(name) else None,
     upload=_onedrive_upload,
     remote_exists=_onedrive_account_remote_exists,
+    download=_onedrive_account_download,
     run_setup=_run_setup_onedrive,
     account=_onedrive_account_view,
 )

@@ -36,6 +36,9 @@ from .. import accounts
 # best-effort and None when the provider cannot produce one.
 UploadResult = tuple[bool, Optional[str], Optional[str]]
 
+# Cap on any sidecar read back; only the series manifest is ever downloaded.
+DOWNLOAD_LIMIT_BYTES = 4 * 1024 * 1024
+
 
 @dataclass(frozen=True)
 class ProviderAccount:
@@ -74,6 +77,11 @@ class Provider:
     remote_exists:
         Whether (remote_dir, filename) already exists, without creating folders
         or uploading anything.
+    download:
+        Read one small sidecar back: (name, remote_dir, filename) → bytes, or
+        None when absent. Never creates folders. It must raise rather than
+        guess, because the caller's alternative is to leave the file alone, and
+        it refuses anything above ``DOWNLOAD_LIMIT_BYTES``.
     run_setup:
         The interactive wizard cli.py calls; its signature is
         (name, root, label).
@@ -87,6 +95,7 @@ class Provider:
     creds_source: Callable[[str], Optional[str]]
     upload: Callable[[str, str, str, Path, Optional[Callable], str], UploadResult]
     remote_exists: Callable[[str, str, str], bool]
+    download: Callable[[str, str, str], Optional[bytes]]
     run_setup: Callable[..., None]
     account: Callable[[accounts.Instance], ProviderAccount]
 

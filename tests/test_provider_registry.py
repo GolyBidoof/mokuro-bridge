@@ -35,6 +35,10 @@ def _fake_provider(calls: dict) -> Provider:
         calls["remote_exists"] = (name, remote_dir, filename)
         return filename == "present.cbz"
 
+    def download(name, remote_dir, filename) -> bytes:
+        calls["download"] = (name, remote_dir, filename)
+        return b'{"version":2}'
+
     def run_setup(name=None, root="", label=""):
         calls["setup"] = (name, root, label)
 
@@ -52,6 +56,7 @@ def _fake_provider(calls: dict) -> Provider:
         creds_source=creds_source,
         upload=upload,
         remote_exists=remote_exists,
+        download=download,
         run_setup=run_setup,
         account=account,
     )
@@ -101,6 +106,17 @@ def test_remote_file_exists_is_dispatched_to_the_registered_provider(fake):
     assert providers.remote_file_exists("fake", FAKE_ROOT, "present.cbz") is True
     assert providers.remote_file_exists("fake", FAKE_ROOT, "absent.cbz") is False
     assert fake["remote_exists"] == ("default", FAKE_ROOT, "absent.cbz")
+
+
+def test_download_is_dispatched_to_the_registered_provider(fake):
+    assert providers.download_file("fake", FAKE_ROOT, "series.json") == b'{"version":2}'
+    assert fake["download"] == ("default", FAKE_ROOT, "series.json")
+
+
+def test_download_refuses_a_local_destination(fake):
+    """`local` has no provider: the API layer reads and writes that path itself."""
+    with pytest.raises(ValueError):
+        providers.download_file("local", FAKE_ROOT, "series.json")
 
 
 def test_upload_is_dispatched_to_the_registered_provider(fake, tmp_path):
