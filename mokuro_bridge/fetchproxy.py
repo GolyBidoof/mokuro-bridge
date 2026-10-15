@@ -37,11 +37,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from .config import CORS_ORIGINS
+from .config import CORS_ORIGINS, _knob
 
 def _env_nonnegative_int(name: str, default: int) -> int:
     try:
-        return max(0, int(os.environ.get(name, str(default))))
+        return max(0, int(_knob(name, default)))
     except (TypeError, ValueError):
         return default
 

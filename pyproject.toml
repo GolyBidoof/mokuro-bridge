@@ -99,7 +99,7 @@ packages = ["mokuro_bridge", "mokuro_bridge.providers"]
 # wheel because `mokuro-bridge --check-series-reference` has to work from a pipx
 # install, where there is no checkout to read a reference file from.
 [tool.setuptools.package-data]
-mokuro_bridge = ["data/*.json"]
+mokuro_bridge = ["data/*.json", "web/*.html"]
 
 # Without this block ruff auto-discovers whatever config is installed on the
 # machine (or in $HOME), so the lint result is not reproducible and is not the

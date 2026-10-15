@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from .util import _chmod_fd_private, _env_path
+from . import settings as _settings
 
 # Any origin by default. The bridge is a local helper for a userscript that
 # runs on whichever store the user is reading from, so pinning an origin list
@@ -19,10 +20,19 @@ from .util import _chmod_fd_private, _env_path
 # and the bridge is unauthenticated anyway - loopback binding is the only access
 # control, and any process that can reach the port can drive it. Set
 # CORS_ORIGINS to a comma-separated list to narrow it again.
+def _knob(name: str, default) -> str:
+    """The setting in force: environment, then the wizard's settings file, then default."""
+    raw = os.environ.get(name)
+    if raw is not None and str(raw).strip():
+        return str(raw)
+    stored = _settings.stored(name)
+    return stored if stored is not None else str(default)
+
+
 _CORS_DEFAULT_ORIGINS = "*"
 CORS_ORIGINS = [
     o.strip()
-    for o in os.environ.get("CORS_ORIGINS", _CORS_DEFAULT_ORIGINS).split(",")
+    for o in _knob("CORS_ORIGINS", _CORS_DEFAULT_ORIGINS).split(",")
     if o.strip()
 ]
 
@@ -51,7 +61,7 @@ def _default_output_dir(package_file: Optional[str] = None) -> Path:
     return checkout / "output"
 
 
-OUTPUT_DIR = _env_path("MOKURO_BRIDGE_OUTPUT_DIR", _default_output_dir())
+OUTPUT_DIR = Path(_knob("MOKURO_BRIDGE_OUTPUT_DIR", _default_output_dir())).expanduser().resolve()
 
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -75,7 +85,7 @@ _MEGA_UPLOAD_DEFAULT = str(
 # 9-page sampler) must still upload. Raise it if you want a stricter floor.
 def _env_positive_int(name: str, default: int) -> int:
     try:
-        value = int(os.environ.get(name, str(default)))
+        value = int(_knob(name, default))
     except (TypeError, ValueError):
         return default
     return max(1, value)
@@ -114,7 +124,7 @@ _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 # controlled chunks. Override via env.
 def _env_nonnegative_float(name: str, default: float) -> float:
     try:
-        value = float(os.environ.get(name, str(default)))
+        value = float(_knob(name, default))
     except (TypeError, ValueError):
         return default
     # A zero timeout makes Condition.wait spin on a partially filled queue;
@@ -229,7 +239,7 @@ def _remember_local_dir(path_str: str) -> None:
 # match there, so a Windows library on a second drive had no supported way in.
 def _extra_ingest_roots() -> list[Path]:
     roots = []
-    for entry in os.environ.get("MOKURO_BRIDGE_INGEST_ROOTS", "").split(","):
+    for entry in _knob("MOKURO_BRIDGE_INGEST_ROOTS", "").split(","):
         entry = entry.strip().strip('"').strip("'")
         if not entry:
             continue

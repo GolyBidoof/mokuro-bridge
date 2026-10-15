@@ -18,7 +18,6 @@ import uuid
 import weakref
 import zipfile
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -68,6 +67,8 @@ from .ocr import (
 )
 from .providers import (
     DOWNLOAD_LIMIT_BYTES,
+    safe_provider_error as _safe_provider_error,
+    safe_provider_url as _safe_provider_url,
     _build_upload_methods,
     _default_upload_method,
     _method_current_folder,
@@ -459,6 +460,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# The dashboard and its configuration API. Included here so the bridge serves
+# one origin: the page fetches /health and /config from the same host it was
+# loaded from. See mokuro_bridge/config_api.py.
+from .config_api import router as _config_router  # noqa: E402
+
+app.include_router(_config_router)
+
+
 def _origin_allowed(origin: str) -> bool:
     return bool(origin) and any(fnmatch.fnmatchcase(origin, str(pattern)) for pattern in CORS_ORIGINS)
 
@@ -656,39 +665,6 @@ async def _drain_task_even_if_cancelled(task):
             await asyncio.shield(drain)
         except asyncio.CancelledError:
             continue
-
-
-def _safe_provider_url(value: object) -> Optional[str]:
-    """Keep only a public provider locator; never return signed query/fragment tokens."""
-    try:
-        text = str(value or "").strip()
-        if not text:
-            return None
-        parsed = urlsplit(text)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            return None
-        host = parsed.hostname
-        if not host:
-            return None
-        host = host.casefold()
-        if ":" in host and not host.startswith("["):
-            host = f"[{host}]"
-        try:
-            port = parsed.port
-        except ValueError:
-            return None
-        netloc = host if port is None else f"{host}:{port}"
-        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
-    except Exception:
-        return None
-
-
-def _safe_provider_error(value: object) -> str:
-    text = str(value or "")
-    def _redact(match):
-        safe = _safe_provider_url(match.group(0).rstrip(".,);]"))
-        return safe or "[redacted-url]"
-    return re.sub(r"https?://[^\s<>\"']+", _redact, text)[:2000]
 
 
 def _file_digest(path: Path) -> Optional[str]:
@@ -3176,6 +3152,22 @@ async def queue_status():
     return JSONResponse(await asyncio.to_thread(ocr_queue_metrics))
 
 
+def _health_upload_methods(methods: dict) -> list[dict]:
+    rows = []
+    for method in methods.values():
+        rows.append(
+            {
+                "id": method.id,
+                "name": method.name,
+                "configured": method.configured,
+                "default": method.default,
+                "current_folder": _method_current_folder(method.id),
+                **method.extra,
+            }
+        )
+    return rows
+
+
 @app.get("/health")
 async def health():
     # Keeps the cached version check warm without ever blocking this request:
@@ -3204,11 +3196,9 @@ async def health():
         "mega_creds_source": None,
         "mega_library_root": method_root("mega") or MEGA_LIBRARY_ROOT,
         "upload_default": _MEGA_UPLOAD_DEFAULT,
-        "upload_methods": [
-            {"id": m.id, "name": m.name, "configured": m.configured,
-             "default": m.default, **m.extra}
-            for m in upload_methods.values()
-        ],
+        # current_folder is included so a client (and --status) can show where a
+        # target writes without a second request; /upload-methods always had it.
+        "upload_methods": await asyncio.to_thread(_health_upload_methods, upload_methods),
         "upload_method_default": _default_upload_method(),
         "upload_method_selected": None,
         "work_dir": str(WORK_DIR),

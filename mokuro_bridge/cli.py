@@ -62,12 +62,12 @@ from .ocr import _MOKURO_REPO, _fork_supported, _mokuro_pkg
 from . import accounts
 from . import mokuro_flavor
 from . import update
-from .creds import _delete_mega_creds_keychain
 from .providers import (
     _UPLOAD_METHODS,
     _build_upload_methods,
     _default_upload_method,
     _method_current_folder,
+    forget_account,
     setup_runner,
 )
 
@@ -100,43 +100,17 @@ def _list_uploads() -> None:
 def _remove_upload(target: str) -> int:
     """Forget one upload account: metadata, its secret files, its keychain item."""
     try:
-        provider, name = accounts.parse_method_id(target)
+        result = forget_account(target)
     except ValueError as exc:
         print(f"error: {exc}")
         return 2
-    instance = accounts.load_instance(provider, name)
-    label = instance.id if instance is not None else target
-    email = instance.email if instance is not None else ""
-    # Emails other accounts still rely on — deleting the shared keychain item
-    # would break them (see accounts.sibling_emails).
-    siblings = accounts.sibling_emails(provider, name) if provider == "mega" else set()
-
-    removed = accounts.delete_instance(provider, name)
-    legacy = accounts.legacy_secret_path(provider, name)
-    if legacy is not None:
-        removed += accounts.remove_paths([legacy])
-
-    if provider == "mega":
-        if email and email in siblings:
-            print(
-                f"note: {email} is still used by another MEGA account — its "
-                "keychain item was left in place."
-            )
-        elif email:
-            if _delete_mega_creds_keychain(email):
-                removed.append(f"keychain:mega.nz/{email}")
-        else:
-            print(
-                "note: no account file records a MEGA email, so any keychain "
-                "item was left alone. Delete it in Keychain Access "
-                "(service mega.nz) if you want it gone."
-            )
-
-    if not removed:
-        print(f"nothing to remove for {label}")
+    for note in result["notes"]:
+        print(f"note: {note}")
+    if not result["removed"]:
+        print(f"nothing to remove for {result['id']}")
         return 0
-    print(f"removed {label}:")
-    for path in removed:
+    print(f"removed {result['id']}:")
+    for path in result["removed"]:
         print(f"  {path}")
     return 0
 
@@ -600,6 +574,26 @@ def main() -> None:
         "port and the parity fixture describe the previous pin.",
     )
     parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Live terminal status display: health, destinations, queue and "
+        "current upload, refreshed in place. Keys: r refresh, c config URL, q quit.",
+    )
+    parser.add_argument(
+        "--status-url",
+        default="",
+        metavar="URL",
+        help="Bridge to watch with --status (default http://127.0.0.1:62642, or "
+        "MOKURO_BRIDGE_HOST/MOKURO_BRIDGE_PORT).",
+    )
+    parser.add_argument(
+        "--status-interval",
+        type=float,
+        default=2.0,
+        metavar="SECONDS",
+        help="Refresh interval for --status (default 2).",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -608,6 +602,9 @@ def main() -> None:
 
     if args.install_mokuro:
         raise SystemExit(_run_install_mokuro())
+    if args.status:
+        from . import status_tui
+        raise SystemExit(status_tui.main(sys.argv[1:]))
     if args.check_series_reference:
         raise SystemExit(_check_series_reference())
     if args.refresh_series_reference:
@@ -701,6 +698,7 @@ def main() -> None:
     elif fetchproxy.FETCH_PORTS > 0 and reload_on:
         print("  fetch proxy: off (UVICORN_RELOAD=1 is incompatible with extra ports)")
     print("=" * 60)
+    print(f"  dashboard:  http://{args.host}:{args.port}/      (configuration and health)")
 
     # One line when the engine is the slower upstream build or one this cannot
     # name, naming the single command that switches to the faster fork. It
