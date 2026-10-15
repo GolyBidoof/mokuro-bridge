@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.9.0
+
+### Added
+
+- **Every finalize now publishes the reader's `series.json`.** reader.mokuro.app keeps its per-series index in `<Series Title>/series.json` inside the series folder, and it only creates that file itself for a series the device already knows locally, so a library filled by a script (or by this bridge) had no index and no path to one. A local finalize writes the manifest in the same transaction as the volume files, and a remote finalize creates or updates it at the destination once the volume files have landed. A second volume is merged in without disturbing the entries the first published, the destination's existing manifest is read back first, and the file is left byte-identical when the volume is already listed.
+- `--check-series-reference` re-fetches the upstream files that define the format and reports whether the pin still matches and whether upstream has moved (exit 0 matching and current, 1 upstream moved, 2 the check could not run). `--refresh-series-reference` re-pins them. Nothing is fetched at upload time or at startup.
+- Providers gained a `download` capability, used only to read an existing `series.json` before merging into it, and `overwrite=replace` for a file the caller regenerates from local state: MEGA deletes and re-uploads under the same name instead of leaving a `series.json.replace-xxxx` sibling that no reader reads.
+- [docs/series-json.md](docs/series-json.md) documents the format, the merge rules and the pin.
+
+### Design notes
+
+- The format belongs to Gnathonic's mokuro-reader (GPL-3.0), so nothing is vendored into this MIT project. `mokuro_bridge/data/series_json_pin.json` pins the repository, commit and per-file SHA-256 of every upstream file that creates the file, `mokuro_bridge/series_json.py` ports that contract, and the port is checked against a parity fixture probed from the pinned upstream implementation.
+- The bridge publishes no series facts, so it never writes the current time into `updated_at`: its files carry the epoch sentinel, which loses every facts comparison and cannot outrank or strand a real link on another device.
+- A `series.json` the bridge could not read is never overwritten, and the finalize reports `partial_upload` in that case rather than success, because a folder without an index is a series the reader cannot build.
+
+### Fixed
+
+- **A local finalize that saved the volume files but not the index reported success.** A destination without `series.json` is invisible in the reader, so the manifest step now counts toward the finalize's success and the working files are kept when it fails.
+
 ## v0.8.1
 
 ### Fixed
