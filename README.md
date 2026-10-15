@@ -36,6 +36,10 @@ The output is always the same files, under a per-series folder:
 
 A volume folder keeps a clean name unless that name is genuinely taken, in which case the bridge adds a short random suffix (`<volume>_a1b2c3`) so two different volumes never share a directory.
 
+<!-- Dashboard screenshot for the README. Add docs/images/dashboard.png and drop the comment markers.
+![mokuro-bridge dashboard](docs/images/dashboard.png)
+-->
+
 ## Where it converges with the other two
 
 dokuha-cli hands over a folder of finished pages with `--mokuro`. dokuha-userscript streams each captured page to the bridge as it downloads, so OCR overlaps the capture. Both end at the same `POST /session/{id}/finalize`, which assembles the volume files and the series index, uploads them and reports progress as NDJSON on the same connection.
@@ -46,7 +50,8 @@ The three projects are documented together under [docs/clients.md](docs/clients.
 
 - **Store-agnostic.** The bridge knows nothing about any store, so a storefront redesign cannot break OCR or delivery.
 - **OCR runs as pages arrive**, in chunks of 8 with an idle flush after 1.5 s, so a long volume is not a capture followed by a separate wait.
-- **Twelve HTTP routes** cover capture, resume, status, queue, health and destination checks; the full table is in [docs/endpoints.md](docs/endpoints.md).
+- **A configuration dashboard and a terminal status display.** The bridge serves its own page at its address (health, destinations, folder browsing, settings), and `mokuro-bridge --status` draws the same picture in a terminal for a service running in the background. See [docs/dashboard.md](docs/dashboard.md).
+- **Twenty-one HTTP routes** cover capture, resume, status, queue, health, destination checks and configuration; the full table is in [docs/endpoints.md](docs/endpoints.md).
 - **Named destinations.** Each provider can hold several accounts (`mega`, `mega:work`, `drive:personal`), each with its own remote root and credentials. See [docs/destinations.md](docs/destinations.md).
 - **A sticky default.** Once any client names a destination explicitly, that choice becomes the default for every later request, including from other clients, until another explicit choice replaces it.
 - **A page-fetch accelerator for the browser companion.** A browser allows six connections per origin, and the port is part of the origin, so the bridge opens 48 extra localhost ports by default and lists them on `/health`. Each is worth six more sockets, so the userscript gets 288 extra lanes with nothing to configure.
@@ -109,6 +114,12 @@ mokuro-bridge --setup-upload mega
 mokuro-bridge --list-uploads
 ```
 
+Everything after that is clickable. The service prints its dashboard address at startup, and `mokuro-bridge --status` draws the same health, destinations and progress in a terminal for when the service runs in the background:
+
+```bash
+mokuro-bridge --status          # live view; r refresh, c dashboard URL, q quit
+```
+
 On macOS, `./install-launchd.sh` installs a launchd agent that starts the bridge at login. When a newer release exists, the service logs one line about it at startup, and `mokuro-bridge --check-update` reports it without changing anything (exit 0 up to date, 1 update available, 2 check failed). `mokuro-bridge --update` is the one command that acts: it detects whether this copy came from pipx, `uv tool`, a plain pip install or a git checkout, prints the exact upgrade command, runs it and prints how to restart the service. Nothing restarts by itself, because a restart mid-OCR loses work.
 
 The `series.json` format is upstream's, so the bridge pins it. `mokuro-bridge --check-series-reference` re-fetches the pinned files and reports whether they still match (exit 0 matching and current, 1 upstream moved, 2 check failed), and `mokuro-bridge --refresh-series-reference` re-pins them.
@@ -119,6 +130,7 @@ The bridge is unauthenticated and binds to `127.0.0.1`, which is the whole acces
 
 | | |
 | --- | --- |
+| [docs/dashboard.md](docs/dashboard.md) | The configuration dashboard, the terminal status display, settings precedence and the origin gate |
 | [docs/series-json.md](docs/series-json.md) | The `series.json` sidecar: its format, why the uploader writes it, and the pin on upstream |
 | [docs/endpoints.md](docs/endpoints.md) | Every HTTP route: method, path, form fields, response shape, error codes and test coverage |
 | [docs/destinations.md](docs/destinations.md) | Upload targets, named accounts, credential stores and the sticky default |
@@ -133,7 +145,7 @@ The bridge is unauthenticated and binds to `127.0.0.1`, which is the whole acces
 
 ```bash
 pip install -r requirements-dev.txt
-python3 -m pytest        # 364 tests, about 10s, hermetic
+python3 -m pytest        # 440 tests, about 11s, hermetic
 python3 -m ruff check .
 ```
 

@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.10.0
+
+### Added
+
+- **A configuration dashboard served by the bridge.** `GET /` is one self-contained page: inline CSS and JavaScript, no external assets, no CDN, so it works offline and screenshots cleanly for a README. It shows the live status pill, cards for the engine, the OCR queue, sessions, the proxy ports and the update state, every destination with its credentials source and folder, and every configurable setting with its current source. From it you can browse a provider's real folder tree to choose an account's default upload directory, set the default destination, choose the default local output folder, create that folder, and remove an account. See [docs/dashboard.md](docs/dashboard.md).
+- **`mokuro-bridge --status`**: a self-refreshing full-screen terminal display for a service running in the background, showing the engine, destinations (the default starred), the OCR queue, the current upload with a progress bar, the proxy ports and what the bridge is doing right now. Keys are `r` refresh, `c` dashboard URL, `q` quit; piped output is a single frame with no escape sequences, and the terminal is restored on exit and on Ctrl-C.
+- **Providers gained a `list_folders` capability**, read-only and capped, so the wizard can browse MEGA (`megatools ls`, parsed against the node-type column), Google Drive (`files.list`) and OneDrive (children) without creating anything. Local browsing lists directories only, and only under the same roots the ingest guard already allows.
+- **A settings file the wizard writes**, `~/.config/mokuro-bridge/settings.json` (`MOKURO_BRIDGE_SETTINGS_FILE`). Proxy port count, fetch concurrency, the default output folder, extra read roots, the OCR chunk size and idle flush, and the minimum page count for a remote upload are editable from the page and apply on the next start. Precedence is environment, then file, then built-in default, so an existing launchd plist or shell export keeps winning, and the page names each value's source.
+- `/health` now reports each upload method's `current_folder`, so a client can show where a target writes without a second request.
+
+### Changed
+
+- `--remove-upload` and the dashboard's Remove button share one implementation (`providers.forget_account`), so they cannot disagree about what removing an account deletes. The provider error redactor moved to `providers/base.py` for the same reason.
+
+### Security notes
+
+- Configuration writes are refused with `403` unless the request carries a loopback `Origin` or none at all. The bridge is unauthenticated and `CORS_ORIGINS` defaults to `*`, so any page in a browser can already reach it; this keeps a hostile page from repointing an upload destination or removing an account. Reads are not gated, so monitoring still works.
+- Local folder browsing is confined to the ingest roots (home, the system temp locations, and any configured extra roots) and refuses anything else with `400`.
+- An account whose credentials are not working cannot be made the default: the endpoint answers `409` instead of reporting success for a change the sticky-default writer would silently refuse.
+
 ## v0.9.0
 
 ### Added

@@ -1,6 +1,6 @@
 # HTTP endpoints
 
-The bridge exposes twelve routes, all on the same loopback server (default `http://127.0.0.1:62642`). There is no authentication: binding to `127.0.0.1` is the entire access control, and every route is meant to be reachable only from the machine that runs it. Request bodies are `application/x-www-form-urlencoded` except where a file upload is noted. The upload body limit is 100 MiB for pages and covers.
+The bridge exposes twenty-one routes, all on the same loopback server (default `http://127.0.0.1:62642`). There is no authentication: binding to `127.0.0.1` is the entire access control, and every route is meant to be reachable only from the machine that runs it. Request bodies are `application/x-www-form-urlencoded` except where a file upload or JSON body is noted. The upload body limit is 100 MiB for pages and covers.
 
 The routes the capture loop needs are `POST /session/start`, `POST /session/{id}/page` (or `POST /session/{id}/page-local`) and `POST /session/{id}/finalize`. Everything else exists so a client does not have to guess or repeat work.
 
@@ -135,8 +135,27 @@ Answers, read-only, whether a finished CBZ is already at a destination, so a cli
 
 Response `200` is `{method, title, file, exists}`, plus `remote_dir` for a remote destination. For `local` it stats the finished `.cbz`; for a remote account it walks folders. Errors: `400` for an unknown or unconfigured destination, `422` when `title` is missing, and `502` when the provider check fails. Provider failures are redacted, because Graph and Drive errors embed a request URL that carries an access token. Covered by `tests/test_endpoints.py`.
 
-## GET /queue
+## The configuration dashboard
 
+`GET /` serves one self-contained HTML page (inline CSS and JavaScript, no external assets) that shows the bridge's health and edits its destinations, default folders and settings. It is documented for users in [dashboard.md](dashboard.md); the routes it calls are here.
+
+Every write below is refused with `403` when the request carries an `Origin` header that is not loopback (`127.0.0.1`, `localhost` or `[::1]`, any port). A request with no `Origin` at all, which is what curl and the CLI send, is accepted. Reads are not gated.
+
+| Route | Body | Answer |
+| --- | --- | --- |
+| `GET /` | none | `200` with the page, `500` when the packaged page is missing |
+| `GET /config` | none | `200` with every upload method (`id`, `name`, `configured`, `default`, `provider`, `account`, `label`, `root`, `creds_source`, `current_folder`, provider extras), the default method, the local output folder, the settings snapshot, the work/accounts/settings paths and the platform's restart command |
+| `GET /config/browse` | query: `method`, `path` | `200` with `{path, parent, entries, truncated}` and, for a remote method, `root`. Local browsing lists directories only and only under the ingest roots, so a path outside them is `400`. A provider failure is `502` with the error redacted |
+| `POST /config/account` | `method`, `root`, `label` | `200 {ok, method, root}`; `400` for an unknown provider, a non-portable root or an invalid label; `404` for an account that does not exist yet |
+| `POST /config/default` | `method` | `200 {ok, default_method}`; `400` for an unknown target; `404` for an unknown destination; `409` when the destination has no working credentials yet, because an unconfigured account is never made the default |
+| `POST /config/local-output` | `path` | `200 {ok, local_output}`; `400` for a path outside the allowed roots or one that cannot be created |
+| `POST /config/new-folder` | `parent`, `name` | `200 {ok, path}`; `400` for a nested or hidden name, or a name that is not a folder |
+| `POST /config/settings` | JSON object of env name to value | `200 {ok, saved, settings, restart_command}`, or `400 {ok: false, problems}` with every rejected value named. Nothing is written when any value is rejected |
+| `POST /config/forget` | `method` | `200 {ok, id, removed, notes}`; `400` for `local` or a malformed target. Removes the account's metadata, its secret files and its keychain item, the same work as `--remove-upload` |
+
+Covered by `tests/test_config_api.py`, including the origin gate, the local-root boundary, the credential check on the default, and the redaction of a provider failure.
+
+## GET /queue
 Read-only OCR queue metrics for backpressure monitoring, with session ids and numeric counts only. Response `200` is the `ocr_queue_metrics()` snapshot: `scheduler` (`round_robin` or `fifo`), `queue_depth`, `processing_depth`, `total_depth`, `per_session` rows, `active_batch_sessions`, `active_sessions`, `source_ingesting_sessions` and a `worker` object with `started`, `alive`, `state` and `model_loaded`. Covered by `tests/test_ocr_scheduling.py`.
 
 ## GET /health

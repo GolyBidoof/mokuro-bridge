@@ -21,6 +21,8 @@ Each destination receives the same four files under a per-series folder: `<volum
 
 The remote collision policy is chosen per finalize with `overwrite`: `fail` (the default) errors on an existing destination file, `skip` treats an existing file as success, and `overwrite` deletes and re-uploads. `series.json` is not governed by that flag: the bridge updates it in place, because a manifest under a new name is a manifest no reader reads.
 
+The remote root of each account is editable from the configuration dashboard, which browses the provider's own folder tree and can set any folder as that account's default upload directory. See [dashboard.md](dashboard.md).
+
 ## How accounts are named
 
 Every provider can hold more than one account. An account is addressed by a *method id*:
