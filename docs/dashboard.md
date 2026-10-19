@@ -74,7 +74,7 @@ Each provider can hold any number of accounts, each with its own alias, folder, 
 - **Reconnect** appears when an account's saved sign-in has expired. It runs the provider's sign-in flow again with the same alias and keeps the account's folder, note and default.
 - **Rename** changes the alias and the note. Root, credentials and the default flag are preserved, and if the account was the default the sticky default follows the new alias. An alias already used by another account is refused.
 - **Remove** deletes the saved sign-in and the account metadata. Files already uploaded are untouched and the local folder is never touched. If the removed account was the default, the sticky default is cleared and the bridge falls back to its configured seed, which is the local destination unless `MOKURO_BRIDGE_UPLOAD_DEFAULT` names another target.
-- **Copy id** copies `upload_method=<alias>`, which is the value a dokuha script passes to select that account.
+- **Copy id** copies `upload_method=<alias>`, which is the value a client passes to select that account.
 
 The page shows provider links for the account you are editing and for the setup consoles, so a missing app registration or OAuth client can be created without leaving the docs.
 

@@ -52,6 +52,14 @@ Comma-separated, absolute paths only. A relative entry is ignored rather than re
 
 **MEGA upload fails with `ENOENT` after a successful wizard run.** A v0.6.0 keychain bug, where a stale entry for an older address shadowed the working one. Upgrade.
 
+## Clients and integration
+
+**A client sees a finalize stream that ends without `done`.** That is a truncated upload, not a success: the connection dropped before the bridge finished delivering. Call finalize on the same session again, with `overwrite` set when the destination may already hold some of the files. The bridge is idempotent for files whose bytes match. [integrating.md](integrating.md) has the retry rules.
+
+**A mokuro-bunko destination reports three files in `done.uploads` and `series_json` with `external: true`.** That is expected: Bunko compiles `series.json` and the catalog itself, so the bridge uploads the volume files only. Nothing is missing from the delivery. See [bunko.md](bunko.md).
+
+**A third-party client is unsure what to read from the finalize stream.** Parse one JSON object per line and dispatch on `stage`, treat `done` as required, and total the per-file `uploads[].size` for what landed. [integrating.md](integrating.md) documents every frame.
+
 ## Dashboard and accounts
 
 **The dashboard does not load, or loads with empty panels.** The page is a small JavaScript app: it reads `/health` and `/config` after loading. Check those two endpoints first (`curl -s http://127.0.0.1:62642/health`, then `/config`). A `500` saying `dashboard page missing` means the packaged page is not installed, so reinstall the package or restore `mokuro_bridge/web/dashboard.html`. The page is served from disk on every request with no cache, so a normal reload picks up a new build without restarting the service. If JavaScript is disabled, `/health` and `mokuro-bridge --status` show the same state without the page.
@@ -115,6 +123,8 @@ launchctl kickstart -k gui/$(id -u)/com.mokuro-bridge
 ```
 
 **A volume uploaded by a script never appears in reader.mokuro.app.** The reader needs the per-series `series.json` beside the volume files, and it only writes that file itself for a series the device already knows locally. Check the series folder at the destination for `series.json`: if it is absent, the upload did not come from this bridge (or came from a release before v0.9.0, which did not write one). Re-finalize the volume to the same destination and the bridge creates it, or merges the volume into an existing one. A finalize that reports `partial_upload` with a `series.json` error in the message saved the volume files but not the index, which is why the reader shows nothing; the reason is in the frame, and the most common ones are a destination the bridge could not read (it refuses to overwrite a manifest it cannot read) and a provider that rejected the upload.
+
+**mokuro-bunko logs `METADATA skipped unwritable catalog.json error=conflict: catalog.json: the compile base is neither Bunko's own version nor a submitted one`.** The library already had a `catalog.json` that Bunko did not write, so Bunko refuses to compile over it; because its marker is fresh, the bridge has already stopped writing `series.json` for that destination, and the reader's catalog never gains the new series. Back up `catalog.json` at the destination, delete that one file, and wait for Bunko's next pass to adopt the library and compile a fresh catalog. The exact steps, the log lines to expect and the `series_owner` alternatives are in [bunko.md](bunko.md#taking-over-an-existing-library).
 
 **Has the series.json format changed upstream?** Run `mokuro-bridge --check-series-reference`: exit 0 means the pinned bytes still match and neither repository has moved, 1 means upstream moved, 2 means the check could not run. Nothing breaks until the format itself changes, and the service never checks on its own. See [series-json.md](series-json.md).
 

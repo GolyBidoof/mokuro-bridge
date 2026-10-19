@@ -1,6 +1,6 @@
 # The mokuro fork
 
-mokuro-bridge drives whichever `mokuro` is installed in its own Python environment. Two engines exist:
+mokuro-bridge drives whichever `mokuro` is installed in its own Python environment, and the choice belongs to that environment rather than to the bridge. Two engines exist:
 
 - **upstream**, kha-white's PyPI package, installed with `pip install mokuro`
 - **the fork**, [GolyBidoof/mokuro](https://github.com/GolyBidoof/mokuro), a performance fork of it, installed from its `v0.4.0` release

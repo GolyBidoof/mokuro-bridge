@@ -517,6 +517,140 @@ def _json_or_error(response, what: str) -> dict:
     return body if isinstance(body, dict) else {}
 
 
+def _control_restarted(error: BaseException) -> bool:
+    """Whether a control call failed because Bunko moved, not because it answered.
+
+    `library connect` can make Bunko restart itself; the replacement rewrites
+    `storage/.control.json` with a new control port, so a client built from the
+    old file raises a transport error rather than returning an HTTP status.
+    """
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover - httpx is a base dependency
+        httpx = None  # type: ignore[assignment]
+    if httpx is not None and isinstance(error, httpx.TransportError):
+        return True
+    return isinstance(error, (ConnectionError, TimeoutError))
+
+
+class _ControlClient:
+    """Bunko's control client, re-resolved when Bunko restarts itself.
+
+    Every call retries through a fresh `.control.json` read on a transport
+    error, bounded by the caller's timeout. Without this a rerun of
+    `--setup-bunko` died with `httpx.ConnectError: [Errno 61] Connection
+    refused` while a healthy Bunko was listening on the new control port and
+    `state.json` still named the dead pid.
+    """
+
+    def __init__(
+        self,
+        storage: Path,
+        client_factory=None,
+        *,
+        timeout: float = 60.0,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._storage = Path(storage)
+        self._factory = client_factory
+        self._timeout = timeout
+        self._sleep = sleep
+        self._client = None
+        self._control: dict = {}
+        self._connect(time.monotonic() + timeout)
+
+    @property
+    def control(self) -> dict:
+        return dict(self._control)
+
+    def _connect(self, deadline: float) -> None:
+        self._close()
+        remaining = max(1.0, deadline - time.monotonic())
+        self._control = wait_for_control(self._storage, timeout=remaining)
+        self._client = _control_client(self._control, self._factory)
+
+    def _close(self) -> None:
+        client, self._client = self._client, None
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    def _call(self, method: str, *args, **kwargs):
+        deadline = time.monotonic() + self._timeout
+        while True:
+            try:
+                return getattr(self._client, method)(*args, **kwargs)
+            except Exception as error:
+                if time.monotonic() >= deadline or not _control_restarted(error):
+                    raise
+                self._sleep(0.5)
+                self._connect(deadline)
+
+    def get(self, *args, **kwargs):
+        return self._call("get", *args, **kwargs)
+
+    def post(self, *args, **kwargs):
+        return self._call("post", *args, **kwargs)
+
+    def close(self) -> None:
+        self._close()
+
+
+def _pid_on_port(port: int) -> int:
+    """The pid listening on one loopback port, or 0 when it cannot be learned."""
+    if not port:
+        return 0
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    for token in (result.stdout or "").split():
+        try:
+            pid = int(token)
+        except ValueError:
+            continue
+        if _pid_alive(pid):
+            return pid
+    return 0
+
+
+def server_running(state: Optional[AgentState]) -> bool:
+    """Whether Bunko answers, even when the recorded pid is stale.
+
+    A restart leaves `state.pid` pointing at the dead process while the
+    replacement owns the same web port and writes a fresh `.control.json`.
+    Probing that control port keeps `--bunko-status`, autostart and a setup
+    rerun from reporting "stopped" and starting a second instance over the same
+    library.
+    """
+    if state is None:
+        return False
+    if _pid_alive(state.pid):
+        return True
+    control = control_file(Path(state.storage))
+    if not control:
+        return False
+    try:
+        port = int(control.get("port") or 0)
+    except (TypeError, ValueError):
+        return False
+    if port <= 0:
+        return False
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 def connect_payload(state: AgentState, *, totp: Optional[str] = None) -> dict:
     """Build Bunko's `/app/api/library/connect` body for the bridge's account."""
     provider = _PROVIDER_BACKEND.get(method_provider(state.method) or "")
@@ -625,7 +759,7 @@ def finish_connect(
 
 
 def start_server(state: AgentState, *, runner: Callable[..., subprocess.Popen] = subprocess.Popen) -> AgentState:
-    if _pid_alive(state.pid):
+    if server_running(state):
         return state
     log = Path(state.log)
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -653,8 +787,8 @@ def start_server(state: AgentState, *, runner: Callable[..., subprocess.Popen] =
 
 
 def stop_server(state: AgentState, *, timeout: float = 10.0) -> None:
-    pid = state.pid
-    if not _pid_alive(pid):
+    pid = state.pid if _pid_alive(state.pid) else _pid_on_port(state.port)
+    if not pid:
         state.pid = 0
         return
     try:
@@ -677,13 +811,13 @@ def status_line(state: Optional[AgentState] = None) -> str:
     state = state or load_state()
     if state is None:
         return "mokuro-bunko: not configured (run mokuro-bridge --setup-bunko)"
-    running = _pid_alive(state.pid)
+    running = server_running(state)
     parts = [
         f"mokuro-bunko: {'running' if running else 'stopped'}",
         f"backend {state.backend}",
         f"folder {state.folder}",
     ]
-    if state.pid:
+    if state.pid and _pid_alive(state.pid):
         parts.append(f"pid {state.pid}")
     if state.connected_at:
         parts.append(f"connected {state.connected_at}")
@@ -756,12 +890,15 @@ def setup(
     ensure_admin(state, runner=install_runner)
     log(f"Starting mokuro-bunko on 127.0.0.1:{port} (log: {state.log})…")
     state = start_server(state, runner=start_runner)
-    control = wait_for_control(storage_dir())
-    client = _control_client(control, client_factory=client_factory)
+    client = _ControlClient(storage_dir(), client_factory)
     try:
         log(f"Connecting mokuro-bunko to {backend} ({method})…")
         finish_connect(client, payload=payload, create=create, on_state=_print_connect_state(log))
         state.connected_at = _now()
+        if not _pid_alive(state.pid):
+            # `library connect` can restart Bunko; the replacement keeps the
+            # configured web port while the pid from start_server is dead.
+            state.pid = _pid_on_port(state.port) or 0
         state.save()
     finally:
         close = getattr(client, "close", None)
@@ -874,8 +1011,8 @@ def _stop_strays(*, log: Callable[[str], None] = print) -> None:
 def repoint(method: Optional[str] = None, *, log: Callable[[str], None] = print) -> AgentState:
     """Stop the running instance, release its library, and use another destination."""
     state = load_state()
-    if state is not None and _pid_alive(state.pid):
-        log(f"stopping the running Bunko (pid {state.pid})")
+    if state is not None and server_running(state):
+        log(f"stopping the running Bunko (pid {state.pid or 'unknown'})")
         stop_server(state)
     _stop_strays(log=log)
     if state is not None:
@@ -933,7 +1070,7 @@ def sync_info() -> dict:
         "default_method": default,
         "in_sync": bool(state is not None and configured == default),
         "installed": state is not None,
-        "running": bool(state is not None and _pid_alive(state.pid)),
+        "running": server_running(state),
         "backend": state.backend if state is not None else "",
         "folder": state.folder if state is not None else "",
         "needs_sign_in": provider in ("drive", "onedrive"),
@@ -946,8 +1083,8 @@ def uninstall(*, log: Callable[[str], None] = print) -> bool:
     import shutil
 
     state = load_state()
-    if state is not None and _pid_alive(state.pid):
-        log(f"stopping mokuro-bunko (pid {state.pid})")
+    if state is not None and server_running(state):
+        log(f"stopping mokuro-bunko (pid {state.pid or 'unknown'})")
         try:
             stop_server(state)
         except Exception:
@@ -965,7 +1102,7 @@ def ensure_running(*, log: Callable[[str], None] = print) -> Optional[AgentState
     state = load_state()
     if state is None:
         return None
-    if _pid_alive(state.pid):
+    if server_running(state):
         return state
     if not Path(state.binary).is_file():
         return state
@@ -993,7 +1130,7 @@ def update(
     info = install(log=log, runner=install_runner)
     changed = info.commit != before
     if state is not None and changed:
-        was_running = _pid_alive(state.pid)
+        was_running = server_running(state)
         if was_running:
             stop_server(state)
         state.binary = info.binary

@@ -1,8 +1,8 @@
 # The series.json sidecar
 
-reader.mokuro.app keeps one index per series in a file called `series.json`, inside the series folder, beside the volume files. The bridge writes it on every finalize, so a library delivered by the bridge or by a scrape script is visible in the reader without importing anything by hand.
+reader.mokuro.app keeps one index per series in a file called `series.json`, inside the series folder, beside the volume files. The bridge writes it on every finalize, so a library delivered by the bridge or by a script is visible in the reader without importing anything by hand.
 
-This document covers the format, why the uploader has to write it, and the pin that keeps this project's writer honest about a format it does not own.
+This document covers the format, why the uploader has to write it, and the pin that keeps this project's writer honest about a format it does not own. A destination managed by mokuro-bunko is the exception: Bunko compiles `series.json` and the root `catalog.json` itself, and the bridge uploads only the volume files; see [bunko.md](bunko.md).
 
 ## What the file is
 

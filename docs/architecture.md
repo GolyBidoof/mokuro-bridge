@@ -1,160 +1,165 @@
 # How mokuro-bridge is put together
 
-This is the explanation a maintainer needs. For what it does and why you would want it, read the [README](../README.md). The route-by-route contract is in [endpoints.md](endpoints.md), the destination and account model is in [destinations.md](destinations.md), and the client hand-off is in [clients.md](clients.md).
+This is the maintainer's view: what the process is, how a volume moves through it, and where the seams are. For what the service does and how to run it, read the [README](../README.md). The HTTP contract is [endpoints.md](endpoints.md), the client-facing protocol is [clients.md](clients.md) and [integrating.md](integrating.md), and the destination model is [destinations.md](destinations.md).
 
-## The boundary
+## The service
 
-The bridge is deliberately ignorant of storefronts. It holds no store account, no cookie, no store protocol, and no store code. A capture client gets page images out of a store however it likes and POSTs them here; the bridge's entire job begins at the image.
+mokuro-bridge is one Python process running a FastAPI application on uvicorn, bound to loopback by default. It owns no storefront account, cookie or store protocol: the work begins with a page image and ends with a delivered volume. That boundary is deliberate, because it means a store redesign cannot break OCR or delivery, and any program that can produce an image can use the service.
 
-That boundary is the load-bearing design decision. It means the bridge does not break when a store changes, does not need legal review per store, and can be reused by any client that can produce a JPEG. The cost is that it cannot help a client get the images, which is why the half that does is a separate project.
+The base install is small (`fastapi`, `uvicorn`, `python-multipart`, `httpx`, `keyring`). The OCR engine is optional because it brings PyTorch, and each native cloud provider has its own optional dependency. All of them are detected at runtime, so a base install still starts, answers `/health` and accepts capture; only OCR or the affected destination is unavailable.
 
-## The request lifecycle
+The application has twelve capture routes in `api.py` and the dashboard's configuration API in `config_api.py`. Both are mounted on the same app, so a client sees one origin and one port.
 
-The capture loop is three endpoints, and a client that uses them does OCR correctly:
+## The request path and its four lanes
 
-```
-POST /session/start          title, reuse_existing        -> a session id
-POST /session/{id}/page      one page image, filename      -> stored, queued
-POST /session/{id}/finalize  upload_method, ...            -> NDJSON progress, then done
-```
+Every blocking call the routes need runs on one of four bounded thread pools in `lanes.py`. They exist because the original design used the event loop's single shared executor, and a batch of finalizing volumes filled it with long-lived work: threads polling OCR, threads waiting on a global assembly lock, threads uploading for minutes. `/health` and `/session/start` then queued behind them and a client timed out.
 
-Around that loop are nine more routes, twelve in total:
+| Lane | Work it carries | Default workers |
+| --- | --- | --- |
+| `control` | Short bookkeeping on the request path: session lookup, destination resolution, the upload-method registry | 4 |
+| `data` | Page bytes: writes, hashing, copies and source-directory sync | 8 |
+| `finalize` | Per-volume assembly and packing, which are CPU-bound and can take seconds | 4 |
+| `upload` | Provider uploads, the early cover push and the series manifest, the longest-running work | 8 |
 
-```
-POST /session/resume              hand over a folder of pages already on disk
-POST /session/{id}/page-local     ingest one page from a path on this machine
-POST /session/{id}/cover          attach and push the cover before OCR finishes
-GET  /session/{id}/status         poll one session's counters
-GET  /sessions                    sessions worth resuming, after a restart
-GET  /upload-methods              configured targets and the current default
-POST /destination/check           is this volume already at the destination?
-GET  /queue                       OCR queue depth, overall and per session
-GET  /health                      version, engine, targets, queue, update state
-```
+Each lane is a plain `ThreadPoolExecutor`, overridable with `MOKURO_BRIDGE_CONTROL_THREADS`, `MOKURO_BRIDGE_DATA_THREADS`, `MOKURO_BRIDGE_FINALIZE_THREADS` and `MOKURO_BRIDGE_UPLOAD_THREADS`. `/health` reports `lanes` with each pool's worker count and backlog, so a stall names the lane that is behind instead of appearing as one slow route. The single OCR worker thread is a separate dedicated lane, not an executor.
 
-Those twelve routes are the capture API. The dashboard's own routes live in `config_api.py` and are documented in [endpoints.md](endpoints.md).
+## Sessions and their lifecycle
 
-`POST /session/resume` hands over a folder of pages that already exist on disk instead of uploading them. Clients prefer the resume route when the bridge is on the same machine, since a local bridge can read the folder directly and the pages never cross a socket.
+A session is one volume in progress. It has a session id, the title the client supplied, a sanitized title that becomes the working directory name, and a working directory under the work dir (`~/mokuro-input` by default, `MOKURO_BRIDGE_WORK_DIR`). The last segment of a volume title is not always unique, so the bridge asks whether the target directory is taken before it creates it; when it is, the volume keeps the clean title with a short random suffix such as `_a1b2c3`.
 
-`POST /destination/check` is read-only in both directions: for `local` it stats the finished `.cbz`, and for a remote account it walks folders to ask whether the file is there, without creating a folder or uploading a byte. Its failures are redacted the same way finalize's are, because provider errors embed the request URL and that URL carries an access token.
+A session carries the received pages, the pages OCR has completed, the pages that failed, a per-page reservation set for in-flight ingests, and the mapping from page number to filename. The page number is the identity: a client that changes its naming scheme mid-volume cannot silently double the page count, because re-sending page 12 under a new name replaces the file the old name held.
 
-`GET /session/{id}/status` and `GET /sessions` return the same session snapshot. It carries `ingesting` and `finalizing` alongside the page counters, so a client can tell "pages are still arriving" from "the volume is being packaged" instead of inferring it from a counter that has stopped moving.
+Session state is persisted as one JSON file per session under `<work dir>/.bridge_sessions`, written atomically with private permissions. `GET /sessions` restores persisted records on demand, so a bridge restart does not lose a volume in flight, and a client can reconnect to what it had started. A finished session is removed from memory and from disk after its state is final.
 
-**Pages are OCR'd as they arrive**, in chunked batches, so capture and recognition overlap instead of running back to back. A 250-page volume is not a 250-page wait followed by an OCR pass; the OCR worker is already busy on page 40 while page 200 is still uploading.
+The lifecycle is:
 
-**`finalize` is a stream, not a request.** It answers `application/x-ndjson`: one JSON frame per event, at least every 750 ms while the OCR queue drains and one per file during an upload. The client reads progress off the same connection that is doing the work, which removes the polling loop that would otherwise compete with it for the same bridge. A frame with `stage: "error"` is a terminal failure and must be raised, not ignored: a stream that simply ends without a `done` frame is a truncated upload and both bundled clients treat it as an error rather than success.
+1. `POST /session/start` creates a session, or `POST /session/resume` reopens one for a folder of pages already on disk and queues the pages whose OCR cache is missing. Both accept a title; the resume route also accepts a `source_dir` for the folder hand-off.
+2. `POST /session/{id}/page` stores one uploaded image and queues it for OCR, and `POST /session/{id}/page-local` copies one image from a path on this machine. Both are idempotent for identical bytes and refuse conflicting ones.
+3. `POST /session/{id}/cover` attaches a cover early, so a destination that is slow to accept the cover has it before the volume is ready.
+4. `POST /session/{id}/finalize` owns the rest: it waits for OCR, assembles, packs, publishes the index, delivers, and reports every step on an NDJSON stream. The route takes a non-blocking cross-process lease per session, so two finalizes for one volume cannot both run; the loser answers `409`.
+5. After a successful finalize the working files are removed when `delete_after_upload` is true, and the session is finalized and cleaned up. A failed post-commit step marks the session retryable rather than leaving a finalized ghost.
 
-## Sessions
+`GET /session/{id}/status` returns the same snapshot as `GET /sessions`. The snapshot carries `ingesting` and `finalizing` beside the counters, so a client can distinguish pages still arriving from the volume being packaged without inferring it from a counter that stopped moving.
 
-Each volume is a session with its own working directory under the work dir, holding the received pages, the OCR state and the assembled artefacts. Session state is persisted, so a bridge restart does not lose a volume in flight, and `GET /sessions` restores those persisted records on demand.
+## The OCR worker and its cache
 
-A finished session's working files are removed. Remote uploads stage inside the session's own directory first, and that staging is what wedged a re-finalize in 0.6.0: the ingest walk rejects images in subdirectories, so the leftovers made every later attempt fail too. It is now cleared on the next attempt.
+`ocr.py` holds one OCR worker thread, a queue and an engine abstraction. Pages are grouped into chunks (`OCR_CHUNK_SIZE`, default 8) and flushed early after an idle interval (`OCR_IDLE_FLUSH_S`, default 1.5 s). The worker takes up to `OCR_BATCH_SIZE` pages per pass, defaulting to `max(OCR_CHUNK_SIZE, 32)`, so the engine stays busy across volumes. With several volumes queued, the fair selector gives each active session a turn and caps finalize work at a share of a mixed batch (`MOKURO_BRIDGE_OCR_FINALIZE_PRIORITY`, default 0.5), so one volume finishing does not starve the others. Setting `MOKURO_BRIDGE_OCR_FAIR_SCHEDULING=0` restores the historical first-in-first-out selector. `GET /queue` exposes the resulting depths, worker state and per-session counts.
 
-Volume identity is the title, and titles carry edition suffixes (`（２）`, `1巻`, `【電子限定…】`, an imprint). `series_title_from_volume` strips a trailing tag so that one series does not split across four folders by edition. The check that gives a fresh volume its own directory happens before the directory is created: ask afterwards and it is always true, every volume gets a random suffix, and the later `reuse_existing` lookup cannot find it. A volume therefore keeps the clean title unless that name is genuinely taken, in which case the bridge adds a short random suffix such as `_a1b2c3`.
+OCR results are cached per page, as JSON under `<work dir>/_ocr/<volume>/<page>.json`. The cache is keyed to the page's bytes: a page whose bytes changed loses its cached result, and the cache is validated before assembly instead of being trusted. That cache is why re-sending a page, resuming a volume or finalizing after a crash does not redo recognition. Deleting the work volume's `_ocr` directory is the supported way to force recognition again.
 
-## OCR and scheduling
+The engine is detected at runtime, not from the version string. The bridge supports upstream `mokuro` from PyPI and the GolyBidoof fork, which exposes a batched recognition path; `/health` reports `mokuro_flavor` (`upstream`, `fork`, `absent` or `unknown`) and `mokuro_fork_api`. The fork's extra idle pipeline processes are disabled by default (`MOKURO_BRIDGE_OCR_WORKERS=0`), leaving the one worker this service manages.
 
-`ocr.py` is a bounded worker pool with a semaphore, and the model is an engine abstraction with two implementations: the stock `mokuro` package from PyPI, and a fork with a faster batch OCR API detected by introspection. The fork can come from `MOKURO_REPO`, which points at a checkout, or from installing the fork under the `mokuro` name. The engine is an optional install because it drags in PyTorch, which is several gigabytes; the bridge runs without it, `/health` reports `mokuro_installed: false`, and only OCR is unavailable.
+## Assembly and packing
 
-The fork exists because a single setting was worth about 1.8x: `num_beams` had been raised to 4 by a commit about something else entirely, costing roughly 43 ms/crop against 23.5 ms/crop at one beam. `/health` reports `mokuro_fork_api` when the batched path is active.
+Finalize waits for the OCR queue to drain, reports `wait_ocr` frames while it does, and then assembles the volume from the cached per-page results. Assembly produces the `.mokuro` file through the loaded engine's generator. Packing produces the `.cbz` from the page images and the `.webp` cover: the cover is the first `.webp` page when the client sent WebP, otherwise the first image, normalized and re-encoded. A cover that was already pushed through the cover route is reused when its digest still matches.
 
-Pages are grouped into chunks (default 8, `OCR_CHUNK_SIZE`) and flushed early after an idle interval (default 1.5 s, `OCR_IDLE_FLUSH_S`), and the worker takes up to `OCR_BATCH_SIZE` pages per pass (default `max(OCR_CHUNK_SIZE, 32)`) so the engine stays busy while another volume is being read. With several volumes queued, the default fair selector (`MOKURO_BRIDGE_OCR_FAIR_SCHEDULING`, on by default) gives each active session a turn and caps finalize work at a share of a mixed batch (`MOKURO_BRIDGE_OCR_FINALIZE_PRIORITY`, default 0.5), so one volume finishing does not starve the others. Setting the fair selector to `0` restores the historical FIFO selector. `GET /queue` exposes the resulting depths.
+Packing writes into a private temporary directory inside the destination staging area and then moves the finished files into place. A remote destination stages under `<volume>/_mega_upload`; a local destination stages directly in `<output>/<series>/`. Publishing is all or nothing per file: an existing file is backed up, replaced atomically where the filesystem allows it, and the previous copy is restored if a later step fails. A packaging run that produced an incomplete artifact fails the finalize instead of delivering a partial volume.
+
+The series folder name is derived from the volume title by stripping edition and imprint tags, so `サンプル作品（２）【電子限定特典付き】` and `サンプル作品 1巻` share one folder. The volume files keep the full volume title. `series.json` is written with the volume files for a local destination and after them for a remote one, and a destination managed by mokuro-bunko receives none of it; see [series-json.md](series-json.md) and [bunko.md](bunko.md).
+
+## The finalize stream
+
+`POST /session/{id}/finalize` answers `application/x-ndjson`, with response buffering disabled so frames arrive as they happen. Each frame is one JSON object with a `stage`, a human `message` and stage-specific fields. The order a client sees is:
+
+| Stage | When | What it means |
+| --- | --- | --- |
+| `wait_ocr` | While the queue drains, at least every 750 ms | `pages_received`, `pages_ocr_done`, `pages_ocr_pending` and `pages_ocr_failed`; the first frame also carries `ocr_chunk_size` |
+| `assemble` | Once OCR is complete | The `.mokuro` is being generated from the cached results |
+| `pack` | After assembly | The archive and cover are being written |
+| `series_json` | While the index is published | `ok` and `unchanged` on success, `ok: false` with the reason on failure, and `external: true` when mokuro-bunko owns the manifest |
+| `upload` | Per file, before and after transfer | The file being uploaded; the batch frame also names every file and its size before any bytes move |
+| `upload_progress` | During a remote transfer, throttled to about four per second | `file`, `bytes`, `total_bytes`, `current_bytes`, `percent`, `speed_bps` and `speed_human` |
+| `cleanup` | When the working files are removed | The volume has been delivered and is being cleaned up |
+| `done` | Terminal, success or partial | The final record: title, series, pages, method, paths, reader URL and the per-file `uploads` array |
+| `error` | Terminal | A failure status such as `ocr_failed`, `ocr_cache_invalid`, `persistence_error`, `finalize_error` or `cleanup_error` |
+
+A `done` frame with `status: "partial_upload"` means the volume files reached the destination but the index did not, which a client should surface rather than report as success. A stream that stops without a terminal frame is a truncated upload. The exact per-file schema is in [endpoints.md](endpoints.md); the client-side rules are in [integrating.md](integrating.md).
+
+## The provider layer
+
+`providers/` holds one module per backend: MEGA through megatools, Google Drive, OneDrive and WebDAV natively, and rclone for everything else. Each module exports a frozen `Provider` value with the same capabilities: `configured`, `creds_source`, `upload`, `remote_exists`, `download`, `list_folders`, `run_setup`, `account` and an optional `metadata_owner`. `providers/__init__.py` resolves a method id to an account, looks the provider up in a registry and dispatches. Accounts, aliases and default roots stay in `accounts.py`; a provider never enumerates accounts or parses ids. The full contract, the account view and the one-folder walk are in [destinations.md](destinations.md).
+
+The uniform overwrite policy is part of the contract: `fail` reports an existing file, `skip` treats it as success, `overwrite` replaces it and `replace` replaces it under the same name. The series manifest uses `replace`, because a manifest renamed to a sibling is a manifest no reader reads.
+
+### The rclone loopback WebDAV gateway
+
+rclone re-authenticates on every invocation, which is a problem for an account with two-factor sign-in, and mokuro-bunko has no rclone backend at all. The bridge therefore runs one `rclone serve webdav` per rclone account on `127.0.0.1`, on an ephemeral port, with a random Basic-auth pair. The bridge's own rclone transfers go through that endpoint, and mokuro-bunko is configured with the same URL, so one authenticated rclone session and one view of the folder serve both processes.
+
+The gateway's records live beside the Bunko data, in `~/Library/Application Support/mokuro-bridge/rclone` on macOS or `~/.local/share/mokuro-bridge/rclone` elsewhere (`MOKURO_BRIDGE_RCLONE_DIR`): `gateways.json` with one 0600 record per account (port, loopback username and password, pid), a bridge-owned `rclone.conf` holding the remotes that point at those ports, and one log per account. The recorded port and password survive a bridge restart so Bunko's saved URL keeps working. A gateway started in its own session also outlives the bridge. `MOKURO_BRIDGE_RCLONE_GATEWAY=0` disables the gateway; every transfer then talks to the cloud remote directly, which is the fallback when `rclone serve` cannot start.
+
+## The dashboard and the terminal display
+
+The configuration dashboard is served at `GET /` from `web/dashboard.html`, read from disk on every request with `Cache-Control: no-store`. It is one self-contained page: inline CSS and JavaScript, inline SVG icons, no external asset, no CDN and no font download, so it works offline and renders unchanged on a machine with no network. It reads live state from `/health` and configuration from `/config`, and it edits destinations and settings through the `config_api.py` routes.
+
+Configuration writes are gated to a loopback `Origin`, because the service is unauthenticated and any page in a browser can reach it. A request with a loopback `Origin`, or with no `Origin` at all (curl and the CLI), is accepted; anything else is refused with `403`. The Google Drive OAuth callback is the one exception, because it is a `GET` opened by Google's redirect, and it accepts only the one-time `state` this bridge created. Reads are not gated. No response ever returns a credential, token or client secret.
+
+The terminal display in `status_tui.py` draws the same picture from `/health` for a service running under launchd or systemd: engine and tools, destinations with the default marked, the OCR queue, the worker and pipeline state, the fetch-proxy ports, the current activity and a live upload progress bar. It re-reads the terminal size every frame, measures display width with east-asian rules, honours `NO_COLOR` and `TERM=dumb`, and prints one full-height frame with no escape sequences when piped. [dashboard.md](dashboard.md) documents both surfaces in detail.
+
+## The health snapshot
+
+`/health` is the call every client makes first, and it used to do real work on the request path: walk the OCR queue, take session locks, rebuild the destination registry and ask the keychain. Now one dedicated thread refreshes a snapshot every second, and the route returns the latest snapshot plus the cheap live fields. The response carries `health_snapshot` with `age_ms`, `interval_ms`, `stale` (true past five seconds) and `partial`, so a client can see how fresh the answer is instead of guessing. `/health` itself never performs network I/O.
+
+The snapshot is also where the capability block lives: `fetchProxyPorts`, `fetchUpstreams`, `fetchPathUpstream`, `upload_methods`, `upload_method_default`, `lanes` and the OCR counters. A client should read capabilities from there rather than assume them.
 
 ## The page-fetch accelerator
 
-This is the other half of the product, and the half that is not obvious. It is started by `cli.py` when `MOKURO_BRIDGE_FETCH_PORTS` is non-zero, with no dependency on the OCR engine being installed, so a client that only wants faster capture can run the bridge and ignore everything else.
-
-A browser allows six concurrent HTTP/1.1 connections per **origin**, and an origin is scheme + host + **port**. A store's page CDN is one host and refuses HTTP/2, so a download is pinned to six sockets no matter how fast the link is.
-
-Since the port is part of the origin, the bridge opens a range of extra localhost ports, each serving the same small proxy. The browser sees each as a fresh origin and gets six more sockets, while the bridge fetches under no browser limit at all. It binds what it can and advertises the range on `/health` as `fetchProxyPorts`; a client discovers them on its own and there is nothing to configure. The default is 48 ports (`MOKURO_BRIDGE_FETCH_PORTS`, 0 disables), so the proxy adds 288 browser sockets. `MOKURO_BRIDGE_FETCH_CONCURRENCY` caps simultaneous upstream fetches (0 means no cap), and `MOKURO_BRIDGE_FETCH_UPSTREAM` overrides the CDN being accelerated.
-
-Two consequences worth knowing:
-
-- **It costs file descriptors.** Each port holds a descriptor on each side of the bridge, so 48 ports at 6 sockets is about 600 at peak. A launchd agent starts with a soft limit of 256, and exhausting it shows up as `OSError: Too many open files` on `accept()` and ECONNRESET in the browser, with nothing pointing at a ulimit. The bridge raises `RLIMIT_NOFILE` at startup to cover it. To opt out, lower `MOKURO_BRIDGE_FETCH_PORTS` or set it to `0`.
-- **Downloading never depends on the bridge.** With the accelerator stopped, a client falls back to its own lanes. The bridge is an accelerator, not a dependency of capture.
-
-## Upload providers and accounts
-
-`providers/` holds MEGA, Google Drive, OneDrive and WebDAV, each with its dependencies kept out of the base install so a user who only writes to disk does not install an OAuth library or an HTTP client. The terminal setup wizard detects a missing dependency and offers to install it, once, with consent; the dashboard's Add destination disables that provider and names what is missing. The full model is in [destinations.md](destinations.md).
-
-**Accounts have aliases.** `mega`, `mega-2`, `drive-next`, `webdav`: each account has its own remote root, display label, credential store and alias, which is the id `/health`, `/upload-methods` and `/config` report and the value a client passes as `upload_method`. Accounts are added from the dashboard for all four providers (MEGA form, Google OAuth, Microsoft device code, WebDAV URL plus Basic credentials) or from the terminal with `--setup-upload`. Historical spellings (`mega`, `mega:work`, `drive:main`) still resolve to the same account, so existing configuration keeps working. Renaming changes only the alias; the storage name, credentials and default are preserved.
-
-**The default target is sticky.** Once any client asks for a target explicitly (`upload_method=mega`, `upload_method=local`, the legacy `upload_to_mega`), that choice is remembered in the work dir and becomes the default for every later request, including for other clients, until another explicit choice replaces it. It is deliberate, a user who sets a destination once should not have to set it every run, but it means one client's one-off `--dest local` changes where the next client's volume lands. Only a usable target is remembered, and the choice is committed only after a finalize owns its session lease. `MOKURO_BRIDGE_UPLOAD_DEFAULT` seeds the value before any explicit choice. `GET /upload-methods` always reports which target is currently the default, so a client can show it rather than assume.
-
-Credentials live in the OS keychain where one exists, otherwise in 0600 files under `~/.config/mokuro-bridge/`. Nothing is ever written to this repository. A metadata file describes each account without its secret (alias, label, root, and for MEGA the email or for WebDAV the server URL and username), so `--list-uploads` and `/config` can show what is configured and ready without touching a password. A WebDAV account is a user-supplied base URL plus Basic-auth credentials; the URL is checked once before it is stored and the password goes to the same credential store as the other providers.
-
-## Security posture
-
-Stated plainly, because it is a deliberate design and not an oversight:
-
-- **The bridge is unauthenticated.** No token, no login. It binds to `127.0.0.1` by default (`MOKURO_BRIDGE_HOST`) and that is the entire access control. The intended deployment is loopback-only; binding it to a LAN address means anyone who can reach the port can start a volume, feed it pages, and have the result written or uploaded.
-- **Configuration writes are gated to a loopback `Origin`.** The dashboard can repoint an upload destination, add or remove an account and change settings, so every configuration `POST` answers `403` when the request carries a non-loopback `Origin`, while curl and the CLI (no `Origin`) are accepted. The Google Drive OAuth callback is a `GET` opened by Google's redirect and is not gated; it accepts only the one-time `state` this bridge created. Account setup responses never contain a credential, token or client secret, and a Drive client secret pasted into the page is used for that sign-in and not persisted.
-- **CORS is a wildcard by default**, deliberately: the client runs on whichever storefront you are reading from, and pinning a list would mean a new store silently stops working. `CORS_ORIGINS` is the narrowing knob.
-- **The fetch proxy is not restricted to a CDN by default.** `MOKURO_BRIDGE_FETCH_ALLOWED_HOSTS` defaults to `*`, so it does nothing until set. The real gate is `_target_is_safe()`, which refuses anything resolving to a loopback, private, link-local, multicast or reserved address, so LAN hosts and `169.254.169.254` are refused. Any public host is fetchable, so this is a way to reach the public internet, not a closed pipe to one CDN.
-- **There is no path traversal.** Page names go through a validator, the ingest resolver confines `source_dir` and `page-local` to your home and the system temp locations, and uploads are extension-checked before anything is read. A caller can drive the bridge; it cannot read arbitrary files off the disk.
-
-That home-and-temp confinement, applied to `source_dir` and `page-local`, was the whole allowlist until 0.7.2. **`MOKURO_BRIDGE_INGEST_ROOTS` widens it** with comma-separated absolute paths, for the common case of a library that is not where the bridge assumes: a second drive on Windows, say, where `C:\tmp` and friends resolve to paths that never match. A relative entry is ignored rather than resolved, because that would anchor the gate to whatever directory the server was started in.
+The bridge can open extra loopback ports that proxy page fetches for a browser client. A browser allows about six concurrent HTTP/1.1 connections per origin, and the port is part of the origin, so each extra port is another six lanes while the bridge fetches under no browser limit. Ports are advertised on `/health` as `fetchProxyPorts`, which is how a client discovers them; nothing needs configuring. The proxy is started by `cli.py` when `MOKURO_BRIDGE_FETCH_PORTS` is non-zero, needs no OCR engine, and is optional: capture never depends on it. [browser-acceleration.md](browser-acceleration.md) covers the browser limits, the file-descriptor cost and when to change the count.
 
 ## The update check
 
-`update.py` compares the running version against the latest release, from a cache that is refreshed at most every six hours in the background. A failure is cached too, so an offline machine does not retry in a loop, and `MOKURO_BRIDGE_UPDATE_CHECK=0` turns it off. `/health` reports `update_check`, `latest_version`, `update_available`, `update_url` and `update_error`, and never performs network I/O itself.
+`update.py` compares the running version against the latest release from a cache refreshed in the background at most every six hours. A failed check is cached too, so an offline machine does not retry in a loop, and `MOKURO_BRIDGE_UPDATE_CHECK=0` turns it off. Nothing installs or restarts automatically, because a restart mid-OCR loses work. `/health` reports `update_check`, `latest_version`, `update_available`, `update_url` and `update_error`.
 
-Nothing is updated automatically. `--check-update` reports and prints the right command for how this copy was installed (git, pipx or pip), and applying it stays the user's call, because a restart mid-OCR loses work.
+## Security posture
 
-## Module map
+Stated plainly, because it is a design decision rather than an oversight:
 
-| Module | Lines | Owns |
-| --- | --- | --- |
-| `api.py` | ~3290 | the FastAPI app: routes, sessions, ingest, upload, health, the progress stream and the live upload snapshot |
-| `web/dashboard.html` | ~1950 | the dashboard page: self-contained inline CSS and JavaScript, theme switch, destination cards, account dialogs and preferences |
-| `ocr.py` | ~1290 | the OCR worker pool, queue, fair scheduling and the engine abstraction |
-| `config_api.py` | ~1120 | the dashboard's JSON API and browser account setup: `/config`, folder browsing, settings, the MEGA, Drive, OneDrive and WebDAV sign-in routes, rename and removal |
-| `cli.py` | ~815 | argument parsing, the two servers, `--status` dispatch, signal handling and startup |
-| `providers/drive.py` | ~800 | Google Drive, including OAuth setup and upload sessions |
-| `providers/mega.py` | ~775 | MEGA, via megatools |
-| `providers/webdav.py` | ~760 | WebDAV: URL and XML handling, Basic auth, and the upload, listing and download calls over plain HTTP |
-| `providers/onedrive.py` | ~750 | OneDrive, including the device-code setup flow |
-| `providers/rclone.py` | ~480 | rclone: shells out to a configured remote, so OneDrive works without an Azure account |
-| `status_tui.py` | ~720 | the live terminal status display: upload bar, width-safe frame, help and dashboard overlays |
-| `accounts.py` | ~640 | the account registry and alias model: validation, collisions, suggestions, rename and legacy derivation |
-| `series_json.py` | ~560 | the published shape of the reader's `series.json`: its validators, merge rules and wire order |
-| `providers/__init__.py` | ~520 | the upload-target registry and dispatch, including the sticky default |
-| `sessions.py` | ~420 | session state, persistence, snapshots and page identity |
-| `update.py` | ~415 | the version check |
-| `fetchproxy.py` | ~380 | the page-fetch accelerator |
-| `settings.py` | ~320 | the settings file the dashboard writes, with environment variables winning and environment-pinned keys skipped on save |
-| `creds.py` | ~295 | keychain and file credential storage |
-| `config.py` | ~275 | paths, environment knobs and the series title helper |
-| `series_reference.py` | ~260 | the pin on the upstream files that define the format |
-| `ocr_folder.py` | ~230 | the standalone OCR-a-folder command |
-| `util.py`, `log.py` | small | shared helpers and logging |
-
-`series_json.py` is a port, not an invention: the format belongs to Gnathonic's mokuro-reader, which is GPL-3.0, so nothing upstream is vendored. `series_reference.py` holds the commit and per-file hashes that make the port auditable and the drift detectable. See [series-json.md](series-json.md).
-
-`api.py` being one large module is the main thing I would change given more time. Its seams are already visible (ingest, upload, health, the progress stream) and each is independently testable, so splitting it is mechanical rather than risky.
+- The service is unauthenticated. It binds to `127.0.0.1` by default (`MOKURO_BRIDGE_HOST`), and that loopback binding is the entire access control. Binding it to a LAN address means anyone who can reach the port can start a volume, feed it pages and have the result written or uploaded.
+- Configuration writes are gated to a loopback `Origin`, as described above.
+- CORS defaults to `*`, deliberately: a browser client runs on whichever page the user is reading, and a pinned list would silently break a new one. `CORS_ORIGINS` narrows it.
+- Local ingest is confined to the user's home and the platform temp locations. `MOKURO_BRIDGE_INGEST_ROOTS` adds absolute paths, for a library on another drive. Page names are validated, symlinks are refused and uploads are size-limited before they are read, so a caller can drive the service but cannot read arbitrary files off the disk.
+- The fetch proxy refuses targets that resolve to loopback, private, link-local, multicast or reserved addresses, so it cannot be pointed at the LAN or a cloud metadata endpoint.
 
 ## Testing
 
-`python3 -m pytest` runs the full suite in about 11 seconds. It is hermetic: no network, no real credentials, no OCR model.
+`python3 -m pytest` runs a hermetic suite: no network, no real credentials and no OCR model. The parts that matter for changes here:
 
-- `test_imports.py` walks the AST of every module and fails on any import outside the base dependencies, which is how "the engine and the cloud SDKs must not be base dependencies" is kept true.
-- `test_optional_ocr.py` blocks `mokuro` on `sys.meta_path` in a subprocess and re-imports there, so a base install is genuinely exercised, and it checks `/health` and the fetch accelerator still answer. That is why there is no skip marker for the optional engine.
-- `test_fetchproxy.py` runs a real `http.server` stub CDN through the app and asserts the exact upstream path and query, header handling, and the allow-list guard.
-- `test_endpoints.py` covers `/session/start`, `/session/resume`, the per-page routes, `/session/{id}/status` and `/destination/check`, including that a provider failure does not echo its signed URL. The `/session/resume` case exists because 0.6.0 shipped a version that answered 500 on every call, from a call to a helper that was never imported.
-- `test_finalize_series_json.py` drives the finalize stream end to end with the OCR engine stubbed: a local finalize leaves a `series.json` beside the volume, a second volume is appended without disturbing the first, an unchanged manifest is not rewritten, and a manifest the bridge could not read is never overwritten. It is the regression lock for the release that shipped without the index.
-- `test_series_json.py` and `test_series_reference.py` cover the format port and the upstream pin. The parity fixture they read was generated by probing the pinned upstream implementation in Node, and the format's own golden example is asserted byte for byte.
-- `test_config_api.py` covers the dashboard and its API: the page renders with the version substituted and is read from disk per request, listings stay inside the allowed local roots, a provider failure is redacted, settings round-trip and reject bad values without writing, environment-pinned keys are skipped, an unconfigured destination cannot become the default, and every write is refused from a foreign origin.
-- `test_settings.py` covers the settings file: precedence (environment, then file, then default), typing and range validation, pinned keys not being overwritten, path and absolute-root validation, clearing a key, private permissions, and a corrupt file being ignored rather than fatal.
-- `test_status_tui.py` renders frames headlessly at several widths and heights, checks the narrow layout, the upload bar, the help overlay and that there is no escape byte when colour is off, and exercises the runner with a stubbed fetch and key source instead of a real TTY. `test_status_upload_health.py` covers the `/health` upload snapshot itself.
-- `test_ocr_scheduling.py` covers the fair selector and `GET /queue`; `test_accounts.py`, `test_upload_methods.py` and `test_account_setup_api.py` cover the alias model, the registry and default selection, and the browser setup routes with mocked provider seams.
-- `test_webdav_provider.py` drives the WebDAV provider against `tools/dav_server.py`: MKCOL folder creation, PUT with progress, the shared fail/skip/overwrite policy, PROPFIND listings, download, the credential store and the `/config/accounts/webdav` route.
-- `test_packaging.py` holds the packaging contract: `pyproject.toml` and `requirements*.txt` cannot drift apart, the wheel's package list matches the directories that exist, the pinned provenance is shipped as package data, and the console scripts resolve.
+- `test_endpoints.py` drives the real ASGI app for the session lifecycle, page ingest, the resume hand-off and destination checks, including that a provider failure never echoes its signed URL.
+- `test_finalize_series_json.py` drives the finalize stream end to end with the engine stubbed: a local finalize writes the index, a second volume merges into it, an unchanged manifest is not rewritten, an unreadable one is never overwritten, a bunko destination uploads three files and reports the index as external, and the terminal frames carry the documented per-file fields.
+- `test_bunko.py` and `test_bunko_agent.py` cover the marker rules, the connect payload, the setup conversation and the restart tolerance of the control client.
+- `test_ocr_scheduling.py`, `test_optional_ocr.py` and `test_ocr_folder.py` cover the queue, the fair selector and the no-engine case.
+- `test_rclone_gateway.py` runs a real `rclone serve webdav` against a local remote and proves the bridge and Bunko share one endpoint.
+- `test_config_api.py`, `test_settings.py` and `test_status_tui.py` cover the dashboard API, the settings file and the terminal display.
+- `test_packaging.py` keeps `pyproject.toml`, the requirements files and the wheel contents in step.
 
-`ruff check .` is clean and configured in-tree, so the lint result is reproducible rather than depending on whatever config happens to be discovered.
+`ruff check .` is clean and configured in-tree, so the lint result does not depend on whatever configuration happens to be installed.
+
+## Module map
+
+| Module | Owns |
+| --- | --- |
+| `api.py` | The FastAPI app: capture routes, session lifecycle, ingest, finalize stream, health, upload snapshot |
+| `web/dashboard.html` | The dashboard page: inline CSS and JavaScript, theme switch, destination cards, account dialogs, preferences |
+| `ocr.py` | The OCR worker, queue, fair scheduling, page cache and the engine abstraction |
+| `config_api.py` | The dashboard's JSON API: configuration, folder browsing, settings and browser account setup |
+| `cli.py` | Argument parsing, the service entry point, the status display dispatch and startup |
+| `providers/` | One module per destination backend, the registry and dispatch, and the rclone gateway |
+| `sessions.py` | Session state, persistence, snapshots and page identity |
+| `accounts.py` | The account registry and alias model |
+| `series_json.py` | The published shape of the reader's `series.json`: validators, merge rules and wire order |
+| `series_reference.py` | The pin on the upstream files that define that format |
+| `rclone_gateway.py`, `rclone_auth.py` | The shared loopback gateway and browser-driven rclone account setup |
+| `lanes.py` | The four bounded execution lanes and their stats |
+| `fetchproxy.py` | The page-fetch accelerator |
+| `status_tui.py` | The live terminal status display |
+| `settings.py`, `creds.py`, `config.py` | Settings precedence, credential storage and paths |
+| `update.py`, `mokuro_flavor.py`, `bunko_agent.py` | Update check, engine provenance and the Bunko installer and supervisor |
+| `ocr_folder.py` | The standalone OCR-a-folder command |
+
+Its age is the reason `api.py` is one large module. The seams are already visible (ingest, finalize, upload, health, the progress stream) and each is independently testable, so splitting it is mechanical rather than risky.
 
 ## Known limits
 
-- **Unauthenticated and loopback-only.** See above. This is the one to read before running it anywhere but your own machine.
-- **Zero-page sessions** and OCR that outlives its client are not bounded by a deadline in every path, so a wedged finalize can hold a worker slot longer than it should.
-- **No cloud provider is exercised against a real service.** The account setup routes are tested with mocked seams (`test_account_setup_api.py`) and the finalize provider seam is faked in `test_finalize_series_json.py`, so MEGA, Drive and OneDrive network behaviour, and the megatools invocation in particular, stay unverified by the suite. WebDAV is the exception: `test_webdav_provider.py` runs the provider against `tools/dav_server.py`, a stdlib-only WebDAV server in this repository, over a real socket.
-- **The OCR engine lags Python.** PyTorch wheels often trail new releases, so the newest Python may not work yet.
+- The service is unauthenticated and loopback-only. Read that before running it anywhere but your own machine.
+- Zero-page sessions and OCR that outlives its client are not bounded by a deadline in every path, so a wedged finalize can hold a worker slot longer than it should.
+- No native cloud provider is exercised against a real service in the suite. The account setup routes and the finalize provider seam are tested with fakes; WebDAV is the exception, because `test_webdav_provider.py` runs the provider against a stdlib WebDAV server in this repository over a real socket. The rclone gateway is tested against a real rclone binary and a local remote.
+- The OCR engine lags Python: PyTorch wheels often trail a new release, so the newest Python may not work yet.

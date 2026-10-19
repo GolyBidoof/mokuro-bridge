@@ -111,6 +111,36 @@ class UploadMethod:
 # one ("local" writes to OUTPUT_DIR and has no credentials). See accounts.py.
 _LOCAL_ID = "local"
 
+# The cloud service behind an rclone account, for display names and labels.
+_SERVICE_LABELS = {
+    "drive": "Google Drive",
+    "mega": "MEGA",
+    "onedrive": "OneDrive",
+    "webdav": "WebDAV",
+}
+
+
+def service_label(kind: str) -> str:
+    value = str(kind or "").strip()
+    return _SERVICE_LABELS.get(value) or (value.title() if value else "rclone")
+
+
+def display_name_for_account(instance, fallback: str = "") -> str:
+    """``<label or alias> | <Service>`` for rclone-backed accounts.
+
+    The old name was the provider plus the internal account id ("rclone —
+    drive"), which hid the real service and ignored the bridge label.
+    """
+    if instance.provider != "rclone":
+        return fallback or instance.display_name_for()
+    kind = str(instance.extra.get("kind") or "").strip()
+    if not kind or kind == "rclone":
+        # The implicit "not configured yet" slot has no service behind it.
+        return (instance.label or "").strip() or instance.id
+    service = service_label(kind)
+    who = (instance.label or "").strip() or instance.id
+    return f"{who} | {service}"
+
 # The default upload method is "sticky": once a client explicitly asks for a
 # method (upload_method=… / upload_to_mega=…), that choice is remembered and
 # becomes the default for later requests until another explicit choice replaces
@@ -610,7 +640,7 @@ def _build_upload_methods() -> dict[str, UploadMethod]:
         extra.update(view.extra)
         methods[instance.id] = UploadMethod(
             id=instance.id,
-            name=view.label,
+            name=display_name_for_account(instance, view.label),
             configured=_method_configured(instance.id),
             default=(default_method == instance.id),
             extra=extra,

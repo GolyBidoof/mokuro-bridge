@@ -1,8 +1,8 @@
 # HTTP endpoints
 
-The bridge exposes thirty routes, all on the same loopback server (default `http://127.0.0.1:62642`). There is no authentication: binding to `127.0.0.1` is the entire access control, and every route is meant to be reachable only from the machine that runs it. Request bodies are `application/x-www-form-urlencoded` except where a file upload or JSON body is noted. The upload body limit is 100 MiB for pages and covers.
+The bridge exposes twelve capture routes plus the dashboard's configuration API, all on the same loopback server (default `http://127.0.0.1:62642`). There is no authentication: binding to `127.0.0.1` is the entire access control, and every route is meant to be reachable only from the machine that runs it. Request bodies are `application/x-www-form-urlencoded` except where a file upload or JSON body is noted. The upload body limit is 100 MiB for pages and covers.
 
-The routes the capture loop needs are `POST /session/start`, `POST /session/{id}/page` (or `POST /session/{id}/page-local`) and `POST /session/{id}/finalize`. Everything else exists so a client does not have to guess or repeat work.
+The routes the capture loop needs are `POST /session/start`, `POST /session/{id}/page` (or `POST /session/{id}/page-local`) and `POST /session/{id}/finalize`. Everything else exists so a client does not have to guess or repeat work. [clients.md](clients.md) is the protocol overview and [integrating.md](integrating.md) is the integration guide for a new client.
 
 ## The session snapshot
 
@@ -32,7 +32,7 @@ Creates a session and its volume working directory. This is the first call of a 
 | `title` | `manga` | Volume title; the series folder and artifact names derive from it |
 | `reuse_existing` | `false` | When truthy, pick up an existing volume with the same safe title instead of making a new one |
 
-Response `200` adds `session_id`, `vol_dir`, `ocr_chunk_size`, `reused`, `pages_received` and `pages_ocr_done` to a fresh snapshot.
+Response `200` is the new session record: `session_id`, `title`, `safe_title`, `vol_dir`, `message`, `ocr_chunk_size`, `reused`, `pages_received` and `pages_ocr_done`.
 
 Errors: `400` when the title is reserved or invalid (reserved names include `_ocr`, `output`, `local_dir_default.json` and `upload_method_default.json`), `400` when reusing a session that is already finalized, finalizing, cover-uploading or ingesting, and `409` when another request created the same title concurrently.
 
@@ -123,7 +123,7 @@ Errors before the stream starts: `400` for an unknown upload account, `404` for 
 
 ## GET /upload-methods
 
-Lists every upload target and the current default. Response `200` is `{upload_method_default, upload_method_selected: null, methods: [...]}`, where each method carries `id` (the account alias, or `local`), `alias` (the same value, present on every row including `local`), `name`, `configured`, `default`, `current_folder` and provider-specific extras (for an MEGA account, the library root and email; for a Drive or OneDrive account, the root folder name; for an rclone account, `remote`, `root` and `tracked`). `upload_method_default` is an alias, and the historical spellings are still accepted as input. Not covered by an HTTP test; the registry is unit-tested in `tests/test_upload_methods.py`.
+Lists every upload target and the current default. Response `200` is `{upload_method_default, upload_method_selected: null, methods: [...]}`, where each method carries `id` (the account alias, or `local`), `alias` (the same value, present on every row including `local`), `name`, `configured`, `default`, `current_folder` and provider-specific extras (for an MEGA account, the library root and email; for a Drive or OneDrive account, the root folder name; for an rclone account, `remote`, `root` and `tracked`). `upload_method_default` is an alias, and the historical spellings are still accepted as input. Covered at the route level by `tests/test_endpoints.py` and the registry by `tests/test_upload_methods.py`.
 
 ## POST /destination/check
 

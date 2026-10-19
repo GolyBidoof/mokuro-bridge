@@ -843,7 +843,7 @@ def main() -> None:
 
         state = bunko_agent.load_state()
         print(bunko_agent.status_line(state))
-        running = bool(state and bunko_agent._pid_alive(state.pid))
+        running = bunko_agent.server_running(state)
         raise SystemExit(0 if running else 1)
     if args.stop_bunko:
         from . import bunko_agent

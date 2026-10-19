@@ -285,3 +285,150 @@ def test_connect_payload_wraps_missing_mega_credentials(bunko_home, monkeypatch)
     )
     with pytest.raises(bunko_agent.BunkoAgentError, match="credentials not configured"):
         bunko_agent.connect_payload(state)
+
+
+# --- resilience to Bunko restarting itself ----------------------------------
+
+
+def test_the_control_client_re_resolves_a_restarted_bunko(tmp_path, monkeypatch):
+    """`library connect` can restart Bunko onto a new control port."""
+    import httpx
+
+    controls = [{"port": 1111, "token": "a"}, {"port": 2222, "token": "b"}]
+    monkeypatch.setattr(
+        bunko_agent, "wait_for_control", lambda storage, **kwargs: controls.pop(0)
+    )
+
+    class _Failing:
+        def __init__(self):
+            self.closed = False
+
+        def post(self, *_args, **_kwargs):
+            raise httpx.ConnectError("connection refused")
+
+        def get(self, *_args, **_kwargs):
+            raise httpx.ConnectError("connection refused")
+
+        def close(self):
+            self.closed = True
+
+    class _Healthy:
+        def __init__(self):
+            self.closed = False
+
+        def post(self, path, **_kwargs):
+            return _Response({"session": 1})
+
+        def get(self, path):
+            return _Response({"state": "connected"})
+
+        def close(self):
+            self.closed = True
+
+    first, second = _Failing(), _Healthy()
+    built: list[int] = []
+
+    def _factory(control, client_factory=None):
+        built.append(int(control["port"]))
+        return first if int(control["port"]) == 1111 else second
+
+    monkeypatch.setattr(bunko_agent, "_control_client", _factory)
+
+    client = bunko_agent._ControlClient(tmp_path, sleep=lambda _s: None)
+    response = client.post("/app/api/library/connect", json={})
+    assert response.status_code == 200
+    assert built == [1111, 2222], "the client must re-read .control.json after a restart"
+    assert first.closed and not second.closed
+    assert client.control["port"] == 2222
+
+    client.close()
+    assert second.closed
+
+
+def test_setup_survives_a_restart_and_adopts_the_new_pid(bunko_home, monkeypatch):
+    """A rerun of --setup-bunko must not die on the old control port or pid."""
+    import httpx
+
+    binary = bunko_home / "bin" / "mokuro-bunko"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+
+    monkeypatch.setattr(bunko_agent, "method_provider", lambda method: "mega")
+    monkeypatch.setattr(bunko_agent, "method_root", lambda method: "/Root/mokuro-reader")
+    monkeypatch.setattr(
+        bunko_agent, "install",
+        lambda **kwargs: bunko_agent.InstallInfo(binary=str(binary), commit="abc", label="test"),
+    )
+    monkeypatch.setattr(
+        bunko_agent, "ensure_admin",
+        lambda state, **kwargs: setattr(state, "admin_user", "bridge-admin"),
+    )
+    monkeypatch.setattr(bunko_agent, "free_port", lambda: 12345)
+    monkeypatch.setattr(bunko_agent, "start_server", lambda state, **kwargs: state)
+    controls = [{"port": 1111, "token": "a"}, {"port": 2222, "token": "b"}]
+    monkeypatch.setattr(
+        bunko_agent, "wait_for_control", lambda storage, **kwargs: controls.pop(0)
+    )
+    monkeypatch.setattr(
+        bunko_agent, "connect_payload",
+        lambda state, **kwargs: {"provider": "mega", "folder": state.folder},
+    )
+
+    class _Failing:
+        def __init__(self):
+            self.closed = False
+
+        def post(self, *_args, **_kwargs):
+            raise httpx.ConnectError("connection refused")
+
+        def get(self, *_args, **_kwargs):
+            raise httpx.ConnectError("connection refused")
+
+        def close(self):
+            self.closed = True
+
+    def _factory(control, client_factory=None):
+        if int(control["port"]) == 1111:
+            return _Failing()
+        return _FakeClient([{"state": "connected", "session": 1, "check": {"found": True}}])
+
+    monkeypatch.setattr(bunko_agent, "_control_client", _factory)
+    monkeypatch.setattr(bunko_agent, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(bunko_agent, "_pid_on_port", lambda port: 4242)
+    monkeypatch.setattr(bunko_agent, "_wait_for_marker", lambda state, log=None: False)
+
+    state = bunko_agent.setup("mega", log=lambda _m: None, wait_for_marker=True)
+
+    assert state.connected_at
+    assert state.pid == 4242, "the restarted pid must replace the dead one"
+    saved = json.loads(Path(state.config).with_name(bunko_agent.STATE_FILE).read_text())
+    assert saved["pid"] == 4242
+
+
+def test_a_restarted_bunko_reads_as_running_with_a_stale_pid(tmp_path, monkeypatch):
+    """--bunko-status and autostart must not trust a dead recorded pid alone."""
+    state = bunko_agent.AgentState(
+        method="mega", backend="mega", folder="mokuro-reader",
+        storage=str(tmp_path), config=str(tmp_path / "config.yaml"),
+        log=str(tmp_path / "bunko.log"), binary="/bin/true", commit="x",
+        port=12345, pid=999999,
+    )
+    (tmp_path / ".control.json").write_text(
+        json.dumps({"port": 4444, "token": "t"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(bunko_agent, "_pid_alive", lambda pid: False)
+
+    class _Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(
+        bunko_agent.socket, "create_connection", lambda addr, timeout=None: _Connection()
+    )
+
+    assert bunko_agent.server_running(state) is True
+    assert "running" in bunko_agent.status_line(state)

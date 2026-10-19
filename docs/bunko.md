@@ -1,5 +1,7 @@
 # Running mokuro-bunko next to the bridge
 
+mokuro-bunko is an optional peer, not a requirement: without it the bridge writes and merges `series.json` itself and every other feature works the same. With it, one library server owns the compiled metadata for a destination.
+
 `mokuro-bridge --setup-bunko` installs [mokuro-bunko](https://github.com/Gnathonic/mokuro-bunko), signs it in to the same cloud account the bridge uploads to (for an rclone destination, points it at the bridge's local WebDAV gateway instead), and starts it. Bunko then compiles `series.json` and `catalog.json` in the cloud folder, and the bridge stops writing `series.json` for that destination.
 
 This exists because the bridge's own manifest is a workaround. reader.mokuro.app only builds a series index for series it already knows locally, so an externally filled folder needs a `series.json` written by the uploader. Bunko owns a library and compiles that file itself, so when Bunko is present the bridge's copy is redundant and can fail for permission reasons on a Bunko-hosted library.
@@ -52,6 +54,25 @@ Google Drive has one caveat worth knowing: Bunko signs in with the reader's Goog
 An rclone remote is opaque to Bunko, which has no rclone backend, and `rclone` re-authenticates on every invocation, so a MEGA account with two-factor sign-in would need a fresh code per upload. The bridge therefore runs `rclone serve webdav` for the account, bound to `127.0.0.1` on an ephemeral port with a random Basic-auth pair, and both processes talk to it: the bridge's uploads go through it, and Bunko is configured with it as its WebDAV library. One authenticated rclone session, one view of the folder, no second sign-in.
 
 The gateway's state lives beside the Bunko data, not in rclone's own config: `~/Library/Application Support/mokuro-bridge/rclone` on macOS, `~/.local/share/mokuro-bridge/rclone` elsewhere (`MOKURO_BRIDGE_RCLONE_DIR` overrides). It holds `gateways.json` (0600, one record per account: port, loopback username and password, pid), `rclone.conf` (the bridge-owned remotes that point at those ports) and one log per account. The recorded port and password survive a bridge restart so Bunko's saved URL keeps working; a gateway process survives the bridge because it is started in its own session, and `--stop-bunko` stops Bunko only. `MOKURO_BRIDGE_RCLONE_GATEWAY=0` disables the gateway, and every upload then falls back to the cloud remote directly, which is what a non-two-factor account needs if `rclone serve` cannot start.
+
+## Taking over an existing library
+
+A library a reader or an older uploader filled already has a `catalog.json`, and mokuro-bunko will not compile over one it did not write. On a WebDAV or rclone destination the bridge has already seen a fresh marker, so it leaves `series.json` to Bunko while Bunko refuses the catalog, and the refusal repeats on every sync pass:
+
+```text
+METADATA skipped unwritable catalog.json error=conflict: catalog.json: the compile base is neither Bunko's own version nor a submitted one
+```
+
+`series.json` for the series Bunko already knows usually merges, but a catalog that never rewrites leaves the reader's catalog missing every new series, while the bridge has stopped maintaining it. The adoption path is to let Bunko write its own catalog once:
+
+1. Back up the destination's `catalog.json` first, for example `rclone copyto mega:mokuro-reader/catalog.json ./catalog.json.backup-YYYYMMDD` through the account's rclone remote, or with the provider's own file manager.
+2. Delete that one `catalog.json` at the destination. Do not delete `series.json` or any series folder.
+3. Wait for Bunko's next pass. Its log shows `first adoption: ingesting facts`, then `first adoption done`, then `[METADATA] full pass done` with the new catalog compiled from the volumes it found; new volumes merge their `series.json` normally from then on.
+4. Verify: the `METADATA skipped unwritable` line is gone, `catalog.json` is back, and the series count it reports matches the library.
+
+If you do not want to drop the reader's catalog, the safe alternative is to keep the bridge owning the metadata for that destination: set `"series_owner": "bridge"` in the account metadata (or use a destination without Bunko at all). The bridge then writes and merges `series.json` itself again and the marker is ignored.
+
+One related timing detail: after a Bunko restart the marker can look stale while Bunko settles its lease, up to about ten minutes on a cloud backend, and the bridge writes `series.json` again for a volume that finishes in that window. Set `"series_owner": "mokuro-bunko"` in the account metadata when a destination must count as Bunko-owned deterministically instead of waiting for a fresh marker.
 
 ## Managing it
 

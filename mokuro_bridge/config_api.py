@@ -518,7 +518,11 @@ def _method_rows() -> list[dict]:
                 "configured": method.configured,
                 "default": method.default,
                 "provider": provider_id,
-                "provider_label": _PROVIDER_UI.get(provider_id, {}).get("label", "Local folder"),
+                "provider_label": (
+                    providers.service_label(str(instance.extra.get("kind") or ""))
+                    if instance is not None and provider_id == "rclone"
+                    else _PROVIDER_UI.get(provider_id, {}).get("label", "Local folder")
+                ),
                 "account": (instance.name if instance else ""),
                 "label": (instance.label if instance else ""),
                 "root": (instance.root if instance else _method_current_folder(_LOCAL_ID)),

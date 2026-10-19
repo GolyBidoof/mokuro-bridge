@@ -1,6 +1,6 @@
 # Browser download acceleration
 
-The bridge opens extra localhost ports so the browser companion can fetch more pages at once. This page explains how that works, what the numbers on the dashboard mean, and what to do when the browser, not the bridge, becomes the limit.
+The bridge opens extra localhost ports so a browser client can fetch more pages at once. This page explains how that works, what the numbers on the dashboard mean, and what to do when the browser, not the bridge, becomes the limit.
 
 ## Why ports, and not more sockets per page
 
@@ -16,7 +16,7 @@ Each port proxies to the same upstream CDN. The pages themselves do not change, 
 
 ## What the dashboard shows
 
-The status card on the home page has a `Browser acceleration` row. When ports are open it reads, for example, `48 ports open (62643–62690) · up to 288 extra browser lanes`. When the count is zero it says `off`.
+The status card on the home page has a `Browser acceleration` row. When ports are open it reads, for example, `48 ports open (62643 to 62690) · up to 288 extra browser lanes`. When the count is zero it says `off`.
 
 The same information is in `/health` as `fetchProxyPorts`, and the bridge prints a line at startup:
 
