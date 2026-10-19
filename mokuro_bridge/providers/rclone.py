@@ -195,6 +195,17 @@ def account_identity(instance: accounts.Instance) -> str:
     return summary or remote
 
 
+def email_identity(instance: accounts.Instance) -> str:
+    """The account's own address when the provider can tell us, else empty."""
+    name = str(instance.extra.get("alias") or instance.name or "")
+    try:
+        from .. import rclone_auth
+
+        return rclone_auth.account_email(name)
+    except Exception:
+        return ""
+
+
 def account_insecure(*_args, **_kwargs) -> bool:  # symmetry with the HTTP providers
     return False
 

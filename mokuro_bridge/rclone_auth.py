@@ -390,6 +390,117 @@ def remote_summary(remote: str, *, refresh: bool = False) -> str:
     return kind
 
 
+_EMAIL_CACHE: dict[str, tuple[float, str]] = {}
+
+
+def account_email(name: str, *, refresh: bool = False) -> str:
+    """The address behind an rclone account, best effort and cached.
+
+    MEGA keeps its login in the config. Drive and OneDrive do not, so ask the
+    provider API with the token rclone already holds; a 401 first nudges rclone
+    to refresh it via `about`.
+    """
+    from .providers import rclone as rclone_provider
+
+    remote = remote_name(name)
+    now = time.time()
+    cached = _EMAIL_CACHE.get(remote)
+    if cached is not None and not refresh and now - cached[0] < 900.0:
+        return cached[1]
+    email = ""
+    try:
+        dump = rclone_provider.config_dump(refresh=refresh)
+        entry = dump.get(remote.rstrip(":")) or {}
+        kind = str(entry.get("type") or "")
+        if kind == "mega":
+            email = str(entry.get("user") or "")
+        else:
+            token = _token_json(entry.get("token"))
+            lookup = _drive_email if kind == "drive" else _onedrive_email if kind == "onedrive" else None
+            if lookup is not None:
+                email = lookup(token)
+                if not email:
+                    # The stored access token expired; rclone refreshes it on use.
+                    email = lookup(_refresh_token(kind, remote))
+    except Exception:
+        email = ""
+    _EMAIL_CACHE[remote] = (now, email)
+    return email
+
+
+def _token_json(raw: object) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    try:
+        value = json.loads(str(raw or "{}"))
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _bearer_get(url: str, token: str) -> dict:
+    """GET JSON with the token.
+
+    Python's bundled OpenSSL has no system CA bundle here, so curl (which does)
+    is the dependable client. The header goes in through stdin so the token
+    never appears in the process list.
+    """
+    config = f'header = "Authorization: Bearer {token}"\n'
+    result = subprocess.run(
+        ["curl", "-sS", "--max-time", "10", "--config", "-", url],
+        input=config, capture_output=True, text=True, timeout=15.0,
+    )
+    if result.returncode != 0:
+        return {}
+    try:
+        value = json.loads((result.stdout or "").strip() or "{}")
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _refresh_token(kind: str, remote: str) -> dict:
+    """Let rclone refresh the stored token, then read it back."""
+    from .providers import rclone as rclone_provider
+
+    try:
+        rclone_provider._run(["about", f"{remote}:", "--json"], timeout=30.0)
+    except Exception:
+        pass
+    dump = rclone_provider.config_dump(refresh=True)
+    entry = dump.get(remote.rstrip(":")) or {}
+    return _token_json(entry.get("token"))
+
+
+def _drive_email(token: dict) -> str:
+    access = str(token.get("access_token") or "")
+    if not access:
+        return ""
+    try:
+        data = _bearer_get("https://www.googleapis.com/drive/v2/about?fields=user(emailAddress)", access)
+        return str((data.get("user") or {}).get("emailAddress") or "")
+    except Exception:
+        return ""
+
+
+def _onedrive_email(token: dict) -> str:
+    access = str(token.get("access_token") or "")
+    if not access:
+        return ""
+    try:
+        # /me needs User.Read, which an rclone token does not always carry;
+        # the drive owner is readable with the Files scope it definitely has.
+        data = _bearer_get("https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName", access)
+        address = str(data.get("mail") or data.get("userPrincipalName") or "")
+        if address:
+            return address
+        data = _bearer_get("https://graph.microsoft.com/v1.0/me/drive?$select=owner", access)
+        owner = (data.get("owner") or {}).get("user") or {}
+        return str(owner.get("email") or owner.get("displayName") or "")
+    except Exception:
+        return ""
+
+
 def services() -> list[dict]:
     return [
         {"id": key, "label": value["label"], "blurb": value["blurb"]}

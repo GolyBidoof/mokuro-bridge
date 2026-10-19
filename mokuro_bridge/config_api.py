@@ -2099,6 +2099,21 @@ def _local_usage(path: str, *, refresh: bool = False) -> dict:
     return dict(data)
 
 
+@router.get("/config/account-email")
+async def read_account_email(method: str = "") -> JSONResponse:
+    """Resolve the address behind one account, only when Details asks for it."""
+    if not method:
+        raise HTTPException(status_code=400, detail="a destination is required")
+    instance = providers.instance_for(method)
+    if instance is None:
+        raise HTTPException(status_code=404, detail="unknown destination")
+    if instance.provider == "rclone":
+        email = await asyncio.to_thread(rclone_provider.email_identity, instance)
+    else:
+        email = await asyncio.to_thread(_account_identity, instance)
+    return JSONResponse({"email": str(email or "").strip()})
+
+
 @router.get("/config/usage")
 async def read_usage(method: str = "", refresh: str = "") -> JSONResponse:
     """Space details for any destination: local disk or an rclone remote."""

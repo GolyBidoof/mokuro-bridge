@@ -217,6 +217,9 @@
   .rclone-service span { color: var(--muted); font-size: 12px; }
   .rclone-auth { margin-top: 10px; }
   .btn.big { padding: 11px 18px; font-size: 14px; }
+  .btn[disabled] { opacity: .6; cursor: default; }
+  .spinner { width: 13px; height: 13px; border-radius: 999px; border: 2px solid currentColor; border-right-color: transparent; animation: mb-spin .7s linear infinite; display: inline-block; }
+  @keyframes mb-spin { to { transform: rotate(360deg); } }
   .stat-status .versions-strip { display: flex; flex-direction: column; gap: 3px; margin: 0; }
   .ver { display: flex; align-items: baseline; flex-wrap: nowrap; gap: 5px; min-width: 0; padding: 0; border: 0; background: none; font-size: 11.5px; line-height: 1.45; }
   .ver-name { color: var(--muted); font-size: 11px; flex: 0 0 auto; }
@@ -231,8 +234,8 @@
   .dot[data-state="off"] { background: #e5534b; }
   .dot[data-state="unknown"] { background: var(--muted); opacity: .5; }
   .ver strong.is-action { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
-  .gate-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin: 0 0 14px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
-  .gate-banner strong { color: var(--text); }
+  .gate-note { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+  .gate-note .link { margin-left: 4px; font-size: 12px; }
   .dest-usage { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; margin-top: 8px; color: var(--muted); font-size: 12px; }
   .usage-bar { flex: 0 0 100%; display: flex; width: 100%; height: 7px; border-radius: 999px; overflow: hidden; background: var(--line); }
   .usage-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; }
@@ -473,6 +476,7 @@
           </dd>
         </div>
       </dl>
+      <p class="gate-note" id="ocr-gate" hidden></p>
       <div class="accel" id="accel" data-on="false">
         <span class="accel-dot" aria-hidden="true"></span>
         <span class="accel-name">Browser acceleration</span>
@@ -486,13 +490,12 @@
 
     <div id="notices"></div>
 
-    <div id="engine-gates"></div>
-
     <section aria-labelledby="dest-heading">
       <div class="section-head">
         <div>
           <h2 id="dest-heading">Destinations</h2>
           <p class="lede">Finished volumes go to the one marked <strong>Default</strong>, unless a dokuha script names another.</p>
+          <p class="gate-note" id="upload-gate" hidden></p>
         </div>
         <div class="spacer"></div>
         <button class="btn primary" id="add-destination" type="button">Add destination</button>
@@ -533,8 +536,8 @@
               <button class="btn danger big" id="uninstall-bunko" type="button" hidden>Uninstall mokuro-bunko</button>
             </div>
             <details class="engine-field" id="engine-bunko-totp-row" hidden>
-              <summary>MEGA two-factor code</summary>
-              <label class="pref-help">Only if your MEGA account uses two-factor sign-in.<input type="text" id="engine-bunko-totp" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"></label>
+              <summary>MEGA two-factor code (optional)</summary>
+              <label class="pref-help">Leave empty unless the MEGA sign-in asks for a code.<input type="text" id="engine-bunko-totp" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"></label>
             </details>
           </div>
           <pre class="engine-log" id="engine-bunko-log" hidden></pre>
@@ -1321,17 +1324,22 @@ function mokuroReady() {
 }
 
 function renderGates() {
-  const host = $("engine-gates");
-  if (!host) return;
-  const notes = [];
-  if (!mokuroReady()) {
-    notes.push(`<div class="gate-banner"><span><strong>OCR is paused.</strong> Install mokuro to read pages.</span><button class="btn primary big" type="button" data-gate="mokuro">Install mokuro</button></div>`);
+  const ocr = $("ocr-gate");
+  if (ocr) {
+    ocr.hidden = mokuroReady();
+    if (!mokuroReady()) {
+      ocr.innerHTML = `OCR paused until mokuro is installed. <button class="link" type="button" data-gate="mokuro">Install mokuro</button>`;
+    }
   }
-  if (state.engines && !enginesReady()) {
-    notes.push(`<div class="gate-banner"><span><strong>Cloud uploads are paused.</strong> Install mokuro-bunko to upload and index finished volumes.</span><button class="btn primary big" type="button" data-gate="bunko">Set up mokuro-bunko</button></div>`);
+  const upload = $("upload-gate");
+  if (upload) {
+    const paused = Boolean(state.engines) && !enginesReady();
+    upload.hidden = !paused;
+    if (paused) {
+      upload.innerHTML = `Cloud uploads paused until mokuro-bunko is installed. <button class="link" type="button" data-gate="bunko">Set up mokuro-bunko</button>`;
+    }
   }
-  host.innerHTML = notes.join("");
-  host.querySelectorAll("[data-gate]").forEach((button) => {
+  document.querySelectorAll("[data-gate]").forEach((button) => {
     button.onclick = () => {
       const section = document.getElementById("engines-heading");
       if (section) section.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -2485,34 +2493,39 @@ function openDetails(alias) {
   const insecure = provider === "webdav" && !!(method.extra && method.extra.insecure);
   const account = method.account && method.account !== "default" ? method.account : "Default account";
   const folder = tidyFolder(method.root || method.current_folder) || (provider === "local" ? state.config.output_dir : "not chosen yet");
-  const creds = method.creds_source ? ({
-    keychain: "Saved in this computer's keychain",
-    file: "Saved in a credentials file on this computer",
-    oauth: "Saved browser sign-in on this computer",
-    env: "Set by an environment variable on this computer",
-    "rclone config": "Saved in rclone's own configuration on this computer",
-  }[method.creds_source] || "Saved on this computer") : "";
+  const link = PROVIDER_LINKS[provider];
   const rows = [
     ["Provider", esc(meta.label)],
     ["Account", esc(account)],
-    ["Name", `<code>${esc(alias)}</code>`],
+    ["Email", `<span id="detail-email">${email ? esc(email) : "Looking up…"}</span>`],
     method.label ? ["Note", esc(method.label)] : null,
-    email ? [provider === "webdav" ? "Username" : provider === "rclone" ? "rclone remote" : "Email", esc(email)] : null,
     server ? ["Server", `<code>${esc(server)}</code>`] : null,
-    insecure ? ["Certificate", "Not verified (self-signed, accepted when it was set up)"] : null,
+    insecure ? ["Certificate", "Self-signed, accepted when it was set up"] : null,
     ["Folder", `<code>${esc(folder)}</code>`],
     ["Status", esc(STATE_LABEL[st] || st)],
-    creds ? ["Sign-in", esc(creds)] : null,
-    ["Script id", `<code>upload_method=${esc(alias)}</code>`],
     (method.extra && (method.extra.series_owner === "mokuro-bunko" || method.extra.bunko_version))
       ? ["Library index", `mokuro-bunko ${esc(method.extra.bunko_version || method.extra.bunko_commit || "(connected)")}`] : null,
-    PROVIDER_LINKS[provider] ? ["Open", `<a href="${esc(PROVIDER_LINKS[provider].web)}" target="_blank" rel="noopener">${esc(PROVIDER_LINKS[provider].webLabel)} ${icon("external")}</a>`] : null,
+    link ? ["Open", `<a href="${esc(link.web)}" target="_blank" rel="noopener">${esc(link.webLabel)} ${icon("external")}</a>`] : null,
   ].filter(Boolean);
   $("details-title").textContent = alias;
   $("details-subtitle").textContent = `${meta.label} · ${STATE_LABEL[st] || st}`;
   $("details-body").innerHTML = rows.map(([k, v]) => `<div class="detail-row"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
   $("details-copy").onclick = () => copyText(`upload_method=${alias}`, "Destination id");
   $("details-dialog").showModal();
+  resolveAccountEmail(alias);
+}
+
+async function resolveAccountEmail(alias) {
+  const slot = $("detail-email");
+  if (!slot) return;
+  try {
+    const data = await api(`/config/account-email?method=${encodeURIComponent(alias)}`);
+    const current = $("detail-email");
+    if (current) current.textContent = data.email || "Not reported by this service";
+  } catch (error) {
+    const current = $("detail-email");
+    if (current) current.textContent = "Could not look it up";
+  }
 }
 
 function openRename(alias) {
@@ -2625,21 +2638,33 @@ function bindDialogPlumbing() {
 
   $("uninstall-mokuro").onclick = async () => {
     if (!window.confirm("Uninstall mokuro? OCR pauses until it is installed again.")) return;
+    state.busyMokuroUninstall = true;
+    renderEngines();
     try {
       const result = await postForm("/config/engines/mokuro/uninstall", {});
       toast(result.ok ? "mokuro uninstalled." : "The uninstall did not finish; see the log.", result.ok ? "info" : "bad");
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      state.busyMokuroUninstall = false;
       await loadEngines();
       await loadHealth();
-    } catch (error) { toast(error.message, "bad"); }
+    }
   };
   $("uninstall-bunko").onclick = async () => {
     if (!window.confirm("Uninstall mokuro-bunko? Cloud uploads pause until it is installed again.")) return;
+    state.busyBunkoUninstall = true;
+    renderEngines();
     try {
       const result = await postForm("/config/engines/bunko/uninstall", {});
       toast(result.removed ? "mokuro-bunko uninstalled." : "Nothing was installed to remove.", "info");
+    } catch (error) {
+      toast(error.message, "bad");
+    } finally {
+      state.busyBunkoUninstall = false;
       await loadEngines();
       await loadHealth();
-    } catch (error) { toast(error.message, "bad"); }
+    }
   };
 
   $("wizard-next").onclick = () => { wizard.step = 1; wizard.branch = null; renderWizard(); };
@@ -2699,13 +2724,21 @@ function renderEngines() {
     }
     button.hidden = true;
     const uninstall = $("uninstall-mokuro");
-    if (uninstall) uninstall.hidden = false;
+    if (uninstall) {
+      uninstall.hidden = false;
+      uninstall.disabled = Boolean(state.busyMokuroUninstall);
+      uninstall.innerHTML = state.busyMokuroUninstall ? `<span class="spinner"></span> Uninstalling…` : "Uninstall mokuro";
+    }
   } else {
     detail.textContent = "Not installed. Reading pages needs mokuro; the bridge still packages and files volumes without it.";
     stateLine.textContent = "Not installed";
     button.hidden = false;
     button.disabled = mokuroJob.state === "running";
-    button.textContent = mokuroJob.state === "running" ? `Installing… ${mokuroJob.elapsed_s || 0}s` : (mokuroJob.state === "error" ? "Try installing again" : "Install fast mokuro");
+    button.innerHTML = mokuroJob.state === "running"
+      ? `<span class="spinner"></span> Installing… ${mokuroJob.elapsed_s || 0}s`
+      : (mokuroJob.state === "error" ? "Try installing again" : "Install mokuro");
+    const uninstall = $("uninstall-mokuro");
+    if (uninstall) uninstall.hidden = true;
   }
   const mokuroLog = $("engine-mokuro-log");
   if (mokuroLog) {
@@ -2714,7 +2747,11 @@ function renderEngines() {
   }
   const bunkoButton = $("install-bunko");
   const bunkoUninstall = $("uninstall-bunko");
-  if (bunkoUninstall) bunkoUninstall.hidden = !bunko.installed;
+  if (bunkoUninstall) {
+    bunkoUninstall.hidden = !bunko.installed;
+    bunkoUninstall.disabled = Boolean(state.busyBunkoUninstall);
+    bunkoUninstall.innerHTML = state.busyBunkoUninstall ? `<span class="spinner"></span> Uninstalling…` : "Uninstall mokuro-bunko";
+  }
   if (bunko.available) {
     const ready = remoteDestinationReady();
     $("engine-bunko-detail").textContent = bunko.installed
@@ -2724,11 +2761,18 @@ function renderEngines() {
     const canInstall = bunko.can_install !== false;
     const prereqOk = !bunko.prerequisites || Object.values(bunko.prerequisites).every(Boolean);
     bunkoButton.disabled = bunko.installed || bunkoJob.state === "running" || !ready || !prereqOk;
-    bunkoButton.textContent = bunkoJob.state === "running" ? "Installing…" : (!prereqOk ? "Unavailable" : (ready ? "Install" : "Add a destination first"));
+    bunkoButton.innerHTML = bunkoJob.state === "running"
+      ? `<span class="spinner"></span> Installing… ${bunkoJob.elapsed_s || 0}s`
+      : (!prereqOk ? "Unavailable" : (ready ? "Install mokuro-bunko" : "Add a destination first"));
     bunkoButton.hidden = Boolean(bunko.installed);
     if (bunko.can_install === false && bunko.detail) $("engine-bunko-detail").textContent = bunko.detail;
     const totpRow = $("engine-bunko-totp-row");
-    if (totpRow) totpRow.hidden = !(String(bunko.method || "").startsWith("mega") && ready && !bunko.installed && bunko.can_install !== false);
+    if (totpRow) totpRow.hidden = !(
+      String(bunko.method || "").startsWith("mega")
+      && ready && !bunko.installed && bunko.can_install !== false
+      && bunko.available !== false
+      && bunkoJob.state !== "running"
+    );
     const sync = bunko.sync || null;
     if (sync && sync.installed && !sync.in_sync && sync.can_sync) {
       const syncing = bunkoJob.state === "running";
@@ -2748,6 +2792,8 @@ function renderEngines() {
     $("engine-bunko-state").textContent = "Not available";
     bunkoButton.disabled = true;
     bunkoButton.textContent = "Not available";
+    bunkoButton.hidden = false;
+    if (bunkoUninstall) bunkoUninstall.hidden = true;
   }
   renderWizardEngineActions();
   if (["mokuro", "bunko"].some((name) => engineJob(name).state === "running") && !state.enginePoll) {
