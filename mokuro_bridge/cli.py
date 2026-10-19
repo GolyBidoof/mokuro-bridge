@@ -87,7 +87,7 @@ def _list_uploads() -> None:
         ))
     if not rows:
         print("no remote upload accounts configured")
-        print("add one with: mokuro-bridge --setup-upload mega|drive|onedrive")
+        print("add one with: mokuro-bridge --setup-upload mega|drive|onedrive|webdav")
         return
     width = max(len(r[0]) for r in rows)
     print(f"{'ACCOUNT'.ljust(width)}  {'READY':5}  {'CREDS':11}  REMOTE ROOT")
@@ -488,9 +488,9 @@ def main() -> None:
         metavar="METHOD",
         default=None,
         help="Interactively configure/authenticate an upload account "
-        "(mega, drive, onedrive, optionally with an account name such as "
-        "'mega:work'). Running it again with a new name adds a second account. "
-        "e.g. --setup-upload drive --name main",
+        "(mega, drive, onedrive, webdav, optionally with an account name such "
+        "as 'mega:work'). Running it again with a new name adds a second "
+        "account. e.g. --setup-upload drive --name main",
     )
     parser.add_argument(
         "--name",
@@ -577,7 +577,8 @@ def main() -> None:
         "--status",
         action="store_true",
         help="Live terminal status display: health, destinations, queue and "
-        "current upload, refreshed in place. Keys: r refresh, c config URL, q quit.",
+        "current upload, refreshed in place. Keys: r refresh, c dashboard URL, "
+        "? help, q quit.",
     )
     parser.add_argument(
         "--status-url",

@@ -52,6 +52,7 @@ from .providers import (
 from .providers import drive as drive_provider
 from .providers import mega as mega_provider
 from .providers import onedrive as onedrive_provider
+from .providers import webdav as webdav_provider
 
 router = APIRouter()
 DASHBOARD_HTML = Path(__file__).with_name("web") / "dashboard.html"
@@ -82,6 +83,11 @@ _PROVIDER_UI = {
         "label": "OneDrive",
         "browser_setup": "device_code",
         "setup_hint": "mokuro-bridge --setup-upload onedrive",
+    },
+    "webdav": {
+        "label": "WebDAV",
+        "browser_setup": "form",
+        "setup_hint": "mokuro-bridge --setup-upload webdav",
     },
 }
 
@@ -357,6 +363,12 @@ def _provider_rows() -> list[dict]:
             entry["missing"] = missing
             entry["available"] = not missing
             entry["client_preset"] = bool(onedrive_provider.ONEDRIVE_CLIENT_ID)
+        elif provider_id == "webdav":
+            # Any WebDAV server is acceptable, so the only install check is the
+            # HTTP client; the server URL is asked for per account.
+            missing = [] if _module_available("requests") else ["requests"]
+            entry["missing"] = missing
+            entry["available"] = not missing
         rows.append(entry)
     return rows
 
@@ -387,6 +399,8 @@ def _creds_present(instance: Optional[accounts.Instance]) -> bool:
         return drive_provider._drive_creds_path(instance.name).is_file()
     if instance.provider == "onedrive":
         return onedrive_provider._onedrive_token_path(instance.name).is_file()
+    if instance.provider == "webdav":
+        return webdav_provider._creds_path(instance.name).is_file()
     return False
 
 
@@ -409,6 +423,7 @@ _IDENTITY_PROVIDERS = {
     "mega": mega_provider.account_identity,
     "drive": drive_provider.account_identity,
     "onedrive": onedrive_provider.account_identity,
+    "webdav": webdav_provider.account_identity,
 }
 
 def _account_identity(instance: Optional[accounts.Instance]) -> str:
@@ -708,6 +723,96 @@ async def add_mega_account(
     except (ValueError, OSError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return JSONResponse({"ok": True, "method": instance.id, "root": instance.root_path})
+
+
+# --- adding an account: WebDAV (base URL + Basic auth) ---------------------
+
+_WEBDAV_LIBS_HINT = (
+    "WebDAV upload needs the requests library. Install it with "
+    "`pip install -r requirements-webdav.txt`, then retry."
+)
+
+
+@router.post("/config/accounts/webdav")
+async def add_webdav_account(
+    request: Request,
+    alias: str = Form(""),
+    label: str = Form(""),
+    url: str = Form(""),
+    username: str = Form(""),
+    password: str = Form(""),
+    root: str = Form(""),
+) -> JSONResponse:
+    """Verify and store one WebDAV account (server URL + Basic credentials).
+
+    The server is contacted once before anything is written, so a typo in the
+    URL or the password is a 400 carrying the server's own answer, not an
+    account that silently fails every later upload. Re-submitting an existing
+    alias re-credentials it in place, which is the page's Reconnect button.
+    """
+    _require_local_origin(request)
+    if not _module_available("requests"):
+        raise HTTPException(status_code=400, detail=_WEBDAV_LIBS_HINT)
+    try:
+        name, clean_alias = _account_target("webdav", alias)
+    except accounts.AliasCollision as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    url_value = str(url or "").strip()
+    username_value = str(username or "").strip()
+    password_value = str(password or "")
+    # Reconnecting an existing account may leave a field empty: fall back to
+    # what is stored, so "fix the URL" does not force retyping the password.
+    if accounts.load_instance("webdav", name) is not None:
+        url_value = url_value or webdav_provider.base_url(name)
+        username_value = username_value or webdav_provider.username(name)
+        password_value = password_value or webdav_provider.password(name)
+    if not url_value:
+        raise HTTPException(status_code=400, detail="a WebDAV server URL is required")
+    if not username_value or not password_value:
+        raise HTTPException(
+            status_code=400, detail="a WebDAV username and password are required"
+        )
+    try:
+        ok, verify_error = await asyncio.to_thread(
+            webdav_provider.verify_webdav_creds, url_value, username_value, password_value
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if not ok:
+        detail = safe_provider_error(verify_error or "").strip()
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "WebDAV connection failed - nothing was stored"
+                + (f": {detail}" if detail else "")
+            ),
+        )
+    try:
+        instance = await asyncio.to_thread(
+            webdav_provider.store_webdav_account,
+            name,
+            url_value,
+            username_value,
+            password_value,
+            alias=clean_alias,
+            label=(label.strip() or None),
+            root=(root.strip() or None),
+        )
+    except accounts.AliasCollision as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (ValueError, OSError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return JSONResponse(
+        {
+            "ok": True,
+            "method": instance.id,
+            "root": instance.root_path,
+            "server": webdav_provider.base_url(instance.name),
+            "username": webdav_provider.username(instance.name),
+        }
+    )
 
 
 # --- adding an account: OneDrive (device code) -----------------------------

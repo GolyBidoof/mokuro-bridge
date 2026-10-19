@@ -104,7 +104,7 @@ def test_config_lists_methods_settings_and_paths(client):
 def test_config_describes_every_provider_for_the_ui(client):
     body = client.get("/config").json()
     providers = {row["id"]: row for row in body["providers"]}
-    assert set(providers) == {"mega", "drive", "onedrive"}
+    assert set(providers) == {"mega", "drive", "onedrive", "webdav"}
     for row in providers.values():
         assert {"id", "label", "available", "browser_setup", "setup_hint",
                 "missing", "alias_suggestion"} <= set(row)
@@ -114,6 +114,8 @@ def test_config_describes_every_provider_for_the_ui(client):
     assert providers["drive"]["browser_setup"] == "oauth"
     assert providers["onedrive"]["browser_setup"] == "device_code"
     assert providers["onedrive"]["setup_hint"] == "mokuro-bridge --setup-upload onedrive"
+    assert providers["webdav"]["browser_setup"] == "form"
+    assert providers["webdav"]["setup_hint"] == "mokuro-bridge --setup-upload webdav"
 
 def test_config_methods_carry_alias_provider_and_state(client):
     _make_account()

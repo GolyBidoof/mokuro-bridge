@@ -120,6 +120,18 @@ ONEDRIVE_TOKEN_FILE = _env_path(
 _ONEDRIVE_SCOPES = ["https://graph.microsoft.com/Files.ReadWrite"]
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
+# WebDAV (optional destination via plain HTTP, Basic auth).
+# A WebDAV account is a base URL plus a username and password, so unlike the
+# other providers the URL is part of the *account*, not of this file: it is
+# stored in the account metadata and set with --setup-upload webdav or the
+# dashboard. These defaults only seed the first account, so an existing
+# WEBDAV_BASE_URL / WEBDAV_USERNAME / WEBDAV_PASSWORD setup keeps working.
+WEBDAV_ROOT_NAME = os.environ.get("WEBDAV_ROOT_NAME", "mokuro-reader")
+WEBDAV_BASE_URL = os.environ.get("WEBDAV_BASE_URL", "").strip()
+WEBDAV_CREDS_FILE = _env_path(
+    "WEBDAV_CREDS_FILE", Path.home() / ".config" / "mokuro-bridge" / "webdav_credentials.json"
+)
+
 # Chunked OCR flush: pages are grouped into batches so the queue drains in
 # controlled chunks. Override via env.
 def _env_nonnegative_float(name: str, default: float) -> float:

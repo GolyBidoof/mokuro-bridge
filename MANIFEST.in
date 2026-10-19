@@ -21,6 +21,7 @@ include requirements-dev.txt
 include requirements-ocr.txt
 include requirements-drive.txt
 include requirements-onedrive.txt
+include requirements-webdav.txt
 
 # The test suite, so `python -m pytest` works from an unpacked sdist.
 recursive-include tests *.py

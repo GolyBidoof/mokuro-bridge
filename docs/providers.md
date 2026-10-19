@@ -1,6 +1,6 @@
 # Upload providers
 
-An upload provider is one remote destination backend. MEGA, Google Drive and OneDrive ship today, and a new backend should be a copy of one of their modules rather than an edit to the dispatch code in `providers/__init__.py`. The contract itself lives in [`mokuro_bridge/providers/base.py`](../mokuro_bridge/providers/base.py); this note is the map for the next provider.
+An upload provider is one remote destination backend. MEGA, Google Drive, OneDrive and WebDAV ship today, and a new backend should be a copy of one of their modules rather than an edit to the dispatch code in `providers/__init__.py`. The contract itself lives in [`mokuro_bridge/providers/base.py`](../mokuro_bridge/providers/base.py); this note is the map for the next provider.
 
 ## The contract
 
@@ -37,18 +37,18 @@ The `root(name)` method on `Provider` is not a field: it resolves the account th
 * With `make` absent the walk only reads and returns `None` at the first missing segment. This is the walk behind `remote_exists`, so checking a path never creates anything.
 * With `make` present the walk creates a missing segment and continues. Drive and OneDrive both use the creating form, while their read only form passes `find` alone.
 
-The callbacks let each provider keep its own request semantics. Drive resolves a folder with one `files.list` query and creates with one `files.create` call. OneDrive uses a read only probe for the read walk and a separate probe plus `POST children` for the creating walk, with the 409 race handled inside the create callback. The shared helper only sequences the segments, starting at `root`, and raises `ValueError` on an empty path when `require_nonempty` is set.
+The callbacks let each provider keep its own request semantics. Drive resolves a folder with one `files.list` query and creates with one `files.create` call. OneDrive uses a read only probe for the read walk and a separate probe plus `POST children` for the creating walk, with the 409 race handled inside the create callback. WebDAV does not use the walk at all: a remote path there is a URL suffix, so it creates each segment with `MKCOL` and probes it with a `Depth: 0` `PROPFIND`. The shared helper only sequences the segments, starting at `root`, and raises `ValueError` on an empty path when `require_nonempty` is set.
 
 ## The registry
 
-`providers/__init__.py` holds `_PROVIDERS`, a mapping from provider id to `Provider`, built from the three modules at import. `_method_configured`, `upload_file`, `remote_file_exists` and `_method_current_folder` are lookups in that mapping, not chains of `instance.provider` tests. `register_provider` adds or replaces one entry, and `setup_runner(provider_id)` returns the wizard that `cli.py` calls.
+`providers/__init__.py` holds `_PROVIDERS`, a mapping from provider id to `Provider`, built from the provider modules at import. `_method_configured`, `upload_file`, `remote_file_exists` and `_method_current_folder` are lookups in that mapping, not chains of `instance.provider` tests. `register_provider` adds or replaces one entry, and `setup_runner(provider_id)` returns the wizard that `cli.py` calls.
 
 ## Adding a provider
 
 1. Copy `providers/mega.py` or `providers/drive.py` to `providers/<id>.py` and adapt it. Keep the module level `PROVIDER` value at the end so it can reference the functions above it.
 2. Add the id to `accounts.PROVIDERS`, to `accounts.default_root` and to `accounts._PROVIDER_LABELS`. Accounts, ids and the `<provider>:<name>` spelling stay in `accounts.py` by design.
 3. Add `<module>.PROVIDER` to the tuple that builds `_PROVIDERS` in `providers/__init__.py`.
-4. Optionally add a `requirements-<id>.txt` and the matching extra in `pyproject.toml`, the way Drive and OneDrive do.
+4. Optionally add a `requirements-<id>.txt` and the matching extra in `pyproject.toml`, the way Drive, OneDrive and WebDAV do.
 
 Nothing in `cli.py`, `api.py` or the lookup functions changes, and the fake provider test below is the check that this stays true.
 

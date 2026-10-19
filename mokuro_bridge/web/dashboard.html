@@ -37,7 +37,7 @@
     --bg: #030712; --panel: #1f2937; --panel-2: #374151;
     --line: #374151; --line-strong: #4b5563;
     --ink: #f9fafb; --muted: #9ca3af; --faint: #6b7280;
-    --accent-ink: #1a0b06; --accent-soft: rgba(239, 86, 47, 0.14); --accent-line: rgba(239, 86, 47, 0.52);
+    --accent-ink: #ffffff; --accent-soft: rgba(239, 86, 47, 0.14); --accent-line: rgba(239, 86, 47, 0.52);
     --good-soft: rgba(34, 197, 94, 0.14); --warn-soft: rgba(231, 178, 77, 0.14); --bad-soft: rgba(239, 106, 99, 0.14);
     --shadow: none;
     --code-bg: #111827;
@@ -69,12 +69,14 @@
 
   .topbar { position: sticky; top: 0; z-index: 30; background: var(--panel); border-bottom: 1px solid var(--line); }
   .topbar-inner { max-width: 980px; margin: 0 auto; padding: 11px 20px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-  .brand { display: inline-flex; align-items: center; gap: 9px; color: var(--ink); }
+  .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); }
   .brand:hover { text-decoration: none; }
-  .brand-mark { width: 28px; height: 28px; border-radius: 8px; flex: none; background: var(--accent); display: grid; place-items: center; color: var(--accent-ink); }
-  .brand-word { font-size: 15.5px; font-weight: 650; letter-spacing: -0.01em; }
-  .brand-word .bridge { color: var(--faint); }
+  .brand-mark { width: 30px; height: 30px; border-radius: 50%; flex: none; background: #ffffff; display: grid; place-items: center; color: var(--accent); }
+  .brand-word { font-size: 19px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+  .brand-word .bridge { color: inherit; }
   .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+  .topbar-link { font-size: 13px; color: var(--muted); white-space: nowrap; padding: 5px 2px; }
+  .topbar-link:hover { color: var(--accent); text-decoration: none; }
 
   .chip { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); font-size: 13px; white-space: nowrap; max-width: 44ch; }
   .chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); flex: none; }
@@ -105,7 +107,7 @@
   main { padding-top: 20px; }
   .summary { display: grid; grid-template-columns: 1fr; gap: 15px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; }
   .kicker { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); font-weight: 600; }
-  .summary h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; margin: 5px 0 5px; }
+  .summary h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; margin: 5px 0 5px; }
   .summary-text { color: var(--muted); font-size: 14px; }
   .summary-note { color: var(--faint); font-size: 12.5px; margin-top: 9px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .summary-note code { color: var(--muted); }
@@ -114,6 +116,13 @@
   .stat dt { font-size: 11.5px; color: var(--faint); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
   .stat dd { font-size: 19px; font-weight: 600; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 3px; }
   .stat dd.stat-sub { font-size: 12px; font-weight: 400; color: var(--muted); margin-top: 1px; }
+  .accel { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 12px; font-size: 13px; color: var(--muted); }
+  .accel-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
+  .accel[data-on="true"] .accel-dot { background: var(--good); }
+  .accel-name { font-weight: 600; color: var(--ink); }
+  .accel-text { font-variant-numeric: tabular-nums; }
+  .accel-actions { margin-left: auto; display: inline-flex; gap: 10px; }
+  .accel .link { font-size: 12.5px; }
 
   .notice { display: flex; align-items: flex-start; gap: 10px; margin-top: 16px; padding: 11px 14px; border-radius: var(--radius-sm); background: var(--warn-soft); border: 1px solid var(--line-strong); font-size: 13.5px; }
   .notice.bad { background: var(--bad-soft); }
@@ -127,24 +136,22 @@
 
   section { margin-top: 26px; }
   .section-head { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
-  .section-head h2 { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+  .section-head h2 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
   .section-head .lede { color: var(--muted); font-size: 13.5px; margin-top: 2px; max-width: 76ch; }
   .section-head .spacer { flex: 1; }
 
   .dest-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
-  .dest { position: relative; display: flex; flex-direction: column; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 15px; }
-  .dest:hover { border-color: var(--line-strong); background: color-mix(in srgb, var(--panel) 88%, var(--panel-2)); }
+  .dest { position: relative; display: flex; flex-direction: column; gap: 10px; background: transparent; border: 1px solid var(--line); border-radius: var(--radius); padding: 15px 16px; }
+  .dest:hover { border-color: var(--line-strong); background: var(--panel); }
   .dest.is-default { border-color: var(--accent-line); }
   .dest-top { display: flex; align-items: flex-start; gap: 10px; }
-  .provider-tile { width: 34px; height: 34px; border-radius: 8px; flex: none; display: grid; place-items: center; border: 1px solid var(--line); background: var(--panel-2); color: var(--muted); }
-  .provider-tile[data-provider="mega"] { color: #e8737a; border-color: rgba(232, 115, 122, 0.3); }
-  .provider-tile[data-provider="drive"] { color: #6aa9ff; border-color: rgba(106, 169, 255, 0.3); }
-  .provider-tile[data-provider="onedrive"] { color: #5fb6f2; border-color: rgba(95, 182, 242, 0.3); }
-  .provider-tile[data-provider="local"] { color: var(--accent); border-color: var(--accent-line); }
-  .provider-tile svg { width: 18px; height: 18px; }
+  .provider-tile { width: 32px; height: 32px; flex: none; display: grid; place-items: center; background: transparent; color: var(--ink); }
+  .provider-tile svg { width: 21px; height: 21px; }
+  .provider-glyph { font-size: 19px; font-weight: 700; line-height: 1; }
   .dest-id { min-width: 0; flex: 1; }
   .dest-id h3 { font-family: var(--mono); font-size: 14.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dest-id .who { color: var(--muted); font-size: 12.5px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dest-id .email-line { font-size: 11.5px; color: var(--faint); }
   .state-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 550; padding: 3px 8px; border-radius: 999px; white-space: nowrap; flex: none; border: 1px solid var(--line); color: var(--muted); background: var(--panel-2); }
   .state-chip::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--faint); }
   .state-chip[data-state="connected"] { color: var(--good); background: var(--good-soft); border-color: color-mix(in srgb, var(--good) 45%, var(--line)); }
@@ -174,6 +181,15 @@
   .dest.add h3 { font-size: 14px; font-weight: 600; }
   .dest.add p { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
 
+  .auth-list { display: flex; flex-direction: column; gap: 10px; max-width: 640px; margin-top: 14px; }
+  .auth-heading { font-size: 14px; font-weight: 600; color: var(--muted); margin-bottom: 2px; }
+  .auth-card { display: flex; align-items: center; gap: 14px; padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--radius); background: transparent; }
+  .auth-card:hover { background: var(--panel); }
+  .auth-body { flex: 1; min-width: 0; }
+  .auth-body h3 { font-size: 15.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .auth-body p { font-size: 12.5px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .auth-body .auth-links { display: flex; gap: 9px; margin-top: 5px; }
+  .auth-actions { display: flex; align-items: center; gap: 8px; flex: none; }
   .onboard { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 12px; padding: 14px 16px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--panel); }
   .onboard h3 { font-size: 13.5px; font-weight: 600; }
   .onboard p { color: var(--muted); font-size: 12.5px; margin-top: 3px; }
@@ -324,6 +340,7 @@
         <span class="brand-word">mokuro<span class="bridge">-bridge</span></span>
       </a>
       <div class="topbar-right">
+        <a class="topbar-link" href="https://reader.mokuro.app/" target="_blank" rel="noopener">Open reader <span aria-hidden="true">↗</span></a>
         <span class="chip" id="status-chip" data-state="busy" role="status" aria-live="polite">
           <span class="dot" aria-hidden="true"></span>
           <span class="chip-text" id="status-text">Connecting…</span>
@@ -367,6 +384,15 @@
           <dd class="stat-sub" id="stat-target-sub">default destination</dd>
         </div>
       </dl>
+      <div class="accel" id="accel" data-on="false">
+        <span class="accel-dot" aria-hidden="true"></span>
+        <span class="accel-name">Browser acceleration</span>
+        <span class="accel-text" id="accel-text">Checking ports…</span>
+        <span class="accel-actions">
+          <button class="link" type="button" id="accel-adjust">Adjust</button>
+          <a class="link" href="https://github.com/GolyBidoof/mokuro-bridge/blob/main/docs/browser-acceleration.md" target="_blank" rel="noopener">How this works</a>
+        </span>
+      </div>
     </section>
 
     <div id="notices"></div>
@@ -381,6 +407,7 @@
         <button class="btn" id="add-inline" type="button">Add destination</button>
       </div>
       <div class="dest-grid" id="destinations" aria-live="polite"></div>
+      <div id="auth-destinations"></div>
       <div id="onboard"></div>
     </section>
 
@@ -579,6 +606,11 @@ const PROVIDER_META = {
     blurb: "A short Microsoft code, entered once in your browser.",
     empty: "The Microsoft sign-in library is not installed.",
   },
+  webdav: {
+    label: "WebDAV", kind: "form",
+    blurb: "Any WebDAV server: Nextcloud, ownCloud, Synology, a NAS or a folder over HTTPS.",
+    empty: "The requests library is not installed.",
+  },
   local: { label: "This computer", kind: null, blurb: "", empty: "" },
 };
 
@@ -608,6 +640,7 @@ function icon(name, cls) {
     cloud: '<path d="M7 18h10a4 4 0 0 0 .4-7.97A6 6 0 0 0 5.7 11.6 3.5 3.5 0 0 0 7 18Z"/>',
     drive: '<path d="M12 4 3.5 19h6.2L18.2 4H12Z"/><path d="M9.7 19h10.8l-3.4-6H10.9"/>',
     onedrive: '<path d="M6.5 18.5h11a3.5 3.5 0 0 0 .4-6.97A5.5 5.5 0 0 0 7.2 9.8a4.4 4.4 0 0 0-.7 8.7Z"/><path d="M9 15.5h8"/>',
+    server: '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
     copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
     warn: '<path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
@@ -812,6 +845,16 @@ function renderLive() {
     $("settings-file").textContent = state.config.settings_file || "…";
     $("engine-info").textContent = engineText(h);
     $("proxy-info").textContent = proxyText(h);
+  const accel = $("accel");
+  if (accel) {
+    const ports = h.fetchProxyPorts || [];
+    accel.dataset.on = String(ports.length > 0);
+    if (ports.length) {
+      $("accel-text").textContent = `${ports.length} ports open (${ports[0]}–${ports[ports.length - 1]}) · up to ${6 * ports.length} extra browser lanes`;
+    } else {
+      $("accel-text").textContent = "off · the browser downloader uses its usual connections";
+    }
+  }
   }
   const update = $("foot-update");
   if (!offline && h.update_available) {
@@ -881,22 +924,30 @@ function renderNotices() {
  *  Rendering: destinations
  * ------------------------------------------------------------------ */
 function providerIcon(provider) {
-  const map = { mega: "cloud", drive: "drive", onedrive: "onedrive", local: "folder" };
-  return icon(map[provider] || "cloud");
+  if (provider === "drive") {
+    return '<svg class="brand-drive" viewBox="0 0 24 24" aria-hidden="true">' +
+      '<path d="M8.4 3h7.2l6.4 11h-7.2z" fill="#4285f4"/>' +
+      '<path d="M8.4 3 2 14l3.6 6.2L12 9z" fill="#34a853"/>' +
+      '<path d="M5.6 20.2h12.8L21.9 14H9.2z" fill="#fbbc04"/></svg>';
+  }
+  const glyph = { mega: "M", onedrive: "O", webdav: "W", local: "\u{1F4C1}" }[provider] || "?";
+  return `<span class="provider-glyph" aria-hidden="true">${glyph}</span>`;
 }
 
 function renderDestinations() {
   const config = state.config;
   if (!config) return;
   const methods = config.methods || [];
-  const html = methods.map((m) => {
+  const connected = methods.filter((m) => stateOf(m) === "connected");
+  const html = connected.map((m) => {
     const provider = providerOf(m);
     const alias = aliasOf(m);
     const st = stateOf(m);
     const meta = PROVIDER_META[provider] || PROVIDER_META.local;
     const label = m.label || (m.account && m.account !== "default" ? m.account : "");
     const email = (m.extra && m.extra.email) || "";
-    const who = [meta.label, label, email && email !== label ? email : ""].filter(Boolean).join(" · ");
+    const who = label || (email ? "" : meta.label);
+    const emailLine = email && email !== label ? email : "";
     const folder = tidyFolder(m.root || m.current_folder);
     const isLocal = provider === "local";
     const folderLine = folder || (isLocal ? state.config.output_dir : "");
@@ -917,7 +968,8 @@ function renderDestinations() {
         <span class="provider-tile" data-provider="${esc(provider)}" aria-hidden="true">${providerIcon(provider)}</span>
         <div class="dest-id">
           <h3>${esc(alias)}</h3>
-          <p class="who">${esc(who)}</p>
+          <p class="who">${esc(who || meta.label)}</p>
+          ${emailLine ? `<p class="who email-line" title="${esc(emailLine)}">${esc(emailLine)}</p>` : ""}
         </div>
         <span class="state-chip" data-state="${esc(st)}">${esc(STATE_LABEL[st] || st)}</span>
       </div>
@@ -928,9 +980,44 @@ function renderDestinations() {
     </article>`;
   }).join("");
 
+  const AUTH_BLURB = {
+    mega: "20GB free · Persistent sign-in",
+    drive: "15GB free · Reconnects when the token expires",
+    onedrive: "5GB free · Personal or work account",
+    webdav: "Nextcloud, NAS or any WebDAV server",
+  };
+  const AUTH_STATE = {
+    needs_sign_in: "Sign-in expired · reconnect to keep uploading",
+    not_configured: "Not connected yet",
+  };
+  const authMethods = methods.filter((m) => stateOf(m) !== "connected");
+  const authRows = authMethods.map((m) => {
+    const provider = providerOf(m);
+    const alias = aliasOf(m);
+    const st = stateOf(m);
+    const meta = PROVIDER_META[provider] || { label: m.provider_label || provider };
+    const title = alias !== provider ? `${meta.label} · ${alias}` : meta.label;
+    const blurb = AUTH_STATE[st] || "";
+    const detail = AUTH_BLURB[provider] || "";
+    const connect = stateOf(m) === "needs_sign_in" ? "Reconnect" : "Connect";
+    const action = `<button class="btn primary" type="button" data-reconnect="${esc(alias)}">${connect}</button>`;
+    const links = [`<button class="link" type="button" data-details="${esc(alias)}">Details</button>`];
+    if (m.account && m.account !== "default") links.push(`<button class="link danger" type="button" data-remove="${esc(alias)}">Remove</button>`);
+    return `<div class="auth-card" role="group" aria-label="${esc(title)}">
+      <span class="provider-tile" data-provider="${esc(provider)}" aria-hidden="true">${providerIcon(provider)}</span>
+      <div class="auth-body">
+        <h3>${esc(title)}</h3>
+        <p>${esc([blurb, detail].filter(Boolean).join(" · "))}</p>
+        <div class="auth-links">${links.join("")}</div>
+      </div>
+      <div class="auth-actions">${action}</div>
+    </div>`;
+  }).join("");
+  $("auth-destinations").innerHTML = authRows ? `<div class="auth-list"><h3 class="auth-heading">Not connected yet</h3>${authRows}</div>` : "";
+
   const addCard = `<button class="dest add" type="button" data-add="1" aria-label="Add a destination">
     <span class="inner"><span class="plus" aria-hidden="true">${icon("plus")}</span>
-    <span><h3>Add a destination</h3><p>MEGA, Google Drive, OneDrive, or another account of one you already use.</p></span></span>
+    <span><h3>Add a destination</h3><p>MEGA, Google Drive, OneDrive, WebDAV, or another account of one you already use.</p></span></span>
   </button>`;
 
   $("destinations").innerHTML = html + addCard;
@@ -938,7 +1025,7 @@ function renderDestinations() {
   const remote = methods.filter((m) => providerOf(m) !== "local");
   const unconfigured = remote.filter((m) => stateOf(m) !== "connected");
   $("onboard").innerHTML = remote.length === 0 ? `<div class="onboard">
-    <div><span class="step-n">01</span><h3>Add a destination</h3><p>Connect MEGA, Google Drive or OneDrive. Everything is done right here; no terminal needed.</p></div>
+    <div><span class="step-n">01</span><h3>Add a destination</h3><p>Connect MEGA, Google Drive, OneDrive or WebDAV. Everything is done right here; no terminal needed.</p></div>
     <div><span class="step-n">02</span><h3>Pick a folder</h3><p>Browse the provider's real folders and choose where volumes should be filed.</p></div>
     <div><span class="step-n">03</span><h3>Use it from scripts</h3><p>Each destination gets a short name like <code>mega-work</code>. Point dokuha at it with <code>upload_method=mega-work</code>.</p></div>
   </div>` : "";
@@ -949,7 +1036,14 @@ function renderDestinations() {
   $("destinations").querySelectorAll("[data-rename]").forEach((b) => b.onclick = () => openRename(b.dataset.rename));
   $("destinations").querySelectorAll("[data-remove]").forEach((b) => b.onclick = () => openRemove(b.dataset.remove));
   $("destinations").querySelectorAll("[data-copy]").forEach((b) => b.onclick = () => copyText(`upload_method=${b.dataset.copy}`, "Destination id"));
-  $("destinations").querySelectorAll("[data-details]").forEach((b) => b.onclick = () => openDetails(b.dataset.details));
+  document.querySelectorAll("#destinations [data-details], #auth-destinations [data-details]").forEach((b) => b.onclick = () => openDetails(b.dataset.details));
+  document.querySelectorAll("#auth-destinations [data-remove]").forEach((b) => b.onclick = () => openRemove(b.dataset.remove));
+  document.querySelectorAll("#auth-destinations [data-reconnect]").forEach((b) => {
+    b.onclick = () => {
+      const method = methods.find((m) => aliasOf(m) === b.dataset.reconnect);
+      if (method) openReconnect(method);
+    };
+  });
   $("destinations").querySelectorAll("[data-reconnect]").forEach((b) => {
     b.onclick = () => {
       const method = methods.find((m) => aliasOf(m) === b.dataset.reconnect);
@@ -1354,7 +1448,7 @@ function compatibilityProvider(provider) {
 }
 
 function renderProviderPicker() {
-  const providers = ["mega", "drive", "onedrive"];
+  const providers = ["mega", "drive", "onedrive", "webdav"];
   $("add-picker").innerHTML = `<div class="provider-picker">${providers.map((id) => {
     const info = compatibilityProvider(id);
     const unavailable = !info.available;
@@ -1379,7 +1473,7 @@ function renderProviderPicker() {
 
 function unavailableNotes() {
   const notes = [];
-  ["mega", "drive", "onedrive"].forEach((id) => {
+  ["mega", "drive", "onedrive", "webdav"].forEach((id) => {
     const info = compatibilityProvider(id);
     if (info.available) return;
     const link = PROVIDER_LINKS[id];
@@ -1418,6 +1512,7 @@ function openProviderForm(provider, mode, account) {
     mega: "MEGA needs your account email and password once. They are kept in this computer's keychain, never in a file the page can read.",
     drive: "You will sign in to Google in a new tab. This page waits here until it is done.",
     onedrive: "This page shows a short code. Enter it once on Microsoft's site, then come back; it finishes by itself.",
+    webdav: "The server's own username and password. They are checked once against the server, then kept in this computer's credential store.",
   };
   form.innerHTML = `<div class="form-grid">
     <div class="form-grid two">
@@ -1434,6 +1529,21 @@ function openProviderForm(provider, mode, account) {
     ${provider === "mega" ? `<div class="form-grid two">
       <div class="field"><label for="add-email">MEGA email</label><input id="add-email" type="email" autocomplete="username" required></div>
       <div class="field"><label for="add-password">Password</label><input id="add-password" type="password" autocomplete="current-password" required></div>
+    </div>` : ""}
+    ${provider === "webdav" ? `<div class="field">
+      <label for="add-url">Server URL</label>
+      <input id="add-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://cloud.example.com/remote.php/dav/files/you/" value="${esc((account && account.extra && account.extra.url) || "")}" required>
+      <span class="hint">The WebDAV collection to upload into. The bridge creates <code>&lt;root&gt;/&lt;series&gt;/</code> inside it, and checks the URL before saving anything.</span>
+    </div>
+    <div class="form-grid two">
+      <div class="field">
+        <label for="add-username">Username</label>
+        <input id="add-username" type="text" autocomplete="username" spellcheck="false" value="${esc((account && account.extra && (account.extra.username || account.extra.email)) || "")}" required>
+      </div>
+      <div class="field">
+        <label for="add-password">Password</label>
+        <input id="add-password" type="password" autocomplete="current-password" ${mode === "reconnect" ? "placeholder=\"Leave empty to keep the saved one\"" : "required"}>
+      </div>
     </div>` : ""}
     ${provider === "drive" ? `<div class="field" id="drive-client-fields" ${info.live && info.live.client_preset ? "hidden" : ""}>
       <label for="add-client-id">Google client ID</label>
@@ -1505,6 +1615,23 @@ async function submitProviderForm() {
       restore();
       return;
     }
+    if (provider === "webdav") {
+      const url = $("add-url").value.trim();
+      const username = $("add-username").value.trim();
+      const password = $("add-password").value;
+      if (!url || !username || !password) {
+        addError("Enter the WebDAV server URL, username and password.");
+        restore();
+        return;
+      }
+      submit.textContent = "Checking the server…";
+      const result = await postForm("/config/accounts/webdav", { alias, label, url, username, password });
+      toast(`${result.method || alias} connected.`, "info");
+      closeDialog("add-dialog");
+      await loadConfig();
+      restore();
+      return;
+    }
     if (provider === "onedrive") {
       submit.textContent = "Starting…";
       const flow = await postForm("/config/accounts/onedrive/start", { alias, label });
@@ -1534,7 +1661,9 @@ async function submitProviderForm() {
   } catch (error) {
     addError(error.message);
     restore();
-    submit.textContent = state.add.mode === "reconnect" ? "Reconnect" : "Connect";
+    submit.textContent = state.add.mode === "reconnect"
+      ? "Reconnect"
+      : (provider === "webdav" ? "Connect WebDAV" : "Connect");
   }
 }
 
@@ -1654,20 +1783,23 @@ function openDetails(alias) {
   const provider = providerOf(method);
   const meta = PROVIDER_META[provider] || PROVIDER_META.local;
   const st = stateOf(method);
-  const email = (method.extra && method.extra.email) || "";
+  const email = (method.extra && (method.extra.email || method.extra.username)) || "";
+  const server = (provider === "webdav" && method.extra && method.extra.url) || "";
   const account = method.account && method.account !== "default" ? method.account : "Default account";
   const folder = tidyFolder(method.root || method.current_folder) || (provider === "local" ? state.config.output_dir : "not chosen yet");
   const creds = method.creds_source ? ({
     keychain: "Saved in this computer's keychain",
     file: "Saved in a credentials file on this computer",
     oauth: "Saved browser sign-in on this computer",
+    env: "Set by an environment variable on this computer",
   }[method.creds_source] || "Saved on this computer") : "";
   const rows = [
     ["Provider", esc(meta.label)],
     ["Account", esc(account)],
     ["Name", `<code>${esc(alias)}</code>`],
     method.label ? ["Note", esc(method.label)] : null,
-    email ? ["Email", esc(email)] : null,
+    email ? [provider === "webdav" ? "Username" : "Email", esc(email)] : null,
+    server ? ["Server", `<code>${esc(server)}</code>`] : null,
     ["Folder", `<code>${esc(folder)}</code>`],
     ["Status", esc(STATE_LABEL[st] || st)],
     creds ? ["Sign-in", esc(creds)] : null,
@@ -1767,6 +1899,13 @@ function bindDialogPlumbing() {
       dialog.close();
     });
   });
+  $("accel-adjust").onclick = () => {
+    const input = document.getElementById("set-MOKURO_BRIDGE_FETCH_PORTS");
+    const row = document.querySelector('[data-pref="MOKURO_BRIDGE_FETCH_PORTS"]');
+    if (row) row.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (input && !input.disabled) input.focus();
+    if (input && input.disabled) toast("This value is pinned by MOKURO_BRIDGE_FETCH_PORTS, so it is set outside this page.", "info");
+  };
   $("add-top").onclick = () => openAdd();
   $("add-inline").onclick = () => openAdd();
   $("folder-up").onclick = () => {

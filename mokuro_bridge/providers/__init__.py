@@ -16,7 +16,7 @@ from ..config import (
     _load_remembered_local_dir,
 )
 from ..util import _chmod_fd_private, series_title_from_volume
-from . import drive, mega, onedrive
+from . import drive, mega, onedrive, webdav
 from .base import (
     DOWNLOAD_LIMIT_BYTES,
     LIST_LIMIT_ENTRIES,
@@ -71,14 +71,14 @@ __all__ = [
 # full contract is in docs/providers.md.
 _PROVIDERS: dict[str, Provider] = {
     provider.id: provider
-    for provider in (mega.PROVIDER, drive.PROVIDER, onedrive.PROVIDER)
+    for provider in (mega.PROVIDER, drive.PROVIDER, onedrive.PROVIDER, webdav.PROVIDER)
 }
 
 
 def register_provider(provider: Provider) -> None:
     """Add or replace one provider in the live registry.
 
-    The three shipped providers are registered at import. A test or an out of
+    The shipped providers are registered at import. A test or an out of
     tree backend calls this to extend dispatch without touching any of the
     lookup sites in this module.
     """
@@ -448,6 +448,9 @@ def forget_account(target: str) -> dict:
                 removed.append(f"keychain:mega.nz/{email}")
         else:
             notes.append("no account file records a MEGA email, so any keychain item was left alone")
+    elif provider == "webdav" and name == accounts.DEFAULT_NAME:
+        # Only the default account ever used the shared keychain item.
+        removed += webdav.forget_default_keychain()
     return {"id": label, "removed": removed, "notes": notes}
 
 

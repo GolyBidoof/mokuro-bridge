@@ -2,18 +2,19 @@
 
 Where a finished volume goes, how accounts are named, where their credentials live, and which target is the default.
 
-## The four targets
+## The five targets
 
-The bridge ships four destinations: a local folder, MEGA, Google Drive and OneDrive. Upload providers are optional installs, and `local` needs nothing beyond the base install.
+The bridge ships five destinations: a local folder, MEGA, Google Drive, OneDrive and WebDAV. Upload providers are optional installs, and `local` needs nothing beyond the base install.
 
 | Target | Provider id | Requires | Remote path |
 | --- | --- | --- | --- |
 | Local folder | `local` | nothing | `<output>/<series>/` |
 | MEGA | `mega` | the `megatools` binary plus credentials | `<root>/<series>/` |
-| Google Drive | `drive` | `google-api-python-client` and an OAuth or service-account credential | `<root>/<series>/` |
+| Google Drive | `drive` | `google-api-python-client` and an OAuth credential | `<root>/<series>/` |
 | OneDrive | `onedrive` | `msal` plus an Azure app client ID | `<root>/<series>/` |
+| WebDAV | `webdav` | `requests` (`requirements-webdav.txt`) plus a server URL and Basic-auth credentials | `<base>/<root>/<series>/` |
 
-WebDAV is not a target. A WebDAV provider existed briefly in the v0.3.0 era and was removed before v0.4.0, so no tagged release supports it. Any documentation elsewhere that lists WebDAV as a current destination of this service is out of date.
+A provider id is also the alias of that provider's first account. The local folder is a destination but not an account, and its id is always `local`.
 
 Each destination receives the same four files under a per-series folder: `<volume>.webp` (cover), `<volume>.cbz` (pages), `<volume>.mokuro` (OCR text and blocks) and one shared `series.json` (the reader's per-series index). The series name is derived from the volume title by dropping edition and imprint tags, so `サンプル作品（２）【電子限定特典付き】` and `サンプル作品 1巻` share one series folder.
 
@@ -23,34 +24,55 @@ The remote collision policy is chosen per finalize with `overwrite`: `fail` (the
 
 The remote root of each account is editable from the configuration dashboard, which browses the provider's own folder tree and can set any folder as that account's default upload directory. See [dashboard.md](dashboard.md).
 
-## How accounts are named
+## Accounts and aliases
 
-Every provider can hold more than one account. An account is addressed by a *method id*:
+Every provider can hold any number of accounts. An account is addressed by an *alias*, which is the user-facing method id:
 
-| Method id | Account |
+| Alias | Account |
 | --- | --- |
-| `local` | The local output folder (the only non-account target) |
-| `mega` | The default MEGA account |
-| `mega:work` | A second MEGA account named `work` |
-| `drive:personal` | A Google Drive account named `personal` |
-| `onedrive:uni` | A OneDrive account named `uni` |
+| `local` | The local output folder (not an account) |
+| `mega` | The first MEGA account |
+| `mega-2`, `mega-beta` | A second MEGA account, suggested as `mega-2` and renameable to any free alias |
+| `drive` | The first Google Drive account |
+| `drive-next` | A second Google Drive account |
+| `onedrive-uni` | A OneDrive account named by the user |
+| `webdav` | The first WebDAV account |
 
-A bare provider id always means that provider's default account, so existing single-account configurations keep working. The redundant `<provider>:default` is normalised to the bare id. Account names are 1 to 32 characters from `a-z`, `0-9`, `_` and `-`, starting with a letter or a digit, and are lowercased. `local` has no accounts.
+Aliases are 1 to 32 characters from lowercase `a-z`, digits `0-9` and `-`, starting with a letter or digit. They are globally unique across providers, `local` is reserved, and so is another provider's bare name (`mega`, `drive`, `onedrive`, `webdav`). The first account of a provider is suggested as the bare provider name; later accounts are suggested as `<provider>-2`, `<provider>-3`, and so on, skipping anything taken. Any free alias can be typed instead.
 
-Legacy booleans are still accepted where a method id is expected: `true`, `yes`, `on` and `1` mean `mega`; `false`, `no`, `off` and `0` mean `local`. New clients should send an id.
-
-## Managing accounts
-
-The CLI is the only place accounts are created, listed or removed:
+The alias is the id reported by `GET /health`, `GET /upload-methods` and `GET /config`, and the value a client passes as `upload_method` (or `--dest` in dokuha-cli). To select an account from a script, read the ids from `/upload-methods` and send one on the finalize:
 
 ```bash
-mokuro-bridge --setup-upload mega                              # default MEGA account
-mokuro-bridge --setup-upload mega --name work --root /Root/work --label Work
-mokuro-bridge --list-uploads
-mokuro-bridge --remove-upload mega:work
+curl -X POST "http://127.0.0.1:62642/session/<id>/finalize" \
+  -d "upload_method=mega-work" -d "delete_after_upload=true"
 ```
 
-`--setup-upload` accepts `mega`, `drive`, `onedrive`, or `<provider>:<name>`. Running it again with a new `--name` adds a second account. `--root` sets the account's remote root, and `--label` sets the human label shown in `--list-uploads` and `/health`. `--setup-mega` remains accepted as a hidden compatibility flag but is no longer advertised.
+Historical spellings keep working as input forever: a bare provider (`mega`), `mega:work`, `drive:main` and `provider:default` all resolve to the same account, so an old script or a stored default needs no migration. Displays now show the alias, so an old `mega:work` appears as `mega-work`; the account's files and legacy credential paths are not rewritten for that. The redundant `<provider>:default` is normalised to the bare id.
+
+Legacy booleans are still accepted where a method id is expected: `true`, `yes`, `on` and `1` mean `mega`; `false`, `no`, `off` and `0` mean `local`. New clients should send an alias.
+
+## Adding, renaming and removing accounts
+
+The configuration dashboard is the main path, and it covers every provider. Add destination opens a provider picker:
+
+- MEGA asks for the account email and password and verifies them with `megatools` before storing anything.
+- Google Drive opens Google's sign-in in a new tab and returns to the bridge's OAuth callback.
+- OneDrive runs Microsoft's device-code flow.
+- WebDAV asks for the server URL, username and password and contacts the server once before saving, so a typo is an error instead of an account that fails every later upload.
+
+Reconnect appears on an account whose saved sign-in has expired and runs the same flow again under the same alias, keeping the folder, note and default. Rename changes the alias and the note while preserving the folder, credentials and the default flag; an alias already used by another account is refused. Remove deletes the account metadata and its saved credentials, leaves uploaded files alone, and clears the sticky default if it pointed there. See [dashboard.md](dashboard.md) for the page itself.
+
+The terminal path still works for every provider, including WebDAV:
+
+```bash
+mokuro-bridge --setup-upload mega
+mokuro-bridge --setup-upload drive --name next --label Next
+mokuro-bridge --setup-upload webdav
+mokuro-bridge --list-uploads
+mokuro-bridge --remove-upload drive-next
+```
+
+`--setup-upload` takes a provider and optionally `--name`, `--root` and `--label`. A `--name` becomes the storage name and the derived alias (`--name next` becomes `drive-next`; underscores become hyphens). Running the wizard again for an existing account re-authenticates it, which is the terminal equivalent of Reconnect. `--setup-mega` remains accepted as a hidden compatibility flag but is no longer advertised. Renaming from the terminal is not offered; use the dashboard.
 
 Each wizard offers to install its provider's requirements file when the SDK is missing, with one confirmation, and never installs without consent.
 
@@ -58,13 +80,15 @@ Each wizard offers to install its provider's requirements file when the SDK is m
 
 Nothing secret is ever written to this repository.
 
-**Account metadata.** One JSON file per account under `~/.config/mokuro-bridge/accounts/<provider>__<name>.json` (`MOKURO_BRIDGE_ACCOUNTS_DIR`). It holds only non-secret fields: display label, remote root, and for MEGA the account email. The default account deliberately keeps using the legacy single-account paths, so a single-account install needs no migration.
+**Account metadata.** One JSON file per account under `~/.config/mokuro-bridge/accounts/<provider>__<storage>.json` (`MOKURO_BRIDGE_ACCOUNTS_DIR`). It holds only non-secret fields: the alias, the display label, the remote root, and for MEGA the account email, or for WebDAV the server URL and username. The first account of a provider keeps the historical `default` storage name and its legacy single-account credential paths, so a single-account install needs no migration; later accounts use a file named after their alias (or, for accounts created before aliases, the old `name`).
 
-**MEGA.** For the default account, resolution order is `MEGA_EMAIL` and `MEGA_PASSWORD` in the environment, then `MEGA_CREDS_FILE` (`~/.config/mokuro-bridge/credentials.env`, mode 0600), then the OS credential store: macOS Keychain via the `security` binary, or any `keyring` backend (Windows Credential Manager, Linux Secret Service). For a named account the password is read from the OS store scoped to the email recorded in its account file, with a 0600 per-account `credentials.env` as the fallback. MEGA uploads also need the `megatools` binary; `/health` reports `megatools_installed`, `mega_configured` and `mega_creds_source` (`env`, `file` or `keychain`). The default remote root is `/Root/mokuro-reader` (`MEGA_LIBRARY_ROOT`).
+**MEGA.** For the first account, resolution order is `MEGA_EMAIL` and `MEGA_PASSWORD` in the environment, then `MEGA_CREDS_FILE` (`~/.config/mokuro-bridge/credentials.env`, mode 0600), then the OS credential store: macOS Keychain via the `security` binary, or any `keyring` backend (Windows Credential Manager, Linux Secret Service). For any account, the password is also read from the OS store scoped to the email recorded in its account file, with a 0600 per-account `credentials.env` as the fallback. MEGA uploads also need the `megatools` binary; `/health` reports `megatools_installed`, `mega_configured` and `mega_creds_source` (`env`, `file` or `keychain`). The default remote root is `/Root/mokuro-reader` (`MEGA_LIBRARY_ROOT`).
 
-**Google Drive.** OAuth2 desktop-app credentials in `~/.config/mokuro-bridge/drive_credentials.json` (mode 0600, `DRIVE_CREDS_FILE`), or the same path holding a service-account key, which is detected by its `"type": "service_account"` field. A named account keeps its own 0600 file as `~/.config/mokuro-bridge/accounts/drive__<name>.creds.json`. The wizard walks through creating a free Google Cloud OAuth client and pasting its client ID and secret, because a client may only run in the project that registered it; `DRIVE_CLIENT_ID` and `DRIVE_CLIENT_SECRET` (or `DRIVE_CLIENT_SECRET_FILE`) can preset that. The scope is `drive.file` and the library root is the folder `mokuro-reader` at My Drive root (`DRIVE_ROOT_NAME`). `/health` reports `root` and `creds_source` per account.
+**Google Drive.** OAuth2 desktop-app credentials in `~/.config/mokuro-bridge/drive_credentials.json` (mode 0600, `DRIVE_CREDS_FILE`), or the same path holding a service-account key, which is detected by its `"type": "service_account"` field. A second account keeps its own 0600 file, `~/.config/mokuro-bridge/accounts/drive__<storage>.creds.json`. The dashboard's Add destination walks through Google's sign-in; a free Google Cloud OAuth client is needed once, and `DRIVE_CLIENT_ID` and `DRIVE_CLIENT_SECRET` (or `DRIVE_CLIENT_SECRET_FILE`) can preset it. A client pasted into the page is used for that sign-in only and never persisted. The scope is `drive.file` and the library root is the folder `mokuro-reader` at My Drive root (`DRIVE_ROOT_NAME`). `/health` reports `root` and `creds_source` per account.
 
-**OneDrive.** MS Graph device-code sign-in, with the token in `~/.config/mokuro-bridge/onedrive_token.json` (mode 0600, `ONEDRIVE_TOKEN_FILE`), or `~/.config/mokuro-bridge/accounts/onedrive__<name>.token.json` for a named account. The wizard asks for an Azure app client ID, or takes `ONEDRIVE_CLIENT_ID` from the environment. The scope is `Files.ReadWrite` (`offline_access` is added by msal itself and must not be listed) and the library root is the folder `mokuro-reader` (`ONEDRIVE_ROOT_NAME`).
+**OneDrive.** MS Graph device-code sign-in, with the token in `~/.config/mokuro-bridge/onedrive_token.json` (mode 0600, `ONEDRIVE_TOKEN_FILE`), or `~/.config/mokuro-bridge/accounts/onedrive__<storage>.token.json` for a later account. The dashboard asks Microsoft for the code, or the terminal wizard asks for an Azure app client ID; `ONEDRIVE_CLIENT_ID` presets it. The scope is `Files.ReadWrite` (`offline_access` is added by msal itself and must not be listed) and the library root is the folder `mokuro-reader` (`ONEDRIVE_ROOT_NAME`).
+
+**WebDAV.** The server URL and username are non-secret and live in the account metadata. The password is written to that account's 0600 credentials file, `~/.config/mokuro-bridge/webdav_credentials.json` (`WEBDAV_CREDS_FILE`) for the first account and `~/.config/mokuro-bridge/accounts/webdav__<storage>.creds.json` for later ones, and the first account mirrors it into the OS keychain (`webdav:username` and `webdav:password`) so a keychain-only setup written by the old provider keeps working. Resolution is `WEBDAV_PASSWORD` in the environment, then the file, then the keychain, so a password changed in the dashboard always wins over a stale keychain item. `WEBDAV_BASE_URL` and `WEBDAV_USERNAME` seed the first account for an existing setup, and the folder created under the base URL defaults to `mokuro-reader` (`WEBDAV_ROOT_NAME`). WebDAV needs only `requests` (`requirements-webdav.txt`); there is no per-provider SDK.
 
 **Local.** The base directory is `MOKURO_BRIDGE_OUTPUT_DIR`, or a checkout's `<repo>/output`, or `~/mokuro-bridge/output` for an installed wheel.
 
@@ -72,14 +96,14 @@ Nothing secret is ever written to this repository.
 
 The default target is deliberately sticky, and it is the one behaviour most likely to surprise a new client.
 
-Once any client names a destination explicitly (an `upload_method` or the legacy `upload_to_mega`), that choice is remembered in the work directory and becomes the default for every later request, including requests from other clients and requests after a restart, until another explicit choice replaces it. It is stored as `{"method": "<id>"}` in `<work dir>/upload_method_default.json`, mode 0600, written atomically.
+Once any client names a destination explicitly (an `upload_method` or the legacy `upload_to_mega`), that choice is remembered in the work directory as the account's alias and becomes the default for every later request, including requests from other clients and requests after a restart, until another explicit choice replaces it. It is stored as `{"method": "<alias>"}` in `<work dir>/upload_method_default.json`, mode 0600, written atomically. A file written before aliases existed holds the old spelling; it resolves to the same account, follows a rename, and is deleted when that account is removed.
 
 Details that matter when reasoning about it:
 
 - Only a usable target is remembered: `local`, or an account that currently exists and is configured. An unconfigured provider is never made the default.
 - The choice is committed only after a finalize has acquired its exclusive session lease, so a losing concurrent finalize cannot change the process-wide default.
-- Before any explicit choice, the environment variable `MOKURO_BRIDGE_UPLOAD_DEFAULT` seeds the default. It accepts the legacy booleans (`true` means `mega`, `false` or empty means `local`) and an account id such as `mega:work`. An unknown or unconfigured value falls back.
-- `GET /upload-methods` and `GET /health` both report `upload_method_default`, so a client can display the current default instead of assuming it.
+- Before any explicit choice, the environment variable `MOKURO_BRIDGE_UPLOAD_DEFAULT` seeds the default. It accepts the legacy booleans (`true` means `mega`, `false` or empty means `local`), an alias such as `mega-work`, and the historical `mega:work` spelling. An unknown or unconfigured value falls back.
+- `GET /upload-methods` and `GET /health` both report `upload_method_default` as an alias, so a client can display the current default instead of assuming it.
 - Finalize resolves the target before it starts: an explicit `upload_method` wins, then the legacy `upload_to_mega`, then the remembered default, then the environment seed.
 
 A local output folder is sticky in the same way and independently: an explicit `local_dir` on a local finalize or a local cover upload is remembered in `<work dir>/local_dir_default.json` and used for later local writes, with `OUTPUT_DIR` as the fallback. A remembered path that has since become disallowed is dropped rather than raising an error.

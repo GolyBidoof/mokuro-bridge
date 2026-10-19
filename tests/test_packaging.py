@@ -61,6 +61,7 @@ def test_the_base_dependencies_match_requirements_txt(pyproject):
         ("ocr", "requirements-ocr.txt"),
         ("drive", "requirements-drive.txt"),
         ("onedrive", "requirements-onedrive.txt"),
+        ("webdav", "requirements-webdav.txt"),
         ("dev", "requirements-dev.txt"),
     ],
 )
@@ -75,9 +76,11 @@ def _names(requirements: list[str]) -> set[str]:
     return {re.split(r"[<>=!~;\[]", dep, maxsplit=1)[0].strip().lower() for dep in requirements}
 
 
-def test_the_cloud_extra_covers_both_upload_sdks_without_torch(pyproject):
+def test_the_cloud_extra_covers_every_upload_provider_without_torch(pyproject):
     extras = pyproject["project"]["optional-dependencies"]
-    assert _names(extras["cloud"]) == _names(extras["drive"]) | _names(extras["onedrive"])
+    assert _names(extras["cloud"]) == (
+        _names(extras["drive"]) | _names(extras["onedrive"]) | _names(extras["webdav"])
+    )
     # requests is listed in both provider files at different floors (>=2.20.0 for
     # Drive, >=2.31 for Graph); the combined extra must carry the stricter one,
     # not quietly the older.

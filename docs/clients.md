@@ -21,7 +21,7 @@ dokuha-cli is the batch downloader and the heavier client. It prefers the folder
 
 **Discovery.** It walks a candidate list (an explicit URL, `BWDD_BRIDGE_URL`, `MOKURO_BRIDGE_URL`, then `http://127.0.0.1:62642`, `:63442` and `:63443`) and accepts the first `GET /health` that answers `status: "ok"` or `app: "mokuro-bridge"`.
 
-**Destination.** It calls `GET /upload-methods` and resolves `--dest` against the configured ids: a bare provider name means the default account, `<provider>:<name>` means a named one, and no `--dest` keeps the bridge's current sticky default. `--dest-folder` becomes `local_dir` only when the method is `local`. Before downloading a volume it can call `POST /destination/check` and skip work the destination already has.
+**Destination.** It calls `GET /upload-methods`, whose ids are account aliases (the first account of a provider is the bare provider name, later ones are `mega-2`, `drive-next` and so on), and sends the chosen id as `upload_method`. `--dest` takes an alias, and the historical `<provider>:<name>` spelling still resolves to the same account; no `--dest` keeps the bridge's current sticky default. `--dest-folder` becomes `local_dir` only when the method is `local`. Before downloading a volume it can call `POST /destination/check` and skip work the destination already has.
 
 **Duplicate avoidance.** It calls `GET /sessions` and `GET /queue` first, and refuses to submit a duplicate when a session for the same title is already live. If `POST /session/start` answers `400` or `409` because a session owns the title, it inspects that live session instead of guessing.
 
@@ -29,7 +29,7 @@ dokuha-cli is the batch downloader and the heavier client. It prefers the folder
 
 **Streaming capture.** Otherwise it calls `POST /session/start` with `reuse_existing=true`, then pushes pages with `POST /session/{id}/page` (multipart `page`, `filename`, `page_num`), four concurrent by default, with backoff on `429` and `5xx`. Re-pushing a page the bridge already OCR'd comes back as a `409` that this client recognises as a cache hit rather than a failure. It polls `GET /session/{id}/status` with a cooldown that grows from 2 s to 15 s while nothing changes.
 
-**Finalize.** It always ends with one `POST /session/{id}/finalize`, sending `upload_method` (or the legacy `upload_to_mega=true`), `local_dir` when the method is local, `delete_after_upload=true`, and `overwrite` on a re-run so an existing destination file does not fail the retry. It reads the NDJSON stream, raises on an `error` frame, and requires a `done` frame; a stream that ends without one is treated as a truncated upload.
+**Finalize.** It always ends with one `POST /session/{id}/finalize`, sending `upload_method` as an account alias (for example `mega-work`, or the legacy `upload_to_mega=true`), `local_dir` when the method is local, `delete_after_upload=true`, and `overwrite` on a re-run so an existing destination file does not fail the retry. It reads the NDJSON stream, raises on an `error` frame, and requires a `done` frame; a stream that ends without one is treated as a truncated upload.
 
 ## dokuha-userscript
 
@@ -48,6 +48,6 @@ dokuha-userscript is the in-browser companion. The bundled BookWalker script sho
 ## What a client must not assume
 
 - **A stream that ends without `done` is not a success.** Both clients treat it as a truncated upload.
-- **`upload_method` is sticky.** Naming a destination on a finalize changes the default for every later request, including from the other client, until another explicit choice replaces it. See [destinations.md](destinations.md).
+- **`upload_method` is sticky.** Naming a destination on a finalize changes the default for every later request, including from the other client, until another explicit choice replaces it. The stored default is the account alias, and `GET /health` and `GET /upload-methods` report it as `upload_method_default`. See [destinations.md](destinations.md).
 - **A `409` is not always an error, and identical bytes are not a `409`.** Re-sending the exact bytes the bridge already holds comes back as `200` with `already_present: true`. A `409` reading `already has completed OCR` means the page is already cached from different bytes, so the stored OCR no longer matches the image.
 - **The bridge is unauthenticated.** Loopback binding is the only access control, so a client should reach it on `127.0.0.1` and no further.

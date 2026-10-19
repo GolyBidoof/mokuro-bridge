@@ -6,7 +6,7 @@
 
 - **dokuha-cli** is the engine and the batch downloader. A Node CLI that downloads manga volumes from five stores (BookWalker, CMOA, ebookjapan, Kindle and k-manga) at full resolution, unscrambles them offline, and owns *series* downloads: give it a series URL and it finds the free volumes and previews itself.
 - **dokuha-userscript** is the in-browser companion. What you can install today is the earlier userscript release, [bookwalker-ebookjapan-cmoa-native-downloader](https://github.com/GolyBidoof/bookwalker-ebookjapan-cmoa-native-downloader), which covers BookWalker, CMOA and ebookjapan: it downloads the single volume you already have open, with no install beyond a userscript manager. The rewrite that adds Kindle and k-manga is in development and not published yet.
-- **mokuro-bridge** (this repository) runs mokuro OCR on finished pages and uploads the result to MEGA, Google Drive, OneDrive or a local folder. Both downloaders hand finished volumes to it, so OCR and upload are identical no matter which one produced the pages, and it is useful on its own for any client that can produce page images. They end at the same `POST /session/{id}/finalize`, which assembles the volume files and the series index, uploads them and reports progress as NDJSON on the same connection; [docs/clients.md](docs/clients.md) gives the exact request sequence each client uses.
+- **mokuro-bridge** (this repository) runs mokuro OCR on finished pages and uploads the result to MEGA, Google Drive, OneDrive, any WebDAV server or a local folder. Both downloaders hand finished volumes to it, so OCR and upload are identical no matter which one produced the pages, and it is useful on its own for any client that can produce page images. They end at the same `POST /session/{id}/finalize`, which assembles the volume files and the series index, uploads them and reports progress as NDJSON on the same connection; [docs/clients.md](docs/clients.md) gives the exact request sequence each client uses.
 
 ## What this service is responsible for
 
@@ -17,7 +17,7 @@ The bridge owns one half of the capture pipeline and only that half: it never to
 | **What it is** | A local FastAPI service: pages in, `.cbz` + `.mokuro` + `.webp` + `series.json` out |
 | **Runs on** | macOS, Windows and Linux, Python 3.10 or newer |
 | **Needs** | Any mokuro plus PyTorch for OCR; the fetch accelerator is in the base install |
-| **Delivery** | A local folder by default; MEGA, Google Drive and OneDrive opt in |
+| **Delivery** | A local folder by default; MEGA, Google Drive, OneDrive and WebDAV opt in |
 | **Exposure** | Loopback only, unauthenticated, and meant to stay that way |
 
 ```
@@ -34,7 +34,7 @@ The bridge owns one half of the capture pipeline and only that half: it never to
 
 The bridge serves its own configuration dashboard at the address it prints at startup, `http://127.0.0.1:62642/`. It is one self-contained page, styled after reader.mokuro.app, with an Auto/Light/Dark switch that follows the operating system by default and is remembered in the browser. It shows the live status, the pages waiting to be read, the volumes reading now, the destination it files to, and one card per upload account with its alias, provider, note, folder and state.
 
-Accounts are added and managed in the page: MEGA with an email and password, Google Drive through Google's sign-in, OneDrive through Microsoft's device-code flow, with reconnect, rename, remove, set default and folder browsing on each account card. Each account gets a memorable alias such as `mega`, `mega-2` or `drive-next`; a dokuha script selects one with `upload_method=mega-work`. Historical ids (`mega:work`, `drive:main`) keep resolving, so old scripts do not break. Three preferences cover the browser downloader's extra ports, the fallback local output folder and extra read roots; everything else stays in `.env.example`. See [docs/dashboard.md](docs/dashboard.md).
+Accounts are added and managed in the page: MEGA with an email and password, Google Drive through Google's sign-in, OneDrive through Microsoft's device-code flow, WebDAV with a server URL and Basic credentials, with reconnect, rename, remove, set default and folder browsing on each account card. Each account gets a memorable alias such as `mega`, `mega-2` or `drive-next`; a dokuha script selects one with `upload_method=mega-work`. Historical ids (`mega:work`, `drive:main`) keep resolving, so old scripts do not break. Three preferences cover the browser downloader's extra ports, the fallback local output folder and extra read roots; everything else stays in `.env.example`. See [docs/dashboard.md](docs/dashboard.md).
 
 For a service running in the background, `mokuro-bridge --status` draws the same picture in a terminal: destinations with the default starred, the OCR queue, the pipeline and worker, the proxy ports, a live upload progress bar when one is active, and `?` for help. Keys are `r` refresh, `c` dashboard address, `?` help, `q` quit. Piped output is one full-height frame with no escape sequences, so `mokuro-bridge --status | head -30` is a snapshot you can paste into an issue.
 
@@ -42,11 +42,12 @@ For a service running in the background, `mokuro-bridge --status` draws the same
 
 - **Store-agnostic.** The bridge knows nothing about any store, so a storefront redesign cannot break OCR or delivery.
 - **OCR runs as pages arrive**, in batches with an idle flush, so a long volume is not a capture followed by a separate wait.
-- **A dashboard and a terminal status display.** Accounts, folders, the default destination and three preferences are editable in the page the bridge serves, with browser setup for all three cloud providers; `mokuro-bridge --status` draws the same state for a background service.
+- **A dashboard and a terminal status display.** Accounts, folders, the default destination and three preferences are editable in the page the bridge serves, with browser setup for every provider; `mokuro-bridge --status` draws the same state for a background service.
 - **Named destinations with aliases.** Each provider can hold any number of accounts (`mega`, `mega-2`, `drive-next`), each with its own remote root and credentials, and scripts select one by alias while legacy ids keep working.
+- **WebDAV, for a server you already run.** Nextcloud, ownCloud, Synology, a NAS or any other WebDAV collection is a destination: give the page a server URL and Basic credentials and the bridge creates `<root>/<series>/` and uploads the same four files it puts anywhere else.
 - **A sticky default.** Once any client names a destination explicitly, that choice becomes the default for every later request, including from other clients, until another explicit choice replaces it.
-- **Twenty-eight HTTP routes** cover capture, resume, status, queue, health, destination checks, configuration and browser account setup; the full table is in [docs/endpoints.md](docs/endpoints.md).
-- **A page-fetch accelerator for the browser companion.** A browser allows six connections per origin, and the port is part of the origin, so the bridge opens 48 extra localhost ports by default and lists them on `/health`. Each is worth six more sockets, so the userscript gets 288 extra lanes with nothing to configure.
+- **Twenty-nine HTTP routes** cover capture, resume, status, queue, health, destination checks, configuration and browser account setup; the full table is in [docs/endpoints.md](docs/endpoints.md).
+- **A page-fetch accelerator for the browser companion.** A browser allows six connections per origin, and the port is part of the origin, so the bridge opens 48 extra localhost ports by default and lists them on `/health`. Each is worth six more sockets, so the userscript gets 288 extra lanes with nothing to configure. The numbers, the browser-side limits and when to change them are in [docs/browser-acceleration.md](docs/browser-acceleration.md).
 - **Safe by default.** It binds to `127.0.0.1`, refuses to read outside your home and the system temp locations, stages uploads inside the work volume, and gates configuration writes to loopback origins.
 
 ## Use cases
@@ -81,7 +82,7 @@ pip install "mokuro @ git+https://github.com/GolyBidoof/mokuro"   # the fork, ba
 pip install -r requirements-ocr.txt                               # stock mokuro, slower
 ```
 
-Without an engine the bridge still runs, `/health` reports `mokuro_installed: false`, and only OCR is unavailable. An upload provider's SDK also stays out of the base install, and the dashboard's Add destination names what is missing per provider, with a link to the console that creates the OAuth client or app registration. `pip install "mokuro-bridge[cloud]"` adds both Google Drive and OneDrive without PyTorch.
+Without an engine the bridge still runs, `/health` reports `mokuro_installed: false`, and only OCR is unavailable. An upload provider's SDK also stays out of the base install, and the dashboard's Add destination names what is missing per provider, with a link to the console that creates the OAuth client or app registration. `pip install "mokuro-bridge[cloud]"` adds every upload provider (Google Drive, OneDrive and WebDAV) without PyTorch.
 
 The fork is the faster engine, and `mokuro-bridge --install-mokuro` replaces whichever `mokuro` is installed in the environment that runs the service, then verifies the import. `/health` reports which engine is loaded as `mokuro_flavor`. The exact commands, how to go back to upstream, and the per-environment caveat are in [docs/mokuro.md](docs/mokuro.md).
 
@@ -132,6 +133,6 @@ python3 -m ruff check .
 
 MIT, see [LICENSE](LICENSE).
 
-OCR runs on [the mokuro fork](https://github.com/GolyBidoof/mokuro), which adds batched recognition and is the recommended engine. It forks [kha-white's original mokuro](https://github.com/kha-white/mokuro), still supported as the slower fallback under its own licence. Cloud delivery uses the MEGA, Google Drive and OneDrive clients, each under its own terms. The `series.json` format is defined by [Gnathonic's mokuro-reader](https://github.com/Gnathonic/mokuro-reader) (GPL-3.0) and implemented a second time by [mokuro-bunko](https://github.com/Gnathonic/mokuro-bunko) (MPL-2.0). Neither codebase is copied here: this project pins the upstream files and ports the contract.
+OCR runs on [the mokuro fork](https://github.com/GolyBidoof/mokuro), which adds batched recognition and is the recommended engine. It forks [kha-white's original mokuro](https://github.com/kha-white/mokuro), still supported as the slower fallback under its own licence. Cloud delivery uses the MEGA, Google Drive and OneDrive clients, each under its own terms, or any WebDAV server you already run. The `series.json` format is defined by [Gnathonic's mokuro-reader](https://github.com/Gnathonic/mokuro-reader) (GPL-3.0) and implemented a second time by [mokuro-bunko](https://github.com/Gnathonic/mokuro-bunko) (MPL-2.0). Neither codebase is copied here: this project pins the upstream files and ports the contract.
 
 The code was written by DeepSeek V4.1 Flash.

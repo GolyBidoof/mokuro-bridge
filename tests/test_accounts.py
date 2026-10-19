@@ -54,7 +54,7 @@ def test_local_is_never_an_account():
 
 def test_every_provider_has_an_implicit_default(registry):
     listed = accounts.list_instances()
-    assert [i.id for i in listed] == ["mega", "drive", "onedrive"]
+    assert [i.id for i in listed] == ["mega", "drive", "onedrive", "webdav"]
     assert all(not i.tracked for i in listed)
     # Root falls back to the provider's configured default.
     assert accounts.load_instance("mega").root_path == accounts.default_root("mega")
@@ -75,7 +75,9 @@ def test_save_and_list_roundtrip(registry):
     assert saved.display_name == "MEGA — Work account"
     assert saved.tracked
 
-    assert [i.id for i in accounts.list_instances()] == ["mega", "mega-work", "drive", "onedrive"]
+    assert [i.id for i in accounts.list_instances()] == [
+        "mega", "mega-work", "drive", "onedrive", "webdav"
+    ]
 
     # Re-saving only the email keeps the label and root (None means "leave it").
     again = accounts.save_instance("mega", "work", extra={"email": "new@example.com"})

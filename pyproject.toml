@@ -55,7 +55,12 @@ onedrive = [
   "msal>=1.24.0",
   "requests>=2.31",
 ]
-# Both upload SDKs, still no PyTorch. This is the extra most people want.
+# Mirrors requirements-webdav.txt: the provider speaks HTTP directly, so
+# `requests` is the whole install.
+webdav = [
+  "requests>=2.31",
+]
+# Every upload provider, still no PyTorch. This is the extra most people want.
 cloud = [
   "google-api-python-client>=2.100.0",
   "google-auth-oauthlib>=1.0.0",

@@ -38,23 +38,24 @@ Details opens a dialog for one destination with these rows, all read from `/conf
 - Status.
 - Sign-in, which is where the credential material lives: this computer's keychain, a credentials file on this computer, or a saved browser sign-in.
 - Script id, shown as `upload_method=<alias>`, with a Copy id button.
-- A link to the provider's web interface (mega.nz, Google Drive, OneDrive).
+- A link to the provider's web interface (mega.nz, Google Drive, OneDrive); WebDAV shows the server URL instead.
 
 Secrets are never returned by `/config`, so the dialog shows where a credential is stored, never the credential.
 
 ### Adding an account from the browser
 
-Add a destination opens a provider picker. A provider whose optional library or command-line tool is missing is disabled, names what is missing, and links to the setup it needs: megatools for MEGA, the Google Cloud console for a Drive OAuth client, or the Azure portal for a OneDrive app registration.
+Add a destination opens a provider picker. A provider whose optional library or command-line tool is missing is disabled, names what is missing, and links to the setup it needs: megatools for MEGA, the Google Cloud console for a Drive OAuth client, the Azure portal for a OneDrive app registration, or the `requests` library for WebDAV.
 
 - **MEGA** asks for the account email and password once. The login is verified with `megatools` before anything is stored. Credentials go to the existing OS keychain, with a 0600 `credentials.env` fallback, exactly as the terminal wizard. The remote folder can be changed afterwards from the account's Change folder button.
 - **Google Drive** opens Google's sign-in in a new tab. The redirect returns to `GET /config/oauth/drive/callback` on this same bridge, which stores the refresh token and shows a small page saying the account is connected. A Google client ID and secret are only needed when this computer has no preset client (`DRIVE_CLIENT_ID`, `DRIVE_CLIENT_SECRET`, or `DRIVE_CLIENT_SECRET_FILE`); the posted pair is used for that sign-in and is not saved.
 - **OneDrive** runs the Microsoft device-code flow. The page shows a short code with a copy button and a link to Microsoft's sign-in page, polls `/config/accounts/onedrive/status`, and finishes by itself once the code is entered. It needs an Azure app registration in `ONEDRIVE_CLIENT_ID`.
+- **WebDAV** asks for the server URL, username and password. The URL is the collection to upload into, for example a Nextcloud `remote.php/dav/files/<user>/` address; the bridge sends one `PROPFIND` before saving anything, so a wrong URL or password is an error on the form instead of an account that fails later. The URL and username are stored with the account and the password in a 0600 credential file (plus the keychain for the first account). Reconnect keeps the stored URL, username and password when a field is left empty.
 
 Each provider can hold any number of accounts, each with its own alias, folder, note and credentials. Adding another account of the same provider is the same flow: pick the provider again and choose a free alias.
 
 ### Managing destinations
 
-- **Change folder** browses the provider's real folder tree through the provider's own API (`megatools ls` for MEGA, `files.list` for Drive, the children endpoint for OneDrive). The chosen folder becomes that account's root, so later uploads land in `root/<series>/`. For the local destination it chooses the remembered local output folder, which applies to the next finalize. New folder is offered only in the local picker; it creates a directory under the same ingest roots the bridge already allows.
+- **Change folder** browses the provider's real folder tree through the provider's own API (`megatools ls` for MEGA, `files.list` for Drive, the children endpoint for OneDrive, a `Depth: 1` `PROPFIND` for WebDAV). The chosen folder becomes that account's root, so later uploads land in `root/<series>/`. For the local destination it chooses the remembered local output folder, which applies to the next finalize. New folder is offered only in the local picker; it creates a directory under the same ingest roots the bridge already allows.
 - **Make default** sets the sticky default. The starred target receives every upload until a client names another one. It applies to the next finalize and needs no restart.
 - **Reconnect** appears when an account's saved sign-in has expired. It runs the provider's sign-in flow again with the same alias and keeps the account's folder, note and default.
 - **Rename** changes the alias and the note. Root, credentials and the default flag are preserved, and if the account was the default the sticky default follows the new alias. An alias already used by another account is refused.
@@ -67,7 +68,7 @@ The page shows provider links for the account you are editing and for the setup 
 
 Every upload account has an alias: `mega`, `mega-2`, `drive-next`. The alias is the account's `id` in `/config`, `/health` and `/upload-methods`, and the value clients pass as `upload_method` or `destination`.
 
-- Aliases are 1 to 32 characters from lowercase letters, digits and hyphens, starting with a letter or digit. `local` is reserved, and another provider's bare name (`mega`, `drive`, `onedrive`) is reserved for that provider's first account.
+- Aliases are 1 to 32 characters from lowercase letters, digits and hyphens, starting with a letter or digit. `local` is reserved, and another provider's bare name (`mega`, `drive`, `onedrive`, `webdav`) is reserved for that provider's first account.
 - The first account of a provider is suggested as the bare provider name, later ones as `mega-2`, `mega-3`, and so on, skipping anything taken. The page prefills the suggestion; any free alias can be typed instead.
 - Aliases are globally unique across providers. A duplicate on the add routes means "reconnect this account of this provider"; a duplicate across providers is refused.
 - Historical spellings keep working as input forever: `mega`, `mega:work`, `drive:main` and `provider:default` all resolve to the same account, and a stored sticky default in an old spelling still resolves to the same account. Displays now show the alias, so an old `mega:work` appears as `mega-work`.
