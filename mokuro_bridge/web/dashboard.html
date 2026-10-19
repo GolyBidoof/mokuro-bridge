@@ -217,16 +217,16 @@
   .rclone-auth { margin-top: 10px; }
   .btn.big { padding: 11px 18px; font-size: 14px; }
   .stat-status .versions-strip { display: flex; flex-direction: column; gap: 3px; margin: 0; }
-  .ver { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px; padding: 0; border: 0; background: none; font-size: 11.5px; line-height: 1.45; }
-  .ver-name { color: var(--muted); font-size: 11px; }
-  .ver strong { font-size: 11.5px; font-weight: 600; }
-  .ver-note { color: var(--muted); font-size: 11px; }
+  .ver { display: flex; align-items: baseline; flex-wrap: nowrap; gap: 5px; min-width: 0; padding: 0; border: 0; background: none; font-size: 11.5px; line-height: 1.45; }
+  .ver-name { color: var(--muted); font-size: 11px; flex: 0 0 auto; }
+  .ver strong { font-size: 11.5px; font-weight: 600; flex: 0 0 auto; }
+  .ver-note { color: var(--muted); font-size: 11px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ver .link { font-size: 10.5px; }
   .ver-link { margin-left: auto; color: var(--muted); font-size: 12px; line-height: 1; text-decoration: none; }
   .ver-link:hover { color: var(--accent); }
   .dot { width: 7px; height: 7px; border-radius: 999px; display: inline-block; flex: 0 0 auto; transform: translateY(-1px); }
-  .dot[data-state="ok"] { background: var(--accent); }
-  .dot[data-state="warn"] { background: #e5b567; }
+  .dot[data-state="ok"] { background: #3fb950; }
+  .dot[data-state="warn"] { background: #d4a72c; }
   .dot[data-state="off"] { background: #e5534b; }
   .dot[data-state="unknown"] { background: var(--muted); opacity: .5; }
   .ver strong.is-action { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
@@ -1258,9 +1258,10 @@ function renderVersions() {
   } : null, "Update mokuro-bridge");
 
   // mokuro
-  const mokuroInstalled = h.mokuro_installed !== false;
+  const mokuroKnown = typeof h.mokuro_installed === "boolean";
+  const mokuroInstalled = h.mokuro_installed === true;
   const mokuroNewest = mokuroInstalled && h.mokuro_flavor === "fork";
-  setDot("dot-mokuro", !mokuroInstalled ? "off" : mokuroNewest ? "ok" : "warn");
+  setDot("dot-mokuro", !mokuroKnown ? "unknown" : !mokuroInstalled ? "off" : mokuroNewest ? "ok" : "warn");
   const mokuro = $("ver-mokuro");
   if (mokuro) mokuro.textContent = mokuroInstalled && h.mokuro_version ? `v${h.mokuro_version}` : "not installed";
   const mokuroNote = $("ver-mokuro-note");
@@ -1271,9 +1272,10 @@ function renderVersions() {
     mokuroInstalled ? "Replace with the faster GolyBidoof build" : "Install mokuro");
 
   // mokuro-bunko
+  const bunkoAvailable = Boolean(bunkoInfo && bunkoInfo.available !== false);
   const bunkoInstalled = Boolean(bunkoInfo && bunkoInfo.installed);
   const bunkoNewest = bunkoInstalled && !(bunkoInfo && bunkoInfo.update_available);
-  setDot("dot-bunko", !bunkoInstalled ? "off" : bunkoNewest ? "ok" : "warn");
+  setDot("dot-bunko", !bunkoInfo || !bunkoAvailable ? "unknown" : !bunkoInstalled ? "off" : bunkoNewest ? "ok" : "warn");
   const bunko = $("ver-bunko");
   if (bunko) {
     if (!bunkoInfo) bunko.textContent = "checking…";
@@ -2740,7 +2742,11 @@ async function loadEngines() {
     renderVersions();
     const running = ["mokuro", "bunko"].some((name) => engineJob(name).state === "running");
     if (running) startEnginePoll();
-  } catch (error) { /* older backend without the endpoint */ }
+  } catch (error) {
+    if (state.engines) return; // a good answer is already on screen
+    state.engineRetries = (state.engineRetries || 0) + 1;
+    if (state.engineRetries <= 3) setTimeout(loadEngines, 3000);
+  }
 }
 
 function startEnginePoll() {
