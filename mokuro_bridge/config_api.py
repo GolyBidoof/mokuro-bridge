@@ -1332,7 +1332,7 @@ def _run_bunko_install_job() -> None:
         from . import bunko_agent
 
         with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-            bunko_agent.setup(log=buffer.write)
+            bunko_agent.setup(None, log=buffer.write)
         code = 0
     except Exception as error:
         buffer.write(f"{type(error).__name__}: {error}\n")

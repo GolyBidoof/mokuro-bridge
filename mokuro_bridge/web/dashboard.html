@@ -2247,6 +2247,10 @@ function bindDialogPlumbing() {
 /* ------------------------------------------------------------------ *
  *  Reading engines
  * ------------------------------------------------------------------ */
+function remoteDestinationReady() {
+  return Boolean(state.config && state.config.methods.some((m) => providerOf(m) !== "local" && stateOf(m) !== "not_configured"));
+}
+
 function engineJob(name) {
   return (state.engines && state.engines.jobs && state.engines.jobs[name]) || { state: "idle" };
 }
@@ -2278,10 +2282,13 @@ function renderEngines() {
   }
   const bunkoButton = $("install-bunko");
   if (bunko.available) {
-    $("engine-bunko-detail").textContent = bunko.detail || (bunko.installed ? "Connected." : "Available.");
-    $("engine-bunko-state").textContent = bunko.installed ? "Installed" : "Available";
-    bunkoButton.disabled = bunko.installed || bunkoJob.state === "running";
-    bunkoButton.textContent = bunkoJob.state === "running" ? "Installing…" : (bunko.installed ? "Installed" : "Install");
+    const ready = remoteDestinationReady();
+    $("engine-bunko-detail").textContent = bunko.installed
+      ? (bunko.detail || "Connected.")
+      : (ready ? (bunko.detail || "Available.") : "Add a cloud destination first; Bunko reads the folder the bridge uploads to.");
+    $("engine-bunko-state").textContent = bunko.installed ? "Installed" : (ready ? "Available" : "Needs a destination");
+    bunkoButton.disabled = bunko.installed || bunkoJob.state === "running" || !ready;
+    bunkoButton.textContent = bunkoJob.state === "running" ? "Installing…" : (bunko.installed ? "Installed" : (ready ? "Install" : "Add a destination first"));
     bunkoButton.hidden = false;
   } else {
     $("engine-bunko-detail").textContent = bunko.detail || "mokuro-bunko support is not part of this build yet.";
@@ -2435,18 +2442,27 @@ function renderWizardEngineActions() {
     parts.push(`<button class="btn small primary" type="button" id="wizard-install-engine" ${job.state === "running" ? "disabled" : ""}>${label}</button>`);
     parts.push(`<span class="hint">Takes a minute. You can keep setting up while it runs.</span>`);
   }
-  if (engines.bunko && !engines.bunko.available) {
+  if (engines.bunko && engines.bunko.available && !engines.bunko.installed && remoteDestinationReady()) {
+    const job = engineJob("bunko");
+    const label = job.state === "running" ? `Installing Bunko… ${job.elapsed_s || 0}s` : "Install mokuro-bunko";
+    parts.push(`<button class="btn small" type="button" id="wizard-install-bunko" ${job.state === "running" ? "disabled" : ""}>${label}</button>`);
+    parts.push(`<span class="hint">Needs a configured destination. The first build takes a few minutes.</span>`);
+  } else if (engines.bunko && !engines.bunko.available) {
     parts.push(`<p class="hint" style="margin-top:8px">mokuro-bunko is optional and is not part of this build yet.</p>`);
+  } else if (engines.bunko && engines.bunko.available && !engines.bunko.installed) {
+    parts.push(`<p class="hint" style="margin-top:8px">mokuro-bunko can be installed after you add a cloud destination.</p>`);
   }
   host.innerHTML = parts.join(" ");
   const button = document.getElementById("wizard-install-engine");
   if (button) button.onclick = () => installEngine("mokuro");
+  const bunkoButton = document.getElementById("wizard-install-bunko");
+  if (bunkoButton) bunkoButton.onclick = () => installEngine("bunko");
 }
 
 function wizardEngineText() {
   const h = state.health || {};
   if (h.mokuro_installed === false) {
-    return "mokuro is not installed yet. The page shows the install command under Developer details.";
+    return "mokuro is not installed yet. Install the faster build right here, or keep setting up and add it later.";
   }
   const parts = engineParts(h);
   let line = `Reading engine: ${parts.version}${parts.flavour === "GolyBidoof fork" ? " (the faster GolyBidoof build)" : ""}.`;
