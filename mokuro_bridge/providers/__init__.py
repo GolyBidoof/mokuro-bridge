@@ -17,7 +17,7 @@ from ..config import (
     _load_remembered_local_dir,
 )
 from ..util import _chmod_fd_private, series_title_from_volume
-from . import drive, mega, onedrive, webdav
+from . import drive, mega, onedrive, rclone, webdav
 from .base import (
     DOWNLOAD_LIMIT_BYTES,
     LIST_LIMIT_ENTRIES,
@@ -73,7 +73,13 @@ __all__ = [
 # full contract is in docs/providers.md.
 _PROVIDERS: dict[str, Provider] = {
     provider.id: provider
-    for provider in (mega.PROVIDER, drive.PROVIDER, onedrive.PROVIDER, webdav.PROVIDER)
+    for provider in (
+        mega.PROVIDER,
+        drive.PROVIDER,
+        onedrive.PROVIDER,
+        webdav.PROVIDER,
+        rclone.PROVIDER,
+    )
 }
 
 

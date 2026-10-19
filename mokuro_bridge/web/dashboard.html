@@ -184,6 +184,31 @@
   .engine-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; padding: 15px 0; border-bottom: 1px solid var(--line); }
   .engine-row:last-child { border-bottom: 0; }
   .engine-actions { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+  .engine-row > .engine-log { grid-column: 1 / -1; }
+  .engine-field { grid-column: 1 / -1; margin-top: 4px; }
+  .engine-field summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  .engine-field input { margin-top: 6px; max-width: 140px; }
+  .engine-log { margin: 2px 0 12px; padding: 10px 12px; max-height: 150px; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; color: var(--muted); font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+  .wizard-engine-actions { display: grid; gap: 12px; margin-top: 16px; }
+  .we-card { border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius); padding: 16px; }
+  .we-card.subtle { background: transparent; }
+  .we-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .we-eyebrow { font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .we-optional { text-transform: none; letter-spacing: 0; opacity: .7; }
+  .we-pill { font-size: 11px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .we-pill.ok { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .we-pill.busy { color: var(--accent); }
+  .we-pill.warn { color: #e5b567; }
+  .we-title { margin: 10px 0 4px; font-size: 18px; }
+  .we-desc { margin: 0; color: var(--muted); max-width: 58ch; }
+  .we-actions { margin-top: 12px; }
+  .we-actions .btn { width: 100%; }
+  .we-foot { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+  .we-details { margin-top: 10px; }
+  .we-details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  .we-field { display: block; margin-top: 8px; color: var(--muted); font-size: 12px; }
+  .we-field input { display: block; margin-top: 6px; max-width: 160px; }
+  .wizard-engine-actions .engine-log { margin: 12px 0 0; }
   .pref { display: grid; grid-template-columns: minmax(0, 1fr) minmax(210px, 320px); gap: 14px 22px; padding: 15px 0; border-bottom: 1px solid var(--line); }
   .pref:last-of-type { border-bottom: 0; }
   .pref-label { font-weight: 600; font-size: 14px; }
@@ -455,6 +480,7 @@
           <div class="engine-actions">
             <button class="btn primary" id="install-mokuro" type="button">Install fast mokuro</button>
           </div>
+          <pre class="engine-log" id="engine-mokuro-log" hidden></pre>
         </div>
         <div class="engine-row">
           <div>
@@ -463,8 +489,15 @@
             <div class="pref-meta"><span class="prov" id="engine-bunko-state">—</span></div>
           </div>
           <div class="engine-actions">
-            <button class="btn" id="install-bunko" type="button" disabled>Not available</button>
+            <div class="engine-actions">
+              <button class="btn" id="install-bunko" type="button" disabled>Not available</button>
+            </div>
+            <details class="engine-field" id="engine-bunko-totp-row" hidden>
+              <summary>MEGA two-factor code</summary>
+              <label class="pref-help">Only if your MEGA account uses two-factor sign-in.<input type="text" id="engine-bunko-totp" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"></label>
+            </details>
           </div>
+          <pre class="engine-log" id="engine-bunko-log" hidden></pre>
         </div>
       </div>
     </section>
@@ -1364,6 +1397,7 @@ async function loadConfig(options) {
   renderDestinations();
   if (!opts.keepSettings && !state.dirty) renderSettings();
   renderLive();
+  loadEngines();
 }
 
 async function loadHealth() {
@@ -2216,7 +2250,7 @@ function bindDialogPlumbing() {
   $("add-destination").onclick = () => openAdd();
   $("open-wizard").onclick = () => openWizard(true);
   $("install-mokuro").onclick = () => installEngine("mokuro");
-  $("install-bunko").onclick = () => installEngine("bunko");
+  $("install-bunko").onclick = () => installEngine("bunko", { totp: (document.getElementById("engine-bunko-totp") || {}).value || "" });
   $("wizard-next").onclick = () => { wizard.step = 1; wizard.branch = null; renderWizard(); };
   $("wizard-back").onclick = () => { if (wizard.step > 0) { wizard.step -= 1; wizard.branch = null; renderWizard(); } };
   $("wizard-skip").onclick = () => { closeWizard(); toast("You can reopen the setup guide from the footer.", "info"); };
@@ -2280,6 +2314,11 @@ function renderEngines() {
     button.disabled = mokuroJob.state === "running";
     button.textContent = mokuroJob.state === "running" ? `Installing… ${mokuroJob.elapsed_s || 0}s` : (mokuroJob.state === "error" ? "Try installing again" : "Install fast mokuro");
   }
+  const mokuroLog = $("engine-mokuro-log");
+  if (mokuroLog) {
+    mokuroLog.hidden = !mokuroJob.output || mokuroJob.state === "idle";
+    mokuroLog.innerHTML = linkify((mokuroJob.output || "").trim().split("\n").slice(-10).join("\n"));
+  }
   const bunkoButton = $("install-bunko");
   if (bunko.available) {
     const ready = remoteDestinationReady();
@@ -2287,9 +2326,19 @@ function renderEngines() {
       ? (bunko.detail || "Connected.")
       : (ready ? (bunko.detail || "Available.") : "Add a cloud destination first; Bunko reads the folder the bridge uploads to.");
     $("engine-bunko-state").textContent = bunko.installed ? "Installed" : (ready ? "Available" : "Needs a destination");
-    bunkoButton.disabled = bunko.installed || bunkoJob.state === "running" || !ready;
-    bunkoButton.textContent = bunkoJob.state === "running" ? "Installing…" : (bunko.installed ? "Installed" : (ready ? "Install" : "Add a destination first"));
-    bunkoButton.hidden = false;
+    const canInstall = bunko.can_install !== false;
+    const prereqOk = !bunko.prerequisites || Object.values(bunko.prerequisites).every(Boolean);
+    bunkoButton.disabled = bunko.installed || bunkoJob.state === "running" || !ready || !prereqOk;
+    bunkoButton.textContent = bunkoJob.state === "running" ? "Installing…" : (!prereqOk ? "Unavailable" : (ready ? "Install" : "Add a destination first"));
+    bunkoButton.hidden = Boolean(bunko.installed);
+    if (bunko.can_install === false && bunko.detail) $("engine-bunko-detail").textContent = bunko.detail;
+    const totpRow = $("engine-bunko-totp-row");
+    if (totpRow) totpRow.hidden = !(String(bunko.method || "").startsWith("mega") && ready && !bunko.installed && bunko.can_install !== false);
+    const bunkoLog = $("engine-bunko-log");
+    if (bunkoLog) {
+      bunkoLog.hidden = !bunkoJob.output || bunkoJob.state === "idle";
+      bunkoLog.innerHTML = linkify((bunkoJob.output || "").trim().split("\n").slice(-10).join("\n"));
+    }
   } else {
     $("engine-bunko-detail").textContent = bunko.detail || "mokuro-bunko support is not part of this build yet.";
     $("engine-bunko-state").textContent = "Not available";
@@ -2330,9 +2379,9 @@ function startEnginePoll() {
   }, 2000);
 }
 
-async function installEngine(name) {
+async function installEngine(name, options = {}) {
   try {
-    await postForm(`/config/engines/${name}/install`, {});
+    await postForm(`/config/engines/${name}/install`, { totp: options.totp || "" });
     toast(name === "mokuro" ? "Installing the fast mokuro engine…" : "Installing mokuro-bunko…", "info");
     startEnginePoll();
     await loadEngines();
@@ -2382,9 +2431,7 @@ function renderWizard() {
         <li><span class="wiz-ico" aria-hidden="true">3</span><div><strong>Files it away</strong> On this computer, or in cloud storage you connect.</div></li>
       </ul>
       <p class="hint">Nothing leaves this computer unless you connect cloud storage. You can change every choice later.</p>
-      <p class="hint" id="wizard-engine"></p>
       <div class="wizard-engine-actions" id="wizard-engine-actions"></div>`;
-    $("wizard-engine").textContent = wizardEngineText();
     renderWizardEngineActions();
   } else if (wizard.step === 1) {
     $("wizard-kicker").textContent = "Step 1 of 2";
@@ -2430,33 +2477,76 @@ function renderWizard() {
   wizardFooter();
 }
 
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function linkify(text) {
+  return escapeHtml(text).replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noreferrer">$1</a>');
+}
+
+function engineLogHtml(job) {
+  if (!job || job.state === "idle") return "";
+  if (job.state === "running" && !job.output) return "";
+  if (!job.output && job.state === "done") return "";
+  return `<pre class="engine-log">${linkify((job.output || "").trim().split("\n").slice(-12).join("\n"))}</pre>`;
+}
+
 function renderWizardEngineActions() {
   const host = document.getElementById("wizard-engine-actions");
   if (!host) return;
   const engines = state.engines;
   if (!engines) { host.innerHTML = ""; return; }
-  const parts = [];
-  if (!engines.mokuro || !engines.mokuro.installed) {
-    const job = engineJob("mokuro");
-    const label = job.state === "running" ? `Installing… ${job.elapsed_s || 0}s` : "Install fast mokuro now";
-    parts.push(`<button class="btn small primary" type="button" id="wizard-install-engine" ${job.state === "running" ? "disabled" : ""}>${label}</button>`);
-    parts.push(`<span class="hint">Takes a minute. You can keep setting up while it runs.</span>`);
+  const cards = [];
+  const mokuro = engines.mokuro || {};
+  const mokuroJob = engineJob("mokuro");
+  if (!mokuro.installed) {
+    const running = mokuroJob.state === "running";
+    const failed = mokuroJob.state === "error";
+    cards.push(`<div class="we-card">
+      <div class="we-head"><span class="we-eyebrow">Reading engine</span><span class="we-pill ${running ? "busy" : failed ? "warn" : ""}">${running ? "Installing…" : failed ? "Failed" : "Not installed"}</span></div>
+      <h3 class="we-title">mokuro</h3>
+      <p class="we-desc">Reads the text in your pages. Packaging works without it, but finished volumes need an engine to be readable.</p>
+      <div class="we-actions"><button class="btn primary" type="button" id="wizard-install-engine" ${running ? "disabled" : ""}>${running ? `Installing… ${mokuroJob.elapsed_s || 0}s` : failed ? "Try again" : "Install fast mokuro"}</button></div>
+      <p class="we-foot">${running ? "You can keep setting up; this runs in the background." : "About a minute. Restart the bridge after it finishes."}</p>
+      ${engineLogHtml(mokuroJob)}
+    </div>`);
+  } else {
+    cards.push(`<div class="we-card">
+      <div class="we-head"><span class="we-eyebrow">Reading engine</span><span class="we-pill ok">Ready</span></div>
+      <h3 class="we-title">mokuro</h3>
+      <p class="we-desc">${mokuro.version ? `Version ${mokuro.version}` : "Installed"}${mokuro.flavour === "fork" ? ", the faster GolyBidoof build." : "."}</p>
+      ${mokuroJob.state === "done" ? `<p class="we-foot">Restart the bridge to load the new engine.</p>` : ""}
+    </div>`);
   }
-  if (engines.bunko && engines.bunko.available && !engines.bunko.installed && remoteDestinationReady()) {
-    const job = engineJob("bunko");
-    const label = job.state === "running" ? `Installing Bunko… ${job.elapsed_s || 0}s` : "Install mokuro-bunko";
-    parts.push(`<button class="btn small" type="button" id="wizard-install-bunko" ${job.state === "running" ? "disabled" : ""}>${label}</button>`);
-    parts.push(`<span class="hint">Needs a configured destination. The first build takes a few minutes.</span>`);
-  } else if (engines.bunko && !engines.bunko.available) {
-    parts.push(`<p class="hint" style="margin-top:8px">mokuro-bunko is optional and is not part of this build yet.</p>`);
-  } else if (engines.bunko && engines.bunko.available && !engines.bunko.installed) {
-    parts.push(`<p class="hint" style="margin-top:8px">mokuro-bunko can be installed after you add a cloud destination.</p>`);
+  const bunko = engines.bunko || {};
+  if (bunko.available) {
+    const bunkoJob = engineJob("bunko");
+    const ready = remoteDestinationReady();
+    const installed = Boolean(bunko.installed);
+    const running = bunkoJob.state === "running";
+    const failed = bunkoJob.state === "error";
+    const isMega = String(bunko.method || "").startsWith("mega");
+    const pill = installed ? "Installed" : running ? "Installing…" : failed ? "Failed" : ready ? "Ready to install" : "Needs a destination";
+    cards.push(`<div class="we-card subtle">
+      <div class="we-head"><span class="we-eyebrow">Library index <span class="we-optional">optional</span></span><span class="we-pill ${installed ? "ok" : ""}">${pill}</span></div>
+      <h3 class="we-title">mokuro-bunko</h3>
+      <p class="we-desc">${installed ? "Compiles series.json and catalog.json in your cloud library so new series appear in the reader without a rescan." : ready ? "Builds the library index in the cloud and keeps it fresh. The first install compiles it from source, which takes a few minutes." : "Compiles the library index in the cloud. It reads the folder the bridge uploads to, so add a cloud destination first."}</p>
+      ${ready && !installed ? `<div class="we-actions"><button class="btn" type="button" id="wizard-install-bunko" ${running ? "disabled" : ""}>${running ? `Installing… ${bunkoJob.elapsed_s || 0}s` : failed ? "Try again" : "Install mokuro-bunko"}</button></div>` : ""}
+      ${ready && !installed && isMega ? `<details class="we-details"><summary>MEGA two-factor code</summary><label class="we-field">Only if your MEGA account uses two-factor sign-in.<input type="text" id="wizard-bunko-totp" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"></label></details>` : ""}
+      ${running ? `<p class="we-foot">Keep this page open. Sign-in links and progress appear below.</p>` : ""}
+      ${engineLogHtml(bunkoJob)}
+    </div>`);
+  } else {
+    cards.push(`<div class="we-card subtle"><div class="we-head"><span class="we-eyebrow">Library index <span class="we-optional">optional</span></span><span class="we-pill">Not in this build</span></div><h3 class="we-title">mokuro-bunko</h3><p class="we-desc">This build does not include Bunko support yet.</p></div>`);
   }
-  host.innerHTML = parts.join(" ");
+  host.innerHTML = cards.join("");
   const button = document.getElementById("wizard-install-engine");
   if (button) button.onclick = () => installEngine("mokuro");
   const bunkoButton = document.getElementById("wizard-install-bunko");
-  if (bunkoButton) bunkoButton.onclick = () => installEngine("bunko");
+  if (bunkoButton) {
+    bunkoButton.onclick = () => installEngine("bunko", { totp: (document.getElementById("wizard-bunko-totp") || {}).value || "" });
+  }
 }
 
 function wizardEngineText() {

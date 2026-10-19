@@ -513,7 +513,7 @@ def _json_or_error(response, what: str) -> dict:
     return body if isinstance(body, dict) else {}
 
 
-def connect_payload(state: AgentState) -> dict:
+def connect_payload(state: AgentState, *, totp: Optional[str] = None) -> dict:
     """Build Bunko's `/app/api/library/connect` body for the bridge's account."""
     provider = _PROVIDER_BACKEND.get(method_provider(state.method) or "")
     if provider is None:
@@ -535,7 +535,7 @@ def connect_payload(state: AgentState) -> dict:
             email, password = _get_mega_creds(name)
         except (RuntimeError, OSError) as error:
             raise BunkoAgentError(str(error)) from error
-        totp = os.environ.get("MOKURO_BUNKO_MEGA_TOTP", "").strip()
+        totp = (totp or os.environ.get("MOKURO_BUNKO_MEGA_TOTP", "")).strip()
         if not totp and sys.stdin.isatty():
             try:
                 totp = input("MEGA two-factor code (leave empty if the account has none): ").strip()
@@ -691,6 +691,7 @@ def setup(
     client_factory=None,
     create: bool = True,
     wait_for_marker: bool = True,
+    totp: Optional[str] = None,
 ) -> AgentState:
     """Install, configure, sign in and start Bunko for one bridge destination."""
     method = (method or providers._default_upload_method()).strip()
@@ -713,7 +714,7 @@ def setup(
         storage=str(storage_dir()), config=str(config_path()), log=str(log_path()),
         binary="", commit="", port=port,
     )
-    payload = connect_payload(state)
+    payload = connect_payload(state, totp=totp)
     info = install(log=log, runner=install_runner)
     state = replace(state, binary=info.binary, commit=info.commit)
     config = config_yaml(

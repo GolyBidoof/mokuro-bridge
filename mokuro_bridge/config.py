@@ -125,6 +125,15 @@ ONEDRIVE_TOKEN_FILE = _env_path(
 ONEDRIVE_APP_FILE = _env_path(
     "ONEDRIVE_APP_FILE", Path.home() / ".config" / "mokuro-bridge" / "onedrive_app.json"
 )
+# rclone (optional destination that reaches OneDrive, Google Drive, S3 and
+# more through the rclone binary). It exists because a self-hosted install
+# cannot ship an Azure app ID: rclone already has its own Microsoft app
+# registration, so its `rclone config` sign-in works with a personal Microsoft
+# account and no Azure subscription. An rclone account is a remote name from
+# that config plus a folder inside it.
+RCLONE_ROOT_NAME = os.environ.get("RCLONE_ROOT_NAME", "mokuro-reader")
+RCLONE_BINARY = os.environ.get("RCLONE_BINARY", "rclone").strip() or "rclone"
+
 # A maintainer may register one app for this project and ship its public
 # client ID here, which makes OneDrive a one-click destination for every user
 # of that build. Left empty in the repository so a fork never silently borrows

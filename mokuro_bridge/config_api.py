@@ -46,12 +46,14 @@ from .providers import (
     _default_upload_method,
     _method_current_folder,
     _remember_upload_method,
+    _default_upload_method,
     resolve_upload_method,
     safe_provider_error,
 )
 from .providers import drive as drive_provider
 from .providers import mega as mega_provider
 from .providers import onedrive as onedrive_provider
+from .providers import rclone as rclone_provider
 from .providers import webdav as webdav_provider
 
 router = APIRouter()
@@ -93,6 +95,11 @@ _PROVIDER_UI = {
         "label": "WebDAV",
         "browser_setup": "form",
         "setup_hint": "mokuro-bridge --setup-upload webdav",
+    },
+    "rclone": {
+        "label": "rclone",
+        "browser_setup": "form",
+        "setup_hint": "install rclone, run `rclone config`, then add this destination",
     },
 }
 
@@ -378,6 +385,12 @@ def _provider_rows() -> list[dict]:
             missing = [] if _module_available("requests") else ["requests"]
             entry["missing"] = missing
             entry["available"] = not missing
+        elif provider_id == "rclone":
+            # rclone owns the sign-in, so the only requirement is the binary.
+            installed = rclone_provider.binary() is not None
+            entry["missing"] = [] if installed else ["rclone"]
+            entry["available"] = installed
+            entry["remotes"] = rclone_provider.list_remotes() if installed else []
         rows.append(entry)
     return rows
 
@@ -410,6 +423,8 @@ def _creds_present(instance: Optional[accounts.Instance]) -> bool:
         return onedrive_provider._onedrive_token_path(instance.name).is_file()
     if instance.provider == "webdav":
         return webdav_provider._creds_path(instance.name).is_file()
+    if instance.provider == "rclone":
+        return bool(rclone_provider.remote_for(instance.name))
     return False
 
 
@@ -433,6 +448,7 @@ _IDENTITY_PROVIDERS = {
     "drive": drive_provider.account_identity,
     "onedrive": onedrive_provider.account_identity,
     "webdav": webdav_provider.account_identity,
+    "rclone": rclone_provider.account_identity,
 }
 
 def _account_identity(instance: Optional[accounts.Instance]) -> str:
@@ -654,6 +670,46 @@ _MEGATOOLS_HINT = (
 )
 
 
+def _promote_default_if_local(method_id: str) -> bool:
+    """Make the first remote destination the default upload method.
+
+    A fresh install defaults to local; connecting cloud storage should not
+    leave the Default badge on "local".
+    """
+    try:
+        if _default_upload_method() == "local":
+            _remember_upload_method(method_id)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _mega_login_error(detail: str) -> str:
+    """Turn megatools' raw login errors into something a person can act on."""
+    text = (detail or "").strip()
+    low = text.lower()
+    if any(key in low for key in ("2fa", "two-factor", "two factor", "mfa", "verification code", "e_mfa")):
+        return (
+            "MEGA asked for a two-factor code. megatools cannot sign in to "
+            "two-factor accounts, so this login was not stored. Disable 2FA "
+            "temporarily or use a MEGA account without it; proper 2FA support "
+            "is planned with a session-capable backend."
+        )
+    if any(key in low for key in ("confirm", "verification email", "verify your", "not verified", "email sent")):
+        return (
+            "MEGA wants this new login confirmed. Check the email MEGA sent, "
+            "approve it, then try again."
+        )
+    if any(key in low for key in ("blocked", "suspended", "disabled", "locked")):
+        return "MEGA blocked or locked this account. Sign in at mega.nz to resolve it, then try again."
+    if any(key in low for key in ("rate", "too many", "try again later", "temporary")):
+        return "MEGA is rate-limiting logins right now. Wait a few minutes and try again."
+    if any(key in low for key in ("password", "invalid", "bad credentials", "wrong")):
+        return "MEGA rejected the email or password. Check both, then try again."
+    return "MEGA login failed - credentials were not stored" + (f": {text}" if text else "")
+
+
 @router.post("/config/accounts/mega")
 async def add_mega_account(
     request: Request,
@@ -744,13 +800,7 @@ async def add_mega_account(
         raise HTTPException(status_code=400, detail=str(error)) from error
     if not ok:
         detail = safe_provider_error(verify_error or "").strip()
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "MEGA login failed - credentials were not stored"
-                + (f": {detail}" if detail else "")
-            ),
-        )
+        raise HTTPException(status_code=400, detail=_mega_login_error(detail))
     try:
         instance, _backend, _written = await asyncio.to_thread(
             mega_provider.store_mega_account,
@@ -765,7 +815,8 @@ async def add_mega_account(
         raise HTTPException(status_code=409, detail=str(error)) from error
     except (ValueError, OSError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    return JSONResponse({"ok": True, "method": instance.id, "root": instance.root_path})
+    promoted = _promote_default_if_local(instance.id)
+    return JSONResponse({"ok": True, "method": instance.id, "root": instance.root_path, "made_default": promoted})
 
 
 # --- adding an account: WebDAV (base URL + Basic auth) ---------------------
@@ -870,16 +921,111 @@ async def add_webdav_account(
         entered = webdav_provider.clean_base_url(url_value)
     except ValueError:
         entered = ""
+    promoted = _promote_default_if_local(instance.id)
     return JSONResponse(
         {
             "ok": True,
             "method": instance.id,
             "root": instance.root_path,
+            "made_default": promoted,
             "server": server,
             "username": webdav_provider.username(instance.name),
             "discovered": bool(entered and server.rstrip("/") != entered.rstrip("/")),
             "insecure": insecure,
             "folder_ready": folder_ready,
+        }
+    )
+
+
+# --- adding an account: rclone (a remote from rclone's own config) ---------
+
+_RCLONE_LIBS_HINT = (
+    "rclone destinations need the rclone command-line tool. Install it with "
+    "`brew install rclone` (macOS), `winget install Rclone.Rclone` (Windows) or "
+    "`apt install rclone` (Debian/Ubuntu), then run `rclone config` and retry."
+)
+
+
+@router.post("/config/accounts/rclone")
+async def add_rclone_account(
+    request: Request,
+    alias: str = Form(""),
+    label: str = Form(""),
+    remote: str = Form(""),
+    root: str = Form(""),
+) -> JSONResponse:
+    """Add (or re-point) one rclone destination.
+
+    rclone performs the sign-in itself and keeps the token in its own config,
+    so the page only has to name an existing remote. Choosing an alias that
+    already exists re-points that account at another remote and keeps its
+    folder, note and default.
+    """
+    _require_local_origin(request)
+    if rclone_provider.binary() is None:
+        raise HTTPException(status_code=400, detail=_RCLONE_LIBS_HINT)
+    try:
+        name, clean_alias = _account_target("rclone", alias)
+    except accounts.AliasCollision as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    remote_value = str(remote or "").strip()
+    if not remote_value and accounts.load_instance("rclone", name) is not None:
+        remote_value = rclone_provider.remote_for(name)
+    remotes = await asyncio.to_thread(rclone_provider.list_remotes, refresh=True)
+    if not remote_value:
+        available = ", ".join(remotes) or "none"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Choose an rclone remote (configured: "
+                f"{available}). Run `rclone config` in a terminal to add one; "
+                "for OneDrive pick Microsoft OneDrive and leave the client ID "
+                "blank, rclone has its own app registration."
+            ),
+        )
+    remote_value = remote_value if remote_value.endswith(":") else f"{remote_value}:"
+    if remote_value not in remotes:
+        available = ", ".join(remotes) or "none"
+        raise HTTPException(
+            status_code=400,
+            detail=f"rclone has no remote named {remote_value} (configured: {available})",
+        )
+    ok, check_error = await asyncio.to_thread(rclone_provider.check_remote, remote_value)
+    if not ok:
+        detail = safe_provider_error(check_error or "").strip()
+        raise HTTPException(
+            status_code=400,
+            detail=f"rclone remote could not be used - nothing was stored. {detail}",
+        )
+    try:
+        instance = await asyncio.to_thread(
+            accounts.save_instance,
+            "rclone",
+            name,
+            label=(label.strip() or None),
+            root=(root.strip() or None),
+            alias=clean_alias,
+            extra={"remote": remote_value},
+        )
+    except accounts.AliasCollision as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (ValueError, OSError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    folder_ready = True
+    try:
+        await asyncio.to_thread(rclone_provider.ensure_account_root, name)
+    except Exception:
+        folder_ready = False
+    return JSONResponse(
+        {
+            "ok": True,
+            "method": instance.id,
+            "remote": remote_value,
+            "root": instance.root_path,
+            "folder_ready": folder_ready,
+            "remotes": remotes,
         }
     )
 
@@ -908,6 +1054,7 @@ def _run_onedrive_flow(
     except Exception as error:  # provider/network failure: report, never crash
         _update_flow(flow_id, status="error", detail=safe_provider_error(error))
     else:
+        _promote_default_if_local(instance.id)
         _update_flow(flow_id, status="complete", method=instance.id)
 
 
@@ -1114,13 +1261,15 @@ def _exchange_drive_code(flow, code: str):
 
 def _complete_drive_flow(flow: dict, credentials) -> accounts.Instance:
     drive_provider.store_drive_credentials(flow["name"], credentials.to_json())
-    return accounts.save_instance(
+    instance = accounts.save_instance(
         "drive",
         flow["name"],
         label=(flow.get("label") or None),
         root=(flow.get("root") or None),
         alias=flow.get("alias") or None,
     )
+    _promote_default_if_local(instance.id)
+    return instance
 
 
 @router.get("/config/oauth/drive/callback")
@@ -1266,6 +1415,25 @@ def _mokuro_engine_status() -> dict:
     }
 
 
+def _bunko_destination() -> tuple[Optional[str], Optional[str]]:
+    """(method id, error) for the destination Bunko should manage.
+
+    Bunko needs a cloud folder. Prefer the configured default, otherwise the
+    first connected remote account, so a fresh setup does not build for minutes
+    and then discover there is nothing to connect to.
+    """
+    methods = _method_rows()
+    remote = [
+        row for row in methods
+        if row.get("provider") != _LOCAL_ID and row.get("state") != "not_configured"
+    ]
+    if not remote:
+        return None, "add a MEGA, Drive, OneDrive or WebDAV destination first"
+    default = [row for row in remote if row.get("default")]
+    chosen = (default or remote)[0]
+    return chosen["id"], None
+
+
 def _bunko_engine_status() -> dict:
     try:
         from . import bunko_agent
@@ -1277,14 +1445,29 @@ def _bunko_engine_status() -> dict:
             "detail": "mokuro-bunko support is not part of this build yet",
             "can_install": False,
         }
+    method, method_error = _bunko_destination()
+    prerequisites = {
+        "git": bool(shutil.which("git")),
+        "cargo": bool(shutil.which("cargo")),
+    }
+    missing = [name for name, present in prerequisites.items() if not present]
     try:
         state = bunko_agent.load_state()
+        installed = state is not None
+        detail = bunko_agent.status_line(state)
+        can_install = not installed and not missing and method_error is None
+        if missing:
+            detail = f"Needs {', '.join(missing)} installed first."
+        elif method_error is not None:
+            detail = "Add a cloud destination first; Bunko reads the folder the bridge uploads to."
         return {
             "available": True,
-            "installed": state is not None,
+            "installed": installed,
             "version": getattr(state, "commit", None) if state else None,
-            "detail": bunko_agent.status_line(state),
-            "can_install": True,
+            "detail": detail,
+            "can_install": can_install,
+            "method": method,
+            "prerequisites": prerequisites,
         }
     except Exception as error:
         return {"available": True, "installed": False, "version": None, "detail": str(error), "can_install": True}
@@ -1322,7 +1505,7 @@ def _run_mokuro_install_job() -> None:
         )
 
 
-def _run_bunko_install_job() -> None:
+def _run_bunko_install_job(method: Optional[str], totp: Optional[str]) -> None:
     import contextlib
     import io
 
@@ -1332,7 +1515,7 @@ def _run_bunko_install_job() -> None:
         from . import bunko_agent
 
         with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-            bunko_agent.setup(None, log=buffer.write)
+            bunko_agent.setup(method, log=buffer.write, totp=totp)
         code = 0
     except Exception as error:
         buffer.write(f"{type(error).__name__}: {error}\n")
@@ -1360,12 +1543,12 @@ async def read_engines() -> JSONResponse:
     )
 
 
-def _start_engine_job(name: str, runner) -> None:
+def _start_engine_job(name: str, runner, *args) -> None:
     with _ENGINE_LOCK:
         _ENGINE_JOBS[name].update(
             state="running", code=None, output="", started=time.time(), finished=0.0
         )
-    threading.Thread(target=runner, name=f"install-{name}", daemon=True).start()
+    threading.Thread(target=runner, args=args, name=f"install-{name}", daemon=True).start()
 
 
 @router.post("/config/engines/mokuro/install")
@@ -1382,13 +1565,22 @@ async def install_mokuro_engine(request: Request) -> JSONResponse:
 
 
 @router.post("/config/engines/bunko/install")
-async def install_bunko_engine(request: Request) -> JSONResponse:
+async def install_bunko_engine(request: Request, totp: str = Form("")) -> JSONResponse:
     _require_local_origin(request)
     status = await asyncio.to_thread(_bunko_engine_status)
     if not status.get("available"):
         raise HTTPException(status_code=400, detail=status.get("detail") or "mokuro-bunko is not available")
+    if status.get("installed"):
+        raise HTTPException(status_code=409, detail="mokuro-bunko is already configured")
+    method, method_error = await asyncio.to_thread(_bunko_destination)
+    if method_error:
+        raise HTTPException(status_code=400, detail=method_error)
+    missing = [name for name, present in (status.get("prerequisites") or {}).items() if not present]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"install {', '.join(missing)} first")
     with _ENGINE_LOCK:
         if _ENGINE_JOBS["bunko"]["state"] == "running":
             raise HTTPException(status_code=409, detail="a mokuro-bunko install is already running")
-    _start_engine_job("bunko", _run_bunko_install_job)
+    code = (totp or "").strip() or None
+    _start_engine_job("bunko", _run_bunko_install_job, method, code)
     return JSONResponse({"ok": True, "state": "running"}, status_code=202)

@@ -164,7 +164,7 @@ def test_setup_writes_the_config_signs_in_and_starts(bunko_home, monkeypatch):
     monkeypatch.setattr(bunko_agent, "wait_for_control", lambda storage, **kwargs: {"port": 12345, "token": "t"})
     monkeypatch.setattr(
         bunko_agent, "connect_payload",
-        lambda state: {"provider": "mega", "folder": state.folder, "mega": {"email": "u", "password": "p", "totp": None}},
+        lambda state, **kwargs: {"provider": "mega", "folder": state.folder, "mega": {"email": "u", "password": "p", "totp": None}},
     )
     client = _FakeClient([{"state": "connected", "session": 1, "check": {"found": True}}])
     monkeypatch.setattr(bunko_agent, "_control_client", lambda control, client_factory=None: client)
@@ -236,7 +236,7 @@ def test_setup_fails_fast_when_the_destination_has_no_credentials(monkeypatch, b
     monkeypatch.setattr(bunko_agent, "method_root", lambda method: "/Root/mokuro-reader")
     monkeypatch.setattr(
         bunko_agent, "connect_payload",
-        lambda state: (_ for _ in ()).throw(bunko_agent.BunkoAgentError("MEGA credentials not configured")),
+        lambda state, **kwargs: (_ for _ in ()).throw(bunko_agent.BunkoAgentError("MEGA credentials not configured")),
     )
     monkeypatch.setattr(
         bunko_agent, "install",

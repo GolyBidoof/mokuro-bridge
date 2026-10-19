@@ -44,13 +44,14 @@ from .config import (
     MEGA_LIBRARY_ROOT,
     ONEDRIVE_ROOT_NAME,
     ONEDRIVE_TOKEN_FILE,
+    RCLONE_ROOT_NAME,
     WEBDAV_CREDS_FILE,
     WEBDAV_ROOT_NAME,
 )
 
 # Providers that can carry more than one account. "local" is a plain directory
 # on disk and has no credentials, so it is never an instance.
-PROVIDERS = ("mega", "drive", "onedrive", "webdav")
+PROVIDERS = ("mega", "drive", "onedrive", "webdav", "rclone")
 
 DEFAULT_NAME = "default"
 
@@ -75,6 +76,7 @@ _PROVIDER_LABELS = {
     "drive": "Google Drive",
     "onedrive": "OneDrive",
     "webdav": "WebDAV",
+    "rclone": "rclone",
 }
 
 _save_lock = threading.RLock()
@@ -89,6 +91,8 @@ def default_root(provider: str) -> str:
         return ONEDRIVE_ROOT_NAME
     if provider == "webdav":
         return WEBDAV_ROOT_NAME
+    if provider == "rclone":
+        return RCLONE_ROOT_NAME
     raise ValueError(f"unknown upload provider: {provider}")
 
 def method_id(provider: str, name: str = DEFAULT_NAME) -> str:
@@ -364,6 +368,7 @@ def legacy_secret_path(provider: str, name: str) -> Optional[Path]:
         "drive": DRIVE_CREDS_FILE,
         "onedrive": ONEDRIVE_TOKEN_FILE,
         "webdav": WEBDAV_CREDS_FILE,
+        "rclone": None,
     }[provider]
 
 def _read_meta(provider: str, name: str) -> Optional[dict]:
