@@ -2,9 +2,9 @@
 
 Where a finished volume goes, how accounts are named, where their credentials live, and which target is the default.
 
-## The five targets
+## The six targets
 
-The bridge ships five destinations: a local folder, MEGA, Google Drive, OneDrive and WebDAV. Upload providers are optional installs, and `local` needs nothing beyond the base install.
+The bridge ships six destinations: a local folder, MEGA, Google Drive, OneDrive, WebDAV and rclone. Upload providers are optional installs, and `local` needs nothing beyond the base install.
 
 | Target | Provider id | Requires | Remote path |
 | --- | --- | --- | --- |
@@ -13,8 +13,11 @@ The bridge ships five destinations: a local folder, MEGA, Google Drive, OneDrive
 | Google Drive | `drive` | `google-api-python-client` and an OAuth credential | `<root>/<series>/` |
 | OneDrive | `onedrive` | `msal` plus a free Azure app ID (entered once, in the page) | `<root>/<series>/` |
 | WebDAV | `webdav` | `requests` (`requirements-webdav.txt`) plus a server URL and Basic-auth credentials | `<base>/<root>/<series>/` |
+| rclone | `rclone` | the `rclone` binary plus a remote from `rclone config` | `<remote>:<root>/<series>/` |
 
 A provider id is also the alias of that provider's first account. The local folder is a destination but not an account, and its id is always `local`.
+
+rclone is the way to reach OneDrive without an Azure account. A self-hosted install cannot ship an Azure app ID and creating one needs an Entra tenant that a personal Microsoft account cannot make; rclone already has its own Microsoft app registration, so `rclone config` can sign in with a personal account and keep the token in rclone's own configuration. An rclone account is one remote (`onedrive:`, `gdrive:`, an S3 remote) plus a folder inside it, and the same provider reaches everything else rclone supports without another dependency in the bridge.
 
 Each destination receives the same four files under a per-series folder: `<volume>.webp` (cover), `<volume>.cbz` (pages), `<volume>.mokuro` (OCR text and blocks) and one shared `series.json` (the reader's per-series index). The series name is derived from the volume title by dropping edition and imprint tags, so `サンプル作品（２）【電子限定特典付き】` and `サンプル作品 1巻` share one series folder.
 
@@ -37,8 +40,9 @@ Every provider can hold any number of accounts. An account is addressed by an *a
 | `drive-next` | A second Google Drive account |
 | `onedrive-uni` | A OneDrive account named by the user |
 | `webdav` | The first WebDAV account |
+| `rclone` | The first rclone account |
 
-Aliases are 1 to 32 characters from lowercase `a-z`, digits `0-9` and `-`, starting with a letter or digit. They are globally unique across providers, `local` is reserved, and so is another provider's bare name (`mega`, `drive`, `onedrive`, `webdav`). The first account of a provider is suggested as the bare provider name; later accounts are suggested as `<provider>-2`, `<provider>-3`, and so on, skipping anything taken. Any free alias can be typed instead.
+Aliases are 1 to 32 characters from lowercase `a-z`, digits `0-9` and `-`, starting with a letter or digit. They are globally unique across providers, `local` is reserved, and so is another provider's bare name (`mega`, `drive`, `onedrive`, `webdav`, `rclone`). The first account of a provider is suggested as the bare provider name; later accounts are suggested as `<provider>-2`, `<provider>-3`, and so on, skipping anything taken. Any free alias can be typed instead.
 
 The alias is the id reported by `GET /health`, `GET /upload-methods` and `GET /config`, and the value a client passes as `upload_method` (or `--dest` in dokuha-cli). To select an account from a script, read the ids from `/upload-methods` and send one on the finalize:
 
@@ -89,6 +93,8 @@ Nothing secret is ever written to this repository.
 **OneDrive.** MS Graph device-code sign-in, with the token in `~/.config/mokuro-bridge/onedrive_token.json` (mode 0600, `ONEDRIVE_TOKEN_FILE`), or `~/.config/mokuro-bridge/accounts/onedrive__<storage>.token.json` for a later account. The sign-in needs one free Azure application (client) ID per installation, the same one-app-per-deployment model upstream mokuro-reader uses with `VITE_ONEDRIVE_CLIENT_ID`; the difference is where it lives. The dashboard's OneDrive form collects it, walks through the five portal steps, validates that it is an Application (client) ID and not one of the Object ID and Directory ID lookalikes, and writes it to `~/.config/mokuro-bridge/onedrive_app.json` (`ONEDRIVE_APP_FILE`, mode 0600) without a restart. Resolution is `ONEDRIVE_CLIENT_ID` in the environment, then that file, then a project default a build may ship. No redirect URI and no client secret are involved: it is a public client using the device-code flow. The scope is `Files.ReadWrite` (`offline_access` is added by msal itself and must not be listed) and the library root is the folder `mokuro-reader` (`ONEDRIVE_ROOT_NAME`). A known Microsoft error code is translated into the step it needs (`AADSTS65001` means the permission is missing, `AADSTS700016` means the app ID or its account types are wrong).
 
 **WebDAV.** The server URL and username are non-secret and live in the account metadata. The password is written to that account's 0600 credentials file, `~/.config/mokuro-bridge/webdav_credentials.json` (`WEBDAV_CREDS_FILE`) for the first account and `~/.config/mokuro-bridge/accounts/webdav__<storage>.creds.json` for later ones, and the first account mirrors it into the OS keychain (`webdav:username` and `webdav:password`) so a keychain-only setup written by the old provider keeps working. Resolution is `WEBDAV_PASSWORD` in the environment, then the file, then the keychain, so a password changed in the dashboard always wins over a stale keychain item. `WEBDAV_BASE_URL` and `WEBDAV_USERNAME` seed the first account for an existing setup, and the folder created under the base URL defaults to `mokuro-reader` (`WEBDAV_ROOT_NAME`). WebDAV needs only `requests` (`requirements-webdav.txt`); there is no per-provider SDK. The dashboard's WebDAV form accepts the server's web address and discovers the usual WebDAV paths under it, so a Nextcloud or ownCloud user can paste the address they browse and let the bridge find `remote.php/dav/files/<user>/`. A NAS or home server with a self-signed certificate can be accepted per account from the form's advanced settings; that choice is non-secret metadata (`insecure`), only disables certificate verification for that account, and is shown in the account's Details dialog and in `/config`.
+
+**rclone.** The bridge stores no credential at all: the token belongs to rclone's own configuration (`rclone config file` prints its path), and the account metadata records only the remote name and the folder. `RCLONE_ROOT_NAME` sets the default folder (`mokuro-reader`) and `RCLONE_BINARY` points at a non-default binary. `/health` reports the remote and `creds_source` as `rclone config`.
 
 **Local.** The base directory is `MOKURO_BRIDGE_OUTPUT_DIR`, or a checkout's `<repo>/output`, or `~/mokuro-bridge/output` for an installed wheel.
 

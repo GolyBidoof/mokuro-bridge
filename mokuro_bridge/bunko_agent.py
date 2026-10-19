@@ -49,6 +49,9 @@ _PROVIDER_BACKEND = {
     "drive": "gdrive",
     "onedrive": "onedrive",
     "webdav": "webdav",
+    # An rclone destination reaches Bunko through the shared local gateway, so
+    # Bunko speaks WebDAV to the same session the bridge uploads through.
+    "rclone": "webdav",
 }
 
 
@@ -528,6 +531,15 @@ def connect_payload(state: AgentState, *, totp: Optional[str] = None) -> dict:
     if instance is None:
         raise BunkoAgentError(f"no account behind {state.method}")
     name = instance.name
+    if instance.provider == "rclone":
+        from . import rclone_gateway
+
+        try:
+            gateway = rclone_gateway.ensure(name)
+        except rclone_gateway.RcloneGatewayError as error:
+            raise BunkoAgentError(str(error)) from error
+        payload["webdav"] = gateway.bunko_payload()
+        return payload
     if provider == "mega":
         from .providers.mega import _get_mega_creds
 

@@ -704,6 +704,7 @@ const PROVIDER_LINKS = {
     web: "https://onedrive.live.com/", webLabel: "Open OneDrive",
     setup: "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade", setupLabel: "Register an app",
   },
+  rclone: { web: "https://rclone.org/", webLabel: "rclone.org" },
 };
 
 const PROVIDER_META = {
@@ -726,6 +727,11 @@ const PROVIDER_META = {
     label: "WebDAV", kind: "form",
     blurb: "Nextcloud, ownCloud, Synology, Box, pCloud, HiDrive or any other WebDAV server.",
     empty: "The requests library is not installed.",
+  },
+  rclone: {
+    label: "rclone remote", kind: "form",
+    blurb: "OneDrive, Google Drive, S3 and more through rclone. Its OneDrive sign-in brings its own Microsoft app ID, so no Azure account is needed.",
+    empty: "The rclone command-line tool is not installed.",
   },
   local: { label: "This computer", kind: null, blurb: "", empty: "" },
 };
@@ -1151,7 +1157,7 @@ function providerIcon(provider) {
       '<path d="M8.4 3 2 14l3.6 6.2L12 9z" fill="#34a853"/>' +
       '<path d="M5.6 20.2h12.8L21.9 14H9.2z" fill="#fbbc04"/></svg>';
   }
-  const glyph = { mega: "M", onedrive: "O", webdav: "W", local: "\u{1F4C1}" }[provider] || "?";
+  const glyph = { mega: "M", onedrive: "O", webdav: "W", rclone: "R", local: "\u{1F4C1}" }[provider] || "?";
   return `<span class="provider-glyph" aria-hidden="true">${glyph}</span>`;
 }
 
@@ -1639,7 +1645,7 @@ function compatibilityProvider(provider) {
 }
 
 function renderProviderPicker() {
-  const providers = ["mega", "drive", "onedrive", "webdav"];
+  const providers = ["mega", "drive", "onedrive", "webdav", "rclone"];
   $("add-picker").innerHTML = `<div class="provider-picker">${providers.map((id) => {
     const info = compatibilityProvider(id);
     const unavailable = !info.available;
@@ -1665,14 +1671,16 @@ function renderProviderPicker() {
 
 function unavailableNotes() {
   const notes = [];
-  ["mega", "drive", "onedrive", "webdav"].forEach((id) => {
+  ["mega", "drive", "onedrive", "webdav", "rclone"].forEach((id) => {
     const info = compatibilityProvider(id);
     if (info.available) return;
     const link = PROVIDER_LINKS[id];
     const missing = (info.missing || []).join(", ");
     const lead = id === "onedrive"
       ? `Install the Microsoft sign-in library with <code>pip install -r requirements-onedrive.txt</code> (missing: ${esc(missing || "msal")}). After that, the page can collect the one-time app ID itself.`
-      : `This computer is missing ${esc(missing || "a dependency")}.`;
+      : id === "rclone"
+        ? `Install rclone (<code>brew install rclone</code>, <code>winget install Rclone.Rclone</code> or <code>apt install rclone</code>), run <code>rclone config</code> once, then reload this page.`
+        : `This computer is missing ${esc(missing || "a dependency")}.`;
     notes.push(`<p class="hint" style="margin-top:8px"><strong>${esc((PROVIDER_META[id] || {}).label || id)}:</strong> ${lead} ${link && link.setup ? `<a class="inline-link" href="${esc(link.setup)}" target="_blank" rel="noopener">${esc(link.setupLabel)} ${icon("external")}</a>` : ""}</p>`);
   });
   return notes.join("");
@@ -1700,6 +1708,8 @@ function openProviderForm(provider, mode, account) {
   const alias = account ? aliasOf(account) : nextAlias(provider);
   const label = account ? (account.label || "") : "";
   const submitLabel = mode === "reconnect" ? "Reconnect" : `Connect ${meta.label}`;
+  const rcloneRow = (state.providers || []).find((entry) => entry.id === "rclone") || {};
+  const rcloneRemotes = rcloneRow.remotes || [];
   const onedriveRow = (state.providers || []).find((entry) => entry.id === "onedrive") || {};
   const onedriveClient = onedriveRow.client_id || "";
   const onedrivePinned = onedriveRow.client_id_source === "env";
@@ -1793,8 +1803,33 @@ function openProviderForm(provider, mode, account) {
           <p><strong>4.</strong> Open <em>API permissions</em>, add <em>Microsoft Graph</em>, then <em>Delegated permissions</em>, then <code>Files.ReadWrite</code>.</p>
           <p><strong>5.</strong> Copy the <em>Application (client) ID</em> from the app's Overview page. The Object ID and Directory (tenant) ID on the same page are not the one to use.</p>
           <p>Using the same app ID as <a class="inline-link" href="https://github.com/Gnathonic/mokuro-reader" target="_blank" rel="noopener">mokuro-reader</a> is fine if you already made one for it; paste it here. It needs no secret.</p>
+          <p><strong>No Azure account?</strong> Creating an app registration needs an Entra tenant, which a personal Microsoft account cannot make. Use the <button class="link" type="button" id="add-use-rclone">rclone destination</button> instead: rclone has its own Microsoft app ID, so a personal account is enough.</p>
         </div>
       </details>
+    </div>` : ""}
+    ${provider === "rclone" ? `<div class="field">
+      <label for="add-rclone-remote">rclone remote</label>
+      ${rcloneRemotes.length
+        ? `<select id="add-rclone-remote">${rcloneRemotes.map((name) => `<option value="${esc(name)}">${esc(name)}</option>`).join("")}</select>`
+        : `<input id="add-rclone-remote" type="text" autocomplete="off" spellcheck="false" placeholder="onedrive:">`}
+      <span class="hint">${rcloneRemotes.length
+        ? `A remote from <code>rclone config</code> (${esc(rcloneRemotes.join(", "))}).`
+        : "No rclone remotes are configured yet. Run <code>rclone config</code> in a terminal first."}</span>
+      <details class="dav-help" ${rcloneRemotes.length ? "" : "open"}><summary>Set up OneDrive without an Azure account</summary>
+        <div class="dav-help-body">
+          <p>rclone has its own Microsoft app registration, so this needs no Azure subscription and no app registration. It takes about two minutes.</p>
+          <p><strong>1.</strong> Install rclone: <code>brew install rclone</code> on macOS, <code>winget install Rclone.Rclone</code> on Windows, or <code>apt install rclone</code> on Debian/Ubuntu.</p>
+          <p><strong>2.</strong> Run <code>rclone config</code>, choose <em>n</em> for a new remote, name it <code>onedrive</code>, then choose <em>Microsoft OneDrive</em>.</p>
+          <p><strong>3.</strong> Leave the client ID and secret blank; rclone supplies its own.</p>
+          <p><strong>4.</strong> Let rclone open the browser and sign in with your Microsoft account.</p>
+          <p><strong>5.</strong> Reload this page and pick the new remote above.</p>
+        </div>
+      </details>
+    </div>
+    <div class="field">
+      <label for="add-rclone-root">Upload folder</label>
+      <input id="add-rclone-root" type="text" autocomplete="off" spellcheck="false" value="mokuro-reader">
+      <span class="hint">Created on the remote, with one folder per series inside it.</span>
     </div>` : ""}
     ${provider === "drive" ? `<div class="field" id="drive-client-fields" ${info.live && info.live.client_preset ? "hidden" : ""}>
       <label for="add-client-id">Google client ID</label>
@@ -1826,6 +1861,8 @@ function openProviderForm(provider, mode, account) {
   });
   $("add-alias").focus();
   if (provider === "webdav") wireWebdavForm(mode);
+  const useRclone = $("add-use-rclone");
+  if (useRclone) useRclone.onclick = () => { stopFlowPoll(); openProviderForm("rclone", "add", null); };
 }
 
 /* Address a beginner typed into the WebDAV form: add the scheme they left out,
@@ -1963,6 +2000,27 @@ async function submitProviderForm() {
         toast("Signed in, but the app ID could not be saved on this computer; you may be asked for it again next time.", "bad");
       }
       renderDeviceFlow(flow, alias);
+      restore();
+      return;
+    }
+    if (provider === "rclone") {
+      const field = $("add-rclone-remote");
+      let remote = (field && field.value.trim()) || "";
+      const root = ($("add-rclone-root") && $("add-rclone-root").value.trim()) || "";
+      if (!remote) {
+        addError("Choose an rclone remote first, or run `rclone config` in a terminal to create one.");
+        restore();
+        return;
+      }
+      if (!remote.endsWith(":")) remote += ":";
+      submit.textContent = "Checking rclone…";
+      const result = await postForm("/config/accounts/rclone", { alias, label, remote, root });
+      toast(`${result.method || alias} connected on ${result.remote}.`, "info");
+      if (result.folder_ready === false) {
+        toast("Connected, but the upload folder could not be created yet; it is created at the first upload.", "bad");
+      }
+      closeDialog("add-dialog");
+      await loadConfig();
       restore();
       return;
     }
@@ -2120,13 +2178,14 @@ function openDetails(alias) {
     file: "Saved in a credentials file on this computer",
     oauth: "Saved browser sign-in on this computer",
     env: "Set by an environment variable on this computer",
+    "rclone config": "Saved in rclone's own configuration on this computer",
   }[method.creds_source] || "Saved on this computer") : "";
   const rows = [
     ["Provider", esc(meta.label)],
     ["Account", esc(account)],
     ["Name", `<code>${esc(alias)}</code>`],
     method.label ? ["Note", esc(method.label)] : null,
-    email ? [provider === "webdav" ? "Username" : "Email", esc(email)] : null,
+    email ? [provider === "webdav" ? "Username" : provider === "rclone" ? "rclone remote" : "Email", esc(email)] : null,
     server ? ["Server", `<code>${esc(server)}</code>`] : null,
     insecure ? ["Certificate", "Not verified (self-signed, accepted when it was set up)"] : null,
     ["Folder", `<code>${esc(folder)}</code>`],
@@ -2459,7 +2518,7 @@ function renderWizard() {
     $("wizard-title").textContent = "Which cloud service?";
     $("wizard-subtitle").textContent = "Click one and the sign-in opens. You can add the others later.";
     const ids = ((state.config && state.config.providers) || []).map((p) => p.id);
-    const providers = ids.length ? ids : ["mega", "drive", "onedrive", "webdav"];
+    const providers = ids.length ? ids : ["mega", "drive", "onedrive", "webdav", "rclone"];
     body.innerHTML = `<div class="wiz-providers">${providers.map((id) => {
       const descriptor = providerDescriptor(id);
       const available = !(descriptor.live && descriptor.live.available === false);

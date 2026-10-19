@@ -94,7 +94,8 @@ def test_every_account_is_listed_with_its_root(env):
     methods = providers._build_upload_methods()
 
     assert list(methods) == [
-        "local", "mega", "mega-work", "drive", "drive-main", "onedrive", "webdav"
+        "local", "mega", "mega-work", "drive", "drive-main", "onedrive", "webdav",
+        "rclone",
     ]
     default_mega = methods["mega"]
     assert default_mega.name == "MEGA (megatools)"  # unchanged for existing clients

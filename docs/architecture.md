@@ -114,6 +114,7 @@ Nothing is updated automatically. `--check-update` reports and prints the right 
 | `providers/mega.py` | ~775 | MEGA, via megatools |
 | `providers/webdav.py` | ~760 | WebDAV: URL and XML handling, Basic auth, and the upload, listing and download calls over plain HTTP |
 | `providers/onedrive.py` | ~750 | OneDrive, including the device-code setup flow |
+| `providers/rclone.py` | ~480 | rclone: shells out to a configured remote, so OneDrive works without an Azure account |
 | `status_tui.py` | ~720 | the live terminal status display: upload bar, width-safe frame, help and dashboard overlays |
 | `accounts.py` | ~640 | the account registry and alias model: validation, collisions, suggestions, rename and legacy derivation |
 | `series_json.py` | ~560 | the published shape of the reader's `series.json`: its validators, merge rules and wire order |

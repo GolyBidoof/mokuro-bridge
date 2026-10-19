@@ -87,7 +87,7 @@ def _list_uploads() -> None:
         ))
     if not rows:
         print("no remote upload accounts configured")
-        print("add one with: mokuro-bridge --setup-upload mega|drive|onedrive|webdav")
+        print("add one with: mokuro-bridge --setup-upload mega|drive|onedrive|webdav|rclone")
         return
     width = max(len(r[0]) for r in rows)
     print(f"{'ACCOUNT'.ljust(width)}  {'READY':5}  {'CREDS':11}  REMOTE ROOT")
@@ -584,7 +584,8 @@ def main() -> None:
         metavar="METHOD",
         default=None,
         help="Interactively configure/authenticate an upload account "
-        "(mega, drive, onedrive, webdav, optionally with an account name such "
+        "(mega, drive, onedrive, webdav, rclone, optionally with an account "
+        "name such "
         "as 'mega:work'). Running it again with a new name adds a second "
         "account. e.g. --setup-upload drive --name main",
     )
@@ -865,7 +866,6 @@ def main() -> None:
     from . import fetchproxy
 
     configured = [m.id for m in _UPLOAD_METHODS.values() if m.configured]
-    remote_configured = [m.id for m in _UPLOAD_METHODS.values() if m.configured and m.id != "local"]
     first_run = _needs_onboarding()
     upload_line = f"{_default_upload_method()} (default)"
     if configured:

@@ -46,7 +46,6 @@ from .providers import (
     _default_upload_method,
     _method_current_folder,
     _remember_upload_method,
-    _default_upload_method,
     resolve_upload_method,
     safe_provider_error,
 )

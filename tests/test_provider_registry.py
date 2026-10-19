@@ -91,7 +91,7 @@ def fake(monkeypatch, tmp_path):
 
 
 def test_the_shipped_providers_are_registered():
-    assert set(providers._PROVIDERS) == {"mega", "drive", "onedrive", "webdav"}
+    assert set(providers._PROVIDERS) == {"mega", "drive", "onedrive", "webdav", "rclone"}
 
 
 def test_a_registered_provider_appears_in_the_upload_methods_listing(fake):

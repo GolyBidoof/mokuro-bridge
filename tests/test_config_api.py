@@ -104,7 +104,7 @@ def test_config_lists_methods_settings_and_paths(client):
 def test_config_describes_every_provider_for_the_ui(client):
     body = client.get("/config").json()
     providers = {row["id"]: row for row in body["providers"]}
-    assert set(providers) == {"mega", "drive", "onedrive", "webdav"}
+    assert set(providers) == {"mega", "drive", "onedrive", "webdav", "rclone"}
     for row in providers.values():
         assert {"id", "label", "available", "browser_setup", "setup_hint",
                 "missing", "alias_suggestion"} <= set(row)

@@ -1,6 +1,6 @@
 # Upload providers
 
-An upload provider is one remote destination backend. MEGA, Google Drive, OneDrive and WebDAV ship today, and a new backend should be a copy of one of their modules rather than an edit to the dispatch code in `providers/__init__.py`. The contract itself lives in [`mokuro_bridge/providers/base.py`](../mokuro_bridge/providers/base.py); this note is the map for the next provider.
+An upload provider is one remote destination backend. MEGA, Google Drive, OneDrive, WebDAV and rclone ship today, and a new backend should be a copy of one of their modules rather than an edit to the dispatch code in `providers/__init__.py`. The contract itself lives in [`mokuro_bridge/providers/base.py`](../mokuro_bridge/providers/base.py); this note is the map for the next provider.
 
 ## The contract
 
