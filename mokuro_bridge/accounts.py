@@ -164,6 +164,10 @@ def validate_alias(
     for instance in list_instances():
         if instance.provider == provider and instance.name == name:
             continue
+        # A reserved name may be claimed when nothing real uses it yet: the
+        # implicit per-provider defaults are placeholders, not accounts.
+        if allow_reserved and not getattr(instance, "tracked", False):
+            continue
         if instance.id == value:
             raise AliasCollision(
                 f"alias {value!r} is already used by {instance.display_name}"

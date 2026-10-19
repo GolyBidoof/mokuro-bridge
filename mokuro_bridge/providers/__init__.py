@@ -505,7 +505,16 @@ def forget_account(target: str) -> dict:
     siblings = accounts.sibling_emails(provider, name) if provider == "mega" else set()
     notes: list[str] = []
 
+    rclone_remote = ""
+    if provider == "rclone" and instance is not None:
+        rclone_remote = str(instance.extra.get("remote") or "").strip()
     removed = [str(path) for path in accounts.delete_instance(provider, name)]
+    if provider == "rclone" and rclone_remote:
+        from . import rclone as rclone_provider
+
+        # Only remotes this bridge created; a user's own remote is left alone.
+        if rclone_remote.rstrip(":").startswith("mb-") and rclone_provider.delete_remote(rclone_remote):
+            removed.append(f"rclone:{rclone_remote}")
     legacy = accounts.legacy_secret_path(provider, name)
     if legacy is not None:
         removed += [str(path) for path in accounts.remove_paths([legacy])]

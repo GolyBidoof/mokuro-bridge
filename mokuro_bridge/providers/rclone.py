@@ -226,6 +226,19 @@ def transport_for(name: str = DEFAULT_NAME) -> tuple[str, Optional[str]]:
         return remote, None
 
 
+def delete_remote(remote: str) -> bool:
+    """Delete one remote from rclone's config (bridge-owned ones only)."""
+    name = str(remote or "").strip().rstrip(":")
+    if not name:
+        return False
+    try:
+        result = _run(["config", "delete", name], timeout=20.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    refresh_caches()
+    return result.returncode == 0
+
+
 def _target(remote: str, remote_dir: str, filename: str = "") -> str:
     """``<remote>:<root>/<series>/<file>`` with single separators."""
     parts = [part for part in str(remote_dir or "").strip("/").split("/") if part]

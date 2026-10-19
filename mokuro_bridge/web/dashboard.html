@@ -1699,6 +1699,20 @@ function unavailableNotes() {
   return notes.join("");
 }
 
+function rcloneAliasFor(provider) {
+  // Rclone-backed accounts use rclone-<service> names: "mega" and "webdav"
+  // already mean the legacy native provider, and dokuha must stay unambiguous.
+  const taken = new Set((state.config.methods || []).map((method) => aliasOf(method)));
+  const base = `rclone-${provider}`;
+  let candidate = base;
+  let suffix = 2;
+  while (taken.has(candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
 function nextAlias(provider) {
   const live = state.providers.find((p) => p.id === provider);
   if (live && live.alias_suggestion) return live.alias_suggestion;
@@ -1796,7 +1810,7 @@ function openProviderForm(provider, mode, account) {
   form.hidden = false;
   state.add.rcloneService = "";
   const title = mode === "reconnect" ? `Reconnect ${meta.label}` : `Connect ${meta.label}`;
-  const alias = account ? aliasOf(account) : nextAlias(provider);
+  const alias = account ? aliasOf(account) : (rcloneBacked ? rcloneAliasFor(provider) : nextAlias(provider));
   const label = account ? (account.label || "") : "";
   const submitLabel = mode === "reconnect" ? "Reconnect" : `Connect ${meta.label}`;
   const rcloneRow = (state.providers || []).find((entry) => entry.id === "rclone") || {};

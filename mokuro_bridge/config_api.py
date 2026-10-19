@@ -1654,14 +1654,27 @@ def _rclone_save_account(remote: str, alias: str, label: str, root: str, extra: 
         "provider_kind": service,
     }
     merged.update(extra)
-    instance = accounts.save_instance(
-        "rclone",
-        name,
-        label=(label.strip() or None),
-        root=(root.strip() or rclone_auth.default_root()),
-        alias=clean_alias,
-        extra=merged,
-    )
+    try:
+        instance = accounts.save_instance(
+            "rclone",
+            name,
+            label=(label.strip() or None),
+            root=(root.strip() or rclone_auth.default_root()),
+            alias=clean_alias,
+            extra=merged,
+            # The service cards keep their familiar ids ("mega", "webdav");
+            # _rclone_account_target already proved no native account uses them.
+            allow_reserved=clean_alias in _RCLONE_SERVICE_ALIASES,
+        )
+    except OSError as error:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "the account file could not be written "
+                f"({accounts.accounts_dir()}): {error}. Check that the folder "
+                "exists and this user can write to it."
+            ),
+        ) from error
     _promote_default_if_local(instance.id)
     # Start the shared gateway now so the first upload does not pay for it.
     try:
