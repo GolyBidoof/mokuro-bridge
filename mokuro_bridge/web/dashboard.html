@@ -1354,9 +1354,12 @@ function renderDestinations() {
     const alias = aliasOf(m);
     const st = stateOf(m);
     const meta = PROVIDER_META[provider] || PROVIDER_META.local;
-    const label = m.label || (m.account && m.account !== "default" ? m.account : "");
-    const email = (m.extra && m.extra.email) || "";
-    const who = label || (email ? "" : meta.label);
+    // A label is a user note, never the account name (that equals the alias).
+    const label = String(m.label || "").trim();
+    const emailRaw = String((m.extra && m.extra.email) || "");
+    // "Google Drive · signed in" is a placeholder, not an address.
+    const email = emailRaw.includes("·") ? "" : emailRaw;
+    const who = label || meta.label;
     const emailLine = email && email !== label ? email : "";
     const folder = tidyFolder(m.root || m.current_folder);
     const isLocal = provider === "local";
@@ -1415,6 +1418,7 @@ function renderDestinations() {
     };
   });
   $("destinations").querySelectorAll("[data-usage]").forEach((host) => loadUsage(host.dataset.usage));
+  shownMethods.filter((m) => providerOf(m) !== "local").forEach((m) => loadCardEmail(aliasOf(m)));
   renderGates();
 }
 
@@ -1462,6 +1466,25 @@ function renderUsage(host, data) {
   host.innerHTML = `${bar}<span class="usage-line">${text.join('<span aria-hidden="true"> · </span>')}</span>`;
   const refresh = host.querySelector("[data-usage-refresh]");
   if (refresh) refresh.onclick = () => loadUsage(host.dataset.usage, true);
+}
+
+async function loadCardEmail(alias) {
+  const card = document.querySelector(`.dest[data-id="${CSS.escape(alias)}"]`);
+  if (!card || card.dataset.emailLoaded === "1") return;
+  card.dataset.emailLoaded = "1";
+  try {
+    const data = await api(`/config/account-email?method=${encodeURIComponent(alias)}`);
+    const email = String(data.email || "").trim();
+    if (!email || email.includes("·")) return;
+    let line = card.querySelector(".email-line");
+    if (!line) {
+      line = document.createElement("p");
+      line.className = "who email-line";
+      card.querySelector(".dest-id").appendChild(line);
+    }
+    line.textContent = email;
+    line.title = email;
+  } catch (error) { /* the card still works without the address */ }
 }
 
 async function loadUsage(alias, refresh) {
