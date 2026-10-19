@@ -391,6 +391,94 @@ def remote_summary(remote: str, *, refresh: bool = False) -> str:
 
 
 _EMAIL_CACHE: dict[str, tuple[float, str]] = {}
+_LINK_CACHE: dict[tuple[str, str], tuple[float, str]] = {}
+
+
+def folder_link(name: str, folder: str) -> str:
+    """A deep link to the upload folder where the service supports one.
+
+    Drive and OneDrive expose real folder URLs; MEGA has no stable public URL
+    for a private folder without creating a share link, so it falls back to the
+    account page. WebDAV links are the server URL plus the folder path.
+    """
+    remote = remote_name(name)
+    path = str(folder or "").strip().strip("/")
+    key = (remote, path)
+    now = time.time()
+    cached = _LINK_CACHE.get(key)
+    if cached is not None and now - cached[0] < 900.0:
+        return cached[1]
+    link = ""
+    try:
+        from .providers import rclone as rclone_provider
+
+        entry = rclone_provider.config_dump().get(remote.rstrip(":")) or {}
+        kind = str(entry.get("type") or "")
+        token = _token_json(entry.get("token"))
+        if kind == "drive":
+            link = _drive_folder_link(token, path)
+            if not link:
+                link = _drive_folder_link(_refresh_token(kind, remote), path)
+        elif kind == "onedrive":
+            link = _onedrive_folder_link(token, path)
+            if not link:
+                link = _onedrive_folder_link(_refresh_token(kind, remote), path)
+        elif kind == "webdav":
+            base = str(entry.get("url") or "").rstrip("/")
+            if base:
+                link = base + ("/" + path if path else "")
+    except Exception:
+        link = ""
+    _LINK_CACHE[key] = (now, link)
+    return link
+
+
+def _drive_folder_link(token: dict, path: str) -> str:
+    access = str(token.get("access_token") or "")
+    if not access:
+        return ""
+    try:
+        import urllib.parse
+
+        parent = "root"
+        for segment in [part for part in path.split("/") if part]:
+            query = urllib.parse.quote(
+                f"'{parent}' in parents and name = '{segment}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            )
+            data = _bearer_get(
+                f"https://www.googleapis.com/drive/v3/files?q={query}&fields=files(id,name)&pageSize=1",
+                access,
+            )
+            files = data.get("files") or []
+            if not files:
+                return ""
+            parent = str((files[0] or {}).get("id") or "")
+            if not parent:
+                return ""
+        if parent == "root":
+            return "https://drive.google.com/drive/my-drive"
+        return f"https://drive.google.com/drive/folders/{parent}"
+    except Exception:
+        return ""
+
+
+def _onedrive_folder_link(token: dict, path: str) -> str:
+    access = str(token.get("access_token") or "")
+    if not access:
+        return ""
+    try:
+        import urllib.parse
+
+        encoded = urllib.parse.quote(path) if path else ""
+        url = "https://graph.microsoft.com/v1.0/me/drive/root"
+        if encoded:
+            url += f":/{encoded}"
+        url += "?$select=webUrl"
+        data = _bearer_get(url, access)
+        return str(data.get("webUrl") or "")
+    except Exception:
+        return ""
+
 
 
 def account_email(name: str, *, refresh: bool = False) -> str:

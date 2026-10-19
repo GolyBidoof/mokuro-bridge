@@ -2121,6 +2121,24 @@ def _local_usage(path: str, *, refresh: bool = False) -> dict:
     return dict(data)
 
 
+@router.get("/config/folder-link")
+async def read_folder_link(method: str = "") -> JSONResponse:
+    """A deep link to this destination's upload folder, when one exists."""
+    if not method:
+        raise HTTPException(status_code=400, detail="a destination is required")
+    instance = providers.instance_for(method)
+    if instance is None:
+        raise HTTPException(status_code=404, detail="unknown destination")
+    if instance.provider != "rclone":
+        return JSONResponse({"url": ""})
+    from . import rclone_auth
+
+    url = await asyncio.to_thread(
+        rclone_auth.folder_link, instance.name, str(instance.root or "")
+    )
+    return JSONResponse({"url": str(url or "")})
+
+
 @router.get("/config/account-email")
 async def read_account_email(method: str = "") -> JSONResponse:
     """Resolve the address behind one account, only when Details asks for it."""

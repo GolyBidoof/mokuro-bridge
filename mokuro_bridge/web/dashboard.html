@@ -1399,7 +1399,7 @@ function renderDestinations() {
         </div>
         <span class="state-chip" data-state="${esc(st)}">${esc(STATE_LABEL[st] || st)}</span>
       </div>
-      <div class="dest-folder"><span class="k">Folder</span><code title="${esc(folderLine)}">${esc(folderLine || "not chosen yet")}</code>${!isLocal && PROVIDER_LINKS[provider] ? `<a class="folder-open" href="${esc(PROVIDER_LINKS[provider].web)}" target="_blank" rel="noopener" title="${esc(PROVIDER_LINKS[provider].webLabel)}" aria-label="${esc(PROVIDER_LINKS[provider].webLabel)}">${icon("external")}</a>` : ""}</div>
+      <div class="dest-folder"><span class="k">Folder</span><code title="${esc(folderLine)}">${esc(folderLine || "not chosen yet")}</code>${!isLocal && PROVIDER_LINKS[provider] ? `<a class="folder-open" data-folder-link="${esc(alias)}" href="${esc(PROVIDER_LINKS[provider].web)}" target="_blank" rel="noopener" title="${esc(PROVIDER_LINKS[provider].webLabel)}" aria-label="${esc(PROVIDER_LINKS[provider].webLabel)}">${icon("external")}</a>` : ""}</div>
       ${st !== "connected" ? `<p class="dest-note">${esc(STATE_NOTE[st] || "")}</p>` : ""}
       ${uploadLocked ? `<p class="dest-note">Install mokuro-bunko to resume uploads.</p>` : ""}
       ${st === "connected" ? `<div class="dest-usage" data-usage="${esc(alias)}"><span class="usage-text">Checking space…</span></div>` : ""}
@@ -1428,7 +1428,10 @@ function renderDestinations() {
     };
   });
   $("destinations").querySelectorAll("[data-usage]").forEach((host) => loadUsage(host.dataset.usage));
-  shownMethods.filter((m) => providerOf(m) !== "local").forEach((m) => loadCardEmail(aliasOf(m)));
+  shownMethods.filter((m) => providerOf(m) !== "local").forEach((m) => {
+    loadCardEmail(aliasOf(m));
+    loadCardFolderLink(aliasOf(m));
+  });
   renderGates();
 }
 
@@ -1476,6 +1479,20 @@ function renderUsage(host, data) {
   host.innerHTML = `${bar}<span class="usage-line">${text.join('<span aria-hidden="true"> · </span>')}</span>`;
   const refresh = host.querySelector("[data-usage-refresh]");
   if (refresh) refresh.onclick = () => loadUsage(host.dataset.usage, true);
+}
+
+async function loadCardFolderLink(alias) {
+  const link = document.querySelector(`[data-folder-link="${CSS.escape(alias)}"]`);
+  if (!link || link.dataset.linkLoaded === "1") return;
+  link.dataset.linkLoaded = "1";
+  try {
+    const data = await api(`/config/folder-link?method=${encodeURIComponent(alias)}`);
+    if (data.url) {
+      link.href = data.url;
+      link.title = "Open the upload folder";
+      link.setAttribute("aria-label", "Open the upload folder");
+    }
+  } catch (error) { /* keep the provider page fallback */ }
 }
 
 async function loadCardEmail(alias) {
@@ -2532,7 +2549,7 @@ function openDetails(alias) {
     ["Status", esc(STATE_LABEL[st] || st)],
     (method.extra && (method.extra.series_owner === "mokuro-bunko" || method.extra.bunko_version))
       ? ["Library index", `mokuro-bunko ${esc(method.extra.bunko_version || method.extra.bunko_commit || "(connected)")}`] : null,
-    link ? ["Open", `<a href="${esc(link.web)}" target="_blank" rel="noopener">${esc(link.webLabel)} ${icon("external")}</a>`] : null,
+    link ? ["Open", `<a id="details-open-link" href="${esc(link.web)}" target="_blank" rel="noopener">${esc(link.webLabel)} ${icon("external")}</a>`] : null,
   ].filter(Boolean);
   $("details-title").textContent = alias;
   $("details-subtitle").textContent = `${meta.label} · ${STATE_LABEL[st] || st}`;
@@ -2540,6 +2557,18 @@ function openDetails(alias) {
   $("details-copy").onclick = () => copyText(`upload_method=${alias}`, "Destination id");
   $("details-dialog").showModal();
   resolveAccountEmail(alias);
+  resolveFolderLink(alias);
+}
+
+async function resolveFolderLink(alias) {
+  try {
+    const data = await api(`/config/folder-link?method=${encodeURIComponent(alias)}`);
+    const link = $("details-open-link");
+    if (link && data.url) {
+      link.href = data.url;
+      link.textContent = "Open the upload folder ↗";
+    }
+  } catch (error) { /* provider page fallback stays */ }
 }
 
 async function resolveAccountEmail(alias) {
