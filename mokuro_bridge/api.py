@@ -2040,7 +2040,19 @@ async def session_finalize(
                 "wait_ocr",
                 f"Waiting for OCR queue ({snap['pages_ocr_pending']} pending, "
                 f"flush every {_OCR_CHUNK_SIZE} or {_OCR_IDLE_FLUSH_S}s idle)…",
-                **{k: snap[k] for k in ("pages_received", "pages_ocr_done", "pages_ocr_pending")},
+                # pages_ocr_failed rides along because it is the only place a
+                # client can see the count while the stream is still healthy:
+                # the terminal `error` frame reports it only when it aborts.
+                # dokuha-cli shows it on the live OCR line.
+                **{
+                    k: snap[k]
+                    for k in (
+                        "pages_received",
+                        "pages_ocr_done",
+                        "pages_ocr_pending",
+                        "pages_ocr_failed",
+                    )
+                },
                 ocr_chunk_size=_OCR_CHUNK_SIZE,
             )
             await asyncio.sleep(0)
@@ -2060,6 +2072,7 @@ async def session_finalize(
                         pages_ocr_done=snap["pages_ocr_done"],
                         pages_received=snap["pages_received"],
                         pages_ocr_pending=snap["pages_ocr_pending"],
+                        pages_ocr_failed=snap["pages_ocr_failed"],
                     )
                     await asyncio.sleep(0)
             await asyncio.shield(wait_task)
@@ -2996,6 +3009,10 @@ async def session_finalize(
             )
             # Standardized per-file upload summary for the "done" event (only
             # in remote mode); each entry mirrors the "upload_progress" schema.
+            # `size` is repeated here because it is the one field every client
+            # reads from the terminal frame (dokuha-cli totals it per artifact),
+            # and a local done frame carries only `size`. Without it a remote
+            # finalize reports NaN sizes while a local one reports real ones.
             uploads_summary = []
             if method != "local":
                 for r in upload_results:
@@ -3004,6 +3021,7 @@ async def session_finalize(
                     uploads_summary.append(
                         {
                             "file": r["file"],
+                            "size": total,
                             "bytes": total,
                             "total_bytes": total,
                             "current_bytes": total if r["success"] else 0,
@@ -3178,6 +3196,9 @@ async def upload_methods():
     for m in (await _lanes.to_control(_build_upload_methods)).values():
         entry = {
             "id": m.id,
+            # Uniform with /config and /health: every row names its alias,
+            # including `local`, whose extra dict carries no provider keys.
+            "alias": m.id,
             "name": m.name,
             "configured": m.configured,
             "default": m.default,
@@ -3276,6 +3297,8 @@ def _health_upload_methods(methods: dict) -> list[dict]:
         rows.append(
             {
                 "id": method.id,
+                # Same shape as /upload-methods and /config, including `local`.
+                "alias": method.id,
                 "name": method.name,
                 "configured": method.configured,
                 "default": method.default,

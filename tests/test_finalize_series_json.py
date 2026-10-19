@@ -223,6 +223,58 @@ def test_remote_finalize_publishes_the_manifest_after_the_volume(remote_bridge):
     assert frames[-1]["uploads"][-1]["file"] == series_json.SERIES_FILE_NAME
 
 
+def test_remote_done_frame_reports_a_size_for_every_file(remote_bridge):
+    """The terminal frame must carry `size` for remote files, not only local ones.
+
+    dokuha-cli totals a volume's artifacts from `done.uploads[].size` (the only
+    size field the reader of that frame knows). A remote entry used to expose
+    `bytes`/`total_bytes` only, so every remote artifact summed as NaN while a
+    local finalize reported real numbers.
+    """
+    stream = _capture_and_finalize_remote(remote_bridge, title="Sample Series 1", pages=2)
+    terminal = _frames(stream)[-1]
+    assert terminal["stage"] == "done", stream
+    entries = terminal["uploads"]
+    assert {entry["file"] for entry in entries} == {
+        "Sample Series 1.webp",
+        "Sample Series 1.cbz",
+        "Sample Series 1.mokuro",
+        series_json.SERIES_FILE_NAME,
+    }
+    for entry in entries:
+        assert isinstance(entry["size"], int), entry
+        assert entry["size"] > 0, entry
+        assert entry["size"] == len(remote_bridge.store[entry["file"]]), entry
+
+
+def test_local_and_remote_done_frames_share_the_size_field(bridge):
+    """Both destinations describe an uploaded file the same way."""
+    local_stream = _capture_and_finalize(
+        bridge, title="Sample Series 1", pages=2, local_dir=bridge.library
+    )
+    local_terminal = _frames(local_stream)[-1]
+    for entry in local_terminal["uploads"]:
+        assert isinstance(entry["size"], int), entry
+        assert entry["size"] > 0, entry
+
+
+def test_wait_ocr_frames_carry_the_failure_count(bridge):
+    """dokuha-cli reads `pages_ocr_failed` from the live wait_ocr frames.
+
+    The terminal `error` frame only reports the count when OCR actually aborts,
+    so the progress frames are the only place a client can show failures while
+    the stream is still healthy.
+    """
+    stream = _capture_and_finalize(
+        bridge, title="Sample Series 1", pages=2, local_dir=bridge.library
+    )
+    wait_frames = [frame for frame in _frames(stream) if frame.get("stage") == "wait_ocr"]
+    assert wait_frames, stream
+    for frame in wait_frames:
+        for key in ("pages_received", "pages_ocr_done", "pages_ocr_pending", "pages_ocr_failed"):
+            assert isinstance(frame[key], int), (key, frame)
+
+
 def test_remote_manifest_is_merges_the_existing_remote_copy(remote_bridge):
     _capture_and_finalize_remote(remote_bridge, title="Sample Series 1", pages=1)
     stream = _capture_and_finalize_remote(remote_bridge, title="Sample Series 2", pages=1)

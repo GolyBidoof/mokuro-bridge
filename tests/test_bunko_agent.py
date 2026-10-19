@@ -47,7 +47,27 @@ def test_webdav_config_carries_url_and_user(bunko_home):
 
 def test_folder_comes_from_the_bridge_root(monkeypatch):
     monkeypatch.setattr(bunko_agent, "method_root", lambda method: "/Root/mokuro-reader")
+    monkeypatch.setattr(bunko_agent, "method_provider", lambda method: "mega")
     assert bunko_agent._folder_for("mega") == "mokuro-reader"
+
+
+def test_rclone_folder_is_the_whole_account_root(monkeypatch):
+    """The shared gateway serves the whole remote, so Bunko's folder is the root path.
+
+    Only the last segment would mount `<remote>:mokuro-reader` while the bridge
+    uploads to `<remote>:/Root/mokuro-reader`, i.e. a different (and empty) library.
+    """
+    monkeypatch.setattr(
+        bunko_agent, "method_root", lambda method: "/Root/mokuro-reader/archive"
+    )
+    monkeypatch.setattr(bunko_agent, "method_provider", lambda method: "rclone")
+    assert bunko_agent._folder_for("mega") == "Root/mokuro-reader/archive"
+
+
+def test_rclone_folder_falls_back_when_the_root_is_empty(monkeypatch):
+    monkeypatch.setattr(bunko_agent, "method_root", lambda method: "/")
+    monkeypatch.setattr(bunko_agent, "method_provider", lambda method: "rclone")
+    assert bunko_agent._folder_for("mega") == bunko_agent.BUNKO_LIBRARY_FOLDER
 
 
 def test_mega_connect_payload_uses_the_bridge_account(bunko_home, monkeypatch):

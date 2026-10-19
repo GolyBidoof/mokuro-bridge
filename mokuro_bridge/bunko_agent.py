@@ -691,7 +691,17 @@ def status_line(state: Optional[AgentState] = None) -> str:
 
 
 def _folder_for(method: str) -> str:
+    """The folder Bunko mounts inside its storage backend.
+
+    Native backends (MEGA, Drive, OneDrive, WebDAV) mount under their own cloud
+    root, so only the last segment of the bridge root names the folder. An
+    rclone destination is different: the shared gateway serves the whole rclone
+    remote, so the account root is the path inside the backend and the last
+    segment alone would point Bunko at a sibling library.
+    """
     root = method_root(method) or BUNKO_LIBRARY_FOLDER
+    if method_provider(method) == "rclone":
+        return root.strip("/") or BUNKO_LIBRARY_FOLDER
     return root.rstrip("/").rsplit("/", 1)[-1] or BUNKO_LIBRARY_FOLDER
 
 
