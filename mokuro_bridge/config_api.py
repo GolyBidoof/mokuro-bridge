@@ -1698,18 +1698,20 @@ async def rclone_add_mega(
     _require_local_origin(request)
     try:
         remote, extra = await asyncio.to_thread(
-            rclone_auth.create_mega, alias or "mega", email, password, totp
+            rclone_auth.create_mega, alias or "mega", email, password, totp, check=False
         )
     except rclone_auth.RcloneAuthError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     extra["kind"] = "mega"
     instance = await asyncio.to_thread(_rclone_save_account, remote, alias, label, root, extra)
+    verify_id = await asyncio.to_thread(rclone_auth.start_verify, remote, instance.name)
     return JSONResponse(
         {
             "ok": True,
             "method": instance.id,
             "remote": instance.extra.get("remote"),
             "identity": rclone_auth.remote_summary(str(instance.extra.get("remote") or "")),
+            "verify_id": verify_id,
         }
     )
 
@@ -1728,29 +1730,51 @@ async def rclone_add_webdav(
     _require_local_origin(request)
     try:
         remote, extra = await asyncio.to_thread(
-            rclone_auth.create_webdav, alias or "webdav", url, username, password
+            rclone_auth.create_webdav, alias or "webdav", url, username, password, check=False
         )
     except rclone_auth.RcloneAuthError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     extra["kind"] = "webdav"
     instance = await asyncio.to_thread(_rclone_save_account, remote, alias, label, root, extra)
+    verify_id = await asyncio.to_thread(rclone_auth.start_verify, remote, instance.name)
     return JSONResponse(
         {
             "ok": True,
             "method": instance.id,
             "remote": instance.extra.get("remote"),
             "identity": rclone_auth.remote_summary(str(instance.extra.get("remote") or "")),
+            "verify_id": verify_id,
         }
     )
 
 
+@router.get("/config/rclone/verify/status")
+async def rclone_verify_status(flow_id: str = "") -> JSONResponse:
+    """Progress of a background sign-in check after a MEGA/WebDAV card."""
+    try:
+        return JSONResponse(await asyncio.to_thread(rclone_auth.verify_status, flow_id))
+    except rclone_auth.RcloneAuthError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
 @router.post("/config/rclone/authorize/start")
-async def rclone_authorize_start(request: Request, service: str = Form("")) -> JSONResponse:
-    """Open the consent tab for Drive or OneDrive through rclone."""
+async def rclone_authorize_start(
+    request: Request,
+    service: str = Form(""),
+    client_id: str = Form(""),
+    client_secret: str = Form(""),
+) -> JSONResponse:
+    """Open the consent tab for Drive or OneDrive through rclone.
+
+    Drive accepts an optional client id and secret when the user wants their
+    own Google project instead of rclone's built-in client.
+    """
     _require_local_origin(request)
     kind = str(service or "").strip().lower()
     try:
-        flow = await asyncio.to_thread(rclone_auth.start_authorize, kind)
+        flow = await asyncio.to_thread(
+            rclone_auth.start_authorize, kind, client_id, client_secret
+        )
     except rclone_auth.RcloneAuthError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return JSONResponse({"ok": True, **flow})

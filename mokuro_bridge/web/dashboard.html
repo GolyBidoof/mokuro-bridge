@@ -1708,6 +1708,41 @@ function nextAlias(provider) {
   return count ? `${provider}-${count + 1}` : provider;
 }
 
+function watchRcloneVerify(result, alias) {
+  const submit = $("add-submit");
+  const error = $("add-error");
+  let note = $("rclone-verify-note");
+  if (!note && error && error.parentNode) {
+    note = document.createElement("p");
+    note.id = "rclone-verify-note";
+    note.className = "hint";
+    error.parentNode.insertBefore(note, error.nextSibling);
+  }
+  if (note) note.textContent = "Saved. Checking the sign-in now; this only takes a moment.";
+  if (submit) { submit.disabled = true; submit.textContent = "Checking sign-in…"; }
+  const timer = setInterval(async () => {
+    try {
+      const status = await api(`/config/rclone/verify/status?flow_id=${encodeURIComponent(result.verify_id)}`);
+      if (status.state === "ready") {
+        clearInterval(timer);
+        toast(`${alias} connected${result.identity ? ` · ${result.identity}` : ""}.`, "info");
+        closeDialog("add-dialog");
+        await loadConfig();
+      } else if (status.state === "error") {
+        clearInterval(timer);
+        if (submit) { submit.disabled = false; submit.textContent = "Connect"; }
+        if (note) note.textContent = "";
+        addError(status.error || "The sign-in was refused, so nothing was saved.");
+      }
+    } catch (pollError) {
+      if (pollError.status === 404) {
+        clearInterval(timer);
+        if (submit) { submit.disabled = false; submit.textContent = "Connect"; }
+      }
+    }
+  }, 1500);
+}
+
 function renderRcloneAuthorize(flow, service, alias, label, root) {
   const host = $("add-rclone-fields");
   const submit = $("add-submit");
@@ -1886,6 +1921,17 @@ function openProviderForm(provider, mode, account) {
       <input id="add-rclone-root" type="text" autocomplete="off" spellcheck="false" value="${esc(rcloneRoot)}">
       <span class="hint">Created on the remote, with one folder per series inside it.</span>
     </div>` : ""}
+    ${provider === "drive" && rcloneBacked ? `<details class="dav-help">
+      <summary>Use your own Google app (optional)</summary>
+      <div class="dav-help-body">
+        <p>rclone's built-in client is enough for a new library. To see an existing reader library, sign in with the same Google project your reader uses.</p>
+        <div class="form-grid two">
+          <div class="field"><label for="add-rclone-client-id">Client ID</label><input id="add-rclone-client-id" type="text" autocomplete="off" spellcheck="false" placeholder="…apps.googleusercontent.com"></div>
+          <div class="field"><label for="add-rclone-client-secret">Client secret</label><input id="add-rclone-client-secret" type="password" autocomplete="off"></div>
+        </div>
+        <p><a class="inline-link" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google Cloud credentials ${icon("external")}</a></p>
+      </div>
+    </details>` : ""}
     ${provider === "drive" && !rcloneBacked ? `<div class="field" id="drive-client-fields" ${info.live && info.live.client_preset ? "hidden" : ""}>
       <label for="add-client-id">Google client ID</label>
       <input id="add-client-id" type="text" autocomplete="off" spellcheck="false" placeholder="…apps.googleusercontent.com">
@@ -2007,12 +2053,9 @@ async function submitProviderForm() {
       const password = $("add-password").value;
       const totp = ($("add-totp") && $("add-totp").value.trim()) || "";
       if (!email || !password) { addError("Enter the MEGA email and password."); restore(); return; }
-      submit.textContent = "Signing in through rclone…";
+      submit.textContent = "Saving…";
       const result = await postForm("/config/rclone/mega", { alias, label, email, password, totp, root: "" });
-      toast(`${result.method || alias} connected${result.identity ? ` · ${result.identity}` : ""}.`, "info");
-      closeDialog("add-dialog");
-      await loadConfig();
-      restore();
+      watchRcloneVerify(result, alias);
       return;
     }
     if (provider === "webdav") {
@@ -2028,12 +2071,9 @@ async function submitProviderForm() {
         restore();
         return;
       }
-      submit.textContent = "Checking the server through rclone…";
+      submit.textContent = "Saving…";
       const result = await postForm("/config/rclone/webdav", { alias, label, url, username, password, root });
-      toast(`${result.method || alias} connected${result.identity ? ` · ${result.identity}` : ""}.`, "info");
-      closeDialog("add-dialog");
-      await loadConfig();
-      restore();
+      watchRcloneVerify(result, alias);
       return;
     }
     if (provider === "onedrive") {
@@ -2068,7 +2108,9 @@ async function submitProviderForm() {
     if (provider === "drive") {
       submit.textContent = "Starting sign-in…";
       try {
-        const flow = await postForm("/config/rclone/authorize/start", { service: "drive" });
+        const clientId = ($("add-rclone-client-id") && $("add-rclone-client-id").value.trim()) || "";
+        const clientSecret = ($("add-rclone-client-secret") && $("add-rclone-client-secret").value) || "";
+        const flow = await postForm("/config/rclone/authorize/start", { service: "drive", client_id: clientId, client_secret: clientSecret });
         renderRcloneAuthorize(flow, "drive", alias, label, "");
       } catch (error) {
         addError(error.message);

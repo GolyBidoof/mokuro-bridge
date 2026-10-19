@@ -166,6 +166,46 @@ def _refresh_provider_caches() -> None:
     rclone_provider.refresh_caches()
 
 
+_VERIFY: dict[str, dict] = {}
+_VERIFY_LOCK = threading.Lock()
+
+
+def start_verify(remote: str, name: str) -> str:
+    """Check a freshly created remote in the background; returns a flow id."""
+    flow_id = secrets.token_hex(8)
+    with _VERIFY_LOCK:
+        _VERIFY[flow_id] = {"state": "checking", "remote": remote, "error": ""}
+    threading.Thread(
+        target=_verify_remote, args=(flow_id, remote, name), name="rclone-verify", daemon=True
+    ).start()
+    return flow_id
+
+
+def _verify_remote(flow_id: str, remote: str, name: str) -> None:
+    ok, error = check_remote(remote)
+    if ok:
+        with _VERIFY_LOCK:
+            _VERIFY[flow_id] = {"state": "ready", "remote": remote, "error": ""}
+        return
+    # A remote that cannot sign in would leave a broken destination: drop both.
+    _remove(remote)
+    try:
+        accounts.delete_instance("rclone", name)
+    except Exception:
+        pass
+    _refresh_provider_caches()
+    with _VERIFY_LOCK:
+        _VERIFY[flow_id] = {"state": "error", "remote": remote, "error": error or "sign-in failed"}
+
+
+def verify_status(flow_id: str) -> dict:
+    with _VERIFY_LOCK:
+        flow = _VERIFY.get(flow_id)
+        if flow is None:
+            raise RcloneAuthError("that sign-in check is no longer waiting")
+        return dict(flow)
+
+
 def _remove(remote: str) -> None:
     try:
         _run(["config", "delete", remote], timeout=20.0)
@@ -177,8 +217,14 @@ _FLOWS: dict[str, dict] = {}
 _FLOWS_LOCK = threading.Lock()
 
 
-def start_authorize(kind: str) -> dict:
-    """Start `rclone authorize <kind>` and return {flow_id, url, state}."""
+def start_authorize(kind: str, client_id: str = "", client_secret: str = "") -> dict:
+    """Start `rclone authorize <kind>` and return {flow_id, url, state}.
+
+    Drive is usable with rclone's built-in Google client, but a user can supply
+    their own client id and secret, which is what makes an existing reader
+    library visible. Those are passed positionally, exactly as the rclone CLI
+    documents.
+    """
     if kind not in ("drive", "onedrive"):
         raise RcloneAuthError(f"{kind} does not use a consent tab")
     flow_id = secrets.token_hex(8)
@@ -192,6 +238,8 @@ def start_authorize(kind: str) -> dict:
         "started": time.time(),
         "process": None,
     }
+    flow["client_id"] = str(client_id or "").strip()
+    flow["client_secret"] = str(client_secret or "").strip()
     with _FLOWS_LOCK:
         _FLOWS[flow_id] = flow
     threading.Thread(target=_run_authorize, args=(flow,), name=f"rclone-authorize-{kind}", daemon=True).start()
@@ -204,8 +252,11 @@ def start_authorize(kind: str) -> dict:
 
 def _run_authorize(flow: dict) -> None:
     try:
+        args = [_require_binary(), "authorize", flow["kind"]]
+        if flow.get("client_id") and flow.get("client_secret"):
+            args += [flow["client_id"], flow["client_secret"]]
         process = subprocess.Popen(
-            [_require_binary(), "authorize", flow["kind"]],
+            args,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
