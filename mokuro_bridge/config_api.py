@@ -1381,7 +1381,9 @@ async def update_account(
     new_alias: Optional[str] = None
     if alias_given and str(alias or "").strip():
         try:
-            new_alias = accounts.validate_alias(provider, alias, name=name)
+            new_alias = accounts.validate_alias(
+                provider, alias, name=name, allow_reserved=provider == "rclone"
+            )
         except accounts.AliasCollision as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         except ValueError as error:
@@ -1396,6 +1398,7 @@ async def update_account(
             name,
             alias=new_alias,
             label=new_label,
+            allow_reserved=provider == "rclone",
         )
     except accounts.AliasCollision as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
@@ -1615,32 +1618,43 @@ async def install_bunko_engine(request: Request, totp: str = Form("")) -> JSONRe
 _RCLONE_SERVICE_ALIASES = ("mega", "drive", "onedrive", "webdav")
 
 
-def _rclone_account_target(alias: str) -> tuple[str, str]:
+def _rclone_account_target(alias: str, replace: bool = False) -> tuple[str, str]:
     """(storage name, alias) for a bridge-created rclone account.
 
     The four service cards keep the names users already know. Those names are
     also the legacy native provider ids, so they are allowed only while no
     native account of that provider is configured.
     """
+    candidate = str(alias or "").strip().lower()
     try:
         return _account_target("rclone", alias)
-    except (accounts.AliasCollision, ValueError):
-        candidate = str(alias or "").strip().lower()
+    except (accounts.AliasCollision, ValueError) as error:
         if candidate not in _RCLONE_SERVICE_ALIASES:
             raise
-        in_use = any(
-            row["id"] == candidate and row["state"] != "not_configured"
-            for row in _method_rows()
-        )
-        if in_use:
-            raise
+        conflict = accounts.find_alias(candidate)
+        if conflict is not None and conflict.tracked and conflict.provider != "rclone":
+            if not replace:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"the name '{candidate}' is already used by "
+                        f"{conflict.display_name}. Confirm to move that name to "
+                        "this new account; the old one keeps working under its "
+                        "generated id."
+                    ),
+                ) from error
+            accounts.clear_alias(conflict.provider, conflict.name)
+        elif conflict is not None and conflict.tracked:
+            raise error
         return candidate, candidate
 
 
-def _rclone_save_account(remote: str, alias: str, label: str, root: str, extra: dict) -> accounts.Instance:
+def _rclone_save_account(
+    remote: str, alias: str, label: str, root: str, extra: dict, replace: bool = False
+) -> accounts.Instance:
     """Record one bridge account for a remote the page just created."""
     try:
-        name, clean_alias = _rclone_account_target(alias)
+        name, clean_alias = _rclone_account_target(alias, replace)
     except accounts.AliasCollision as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except ValueError as error:
@@ -1706,6 +1720,7 @@ async def rclone_add_mega(
     password: str = Form(""),
     totp: str = Form(""),
     root: str = Form(""),
+    replace: str = Form(""),
 ) -> JSONResponse:
     """Create a MEGA remote through rclone, then record the destination."""
     _require_local_origin(request)
@@ -1716,7 +1731,9 @@ async def rclone_add_mega(
     except rclone_auth.RcloneAuthError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     extra["kind"] = "mega"
-    instance = await asyncio.to_thread(_rclone_save_account, remote, alias, label, root, extra)
+    instance = await asyncio.to_thread(
+        _rclone_save_account, remote, alias, label, root, extra, replace in ("1", "true", "yes")
+    )
     verify_id = await asyncio.to_thread(rclone_auth.start_verify, remote, instance.name)
     return JSONResponse(
         {
@@ -1738,6 +1755,7 @@ async def rclone_add_webdav(
     username: str = Form(""),
     password: str = Form(""),
     root: str = Form(""),
+    replace: str = Form(""),
 ) -> JSONResponse:
     """Create a WebDAV remote through rclone, then record the destination."""
     _require_local_origin(request)
@@ -1748,7 +1766,9 @@ async def rclone_add_webdav(
     except rclone_auth.RcloneAuthError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     extra["kind"] = "webdav"
-    instance = await asyncio.to_thread(_rclone_save_account, remote, alias, label, root, extra)
+    instance = await asyncio.to_thread(
+        _rclone_save_account, remote, alias, label, root, extra, replace in ("1", "true", "yes")
+    )
     verify_id = await asyncio.to_thread(rclone_auth.start_verify, remote, instance.name)
     return JSONResponse(
         {
@@ -1759,6 +1779,21 @@ async def rclone_add_webdav(
             "verify_id": verify_id,
         }
     )
+
+
+@router.get("/config/rclone/usage")
+async def rclone_usage(method: str = "", refresh: str = "") -> JSONResponse:
+    """Quota and upload-folder size for one rclone destination (cached)."""
+    try:
+        provider, name = accounts.parse_method_id(method)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if provider != "rclone":
+        raise HTTPException(status_code=400, detail="space details are only available for rclone destinations")
+    data = await asyncio.to_thread(
+        rclone_provider.usage, name, refresh=refresh in ("1", "true", "yes")
+    )
+    return JSONResponse(data)
 
 
 @router.get("/config/rclone/verify/status")

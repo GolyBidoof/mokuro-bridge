@@ -37,7 +37,7 @@ def test_default_account_uses_the_bare_provider_id():
         ("MEGA:Work", ("mega", "work")),  # case is normalised, not rejected
     ],
 )
-def test_parse_method_id(raw, expected):
+def test_parse_method_id(registry, raw, expected):
     assert accounts.parse_method_id(raw) == expected
 
 @pytest.mark.parametrize(

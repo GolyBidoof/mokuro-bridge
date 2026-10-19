@@ -35,7 +35,6 @@ _SERVICES = {
 }
 
 _AUTH_URL_RE = re.compile(r"(https?://(?:127\.0\.0\.1|localhost):\d+/\S+)")
-_TOKEN_RE = re.compile(r"(\{.*\})", re.S)
 AUTHORIZE_TIMEOUT_S = 300.0
 
 
@@ -274,28 +273,24 @@ def _run_authorize(flow: dict) -> None:
         for raw in process.stdout:
             line = raw.rstrip("\n")
             output.append(line)
-            del output[:-40]
+            del output[:-80]
             if not flow["url"]:
                 found = _AUTH_URL_RE.search(line)
                 if found:
                     flow["url"] = found.group(1)
-            if flow["state"] == "waiting" and line.strip().startswith("{"):
-                match = _TOKEN_RE.search("\n".join(output[-12:]))
-                if match:
-                    try:
-                        token = json.loads(match.group(1))
-                    except ValueError:
-                        token = None
-                    if isinstance(token, dict):
-                        flow["token"] = json.dumps(token)
-                        flow["state"] = "ready"
-                        break
             if time.monotonic() > deadline:
                 flow["state"] = "error"
                 flow["error"] = "the sign-in window expired; start it again"
                 break
-        else:
-            if flow["state"] == "waiting":
+        if flow["state"] == "waiting":
+            # rclone prints the token as the last JSON line and then exits.
+            # Parsing greedily before that used to hand a bad blob to
+            # `config create`, which made the user sign in a second time.
+            token = _extract_token(output)
+            if token is not None:
+                flow["token"] = json.dumps(token)
+                flow["state"] = "ready"
+            else:
                 flow["state"] = "error"
                 flow["error"] = _tail(output) or "rclone authorize exited without a token"
     except Exception as error:
@@ -307,6 +302,21 @@ def _run_authorize(flow: dict) -> None:
         if flow["state"] == "waiting":
             flow["state"] = "error"
             flow["error"] = flow["error"] or "sign-in did not finish"
+
+
+def _extract_token(lines: list[str]) -> Optional[dict]:
+    """The OAuth token rclone prints, taking the last complete JSON object."""
+    for line in reversed(lines):
+        text = line.strip()
+        if not text.startswith("{"):
+            continue
+        try:
+            value = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and ("access_token" in value or "refresh_token" in value):
+            return value
+    return None
 
 
 def _tail(lines: list[str]) -> str:
@@ -334,8 +344,15 @@ def finish_authorize(flow_id: str, remote_alias: str, *, root: str = "") -> tupl
     with _FLOWS_LOCK:
         flow = _FLOWS[flow_id]
         kind = flow["kind"]
+        client_id = str(flow.get("client_id") or "")
+        client_secret = str(flow.get("client_secret") or "")
     remote = remote_name(remote_alias)
     params = {"token": status["token"]}
+    # A token minted with the user's own Google app only works with that app.
+    if client_id:
+        params["client_id"] = client_id
+    if client_secret:
+        params["client_secret"] = client_secret
     if kind == "onedrive":
         params["drive_type"] = "personal"
     _create(remote, kind, params)

@@ -416,6 +416,68 @@ def _upload(
         return False, safe_provider_error(error), None
 
 
+_USAGE_TTL_S = 300.0
+_usage_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+_usage_lock = threading.Lock()
+
+
+def usage(name: str = DEFAULT_NAME, *, refresh: bool = False) -> dict:
+    """Quota and folder size for one account, cached for a few minutes.
+
+    ``rclone about`` is optional per backend: MEGA, Drive and OneDrive answer
+    it, a plain WebDAV server usually does not, and that is reported rather
+    than treated as an error. ``rclone size`` always works because it walks the
+    upload folder itself.
+    """
+    instance = _instance(name)
+    remote = remote_for(name)
+    if instance is None or not remote or not configured(name):
+        return {"available": False, "error": "this destination is not connected"}
+    key = (name, instance.root_path)
+    now = time.monotonic()
+    with _usage_lock:
+        cached = _usage_cache.get(key)
+        if cached is not None and not refresh and now - cached[0] < _USAGE_TTL_S:
+            return dict(cached[1])
+
+    about: Optional[dict] = None
+    about_error = ""
+    try:
+        result = _run(["about", remote, "--json"], timeout=30.0)
+        if result.returncode == 0:
+            parsed = json.loads(result.stdout or "{}")
+            about = parsed if isinstance(parsed, dict) else None
+        else:
+            about_error = _detail(result)
+    except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+        about_error = str(error)
+
+    folder: Optional[dict] = None
+    folder_error = ""
+    try:
+        target = _target(remote, instance.root_path)
+        result = _run(["size", target, "--json"], timeout=120.0)
+        if result.returncode == 0:
+            parsed = json.loads(result.stdout or "{}")
+            folder = parsed if isinstance(parsed, dict) else None
+        elif result.returncode != _NOT_FOUND:
+            folder_error = _detail(result)
+    except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+        folder_error = str(error)
+
+    data = {
+        "available": True,
+        "about": about,
+        "about_error": about_error,
+        "folder": folder,
+        "folder_error": folder_error,
+        "checked_at": time.time(),
+    }
+    with _usage_lock:
+        _usage_cache[key] = (now, data)
+    return dict(data)
+
+
 def ensure_account_root(name: str = DEFAULT_NAME) -> bool:
     """Create the account's upload folder now (called after setup)."""
     with provider_account_lock("rclone", name):

@@ -214,7 +214,10 @@ def find_alias(alias: str) -> Optional["Instance"]:
     value = str(alias or "").strip().lower()
     if not value:
         return None
-    for instance in list_instances():
+    # A tracked account owns its alias; an implicit per-provider placeholder
+    # must never shadow the real destination.
+    instances = sorted(list_instances(), key=lambda item: not item.tracked)
+    for instance in instances:
         if instance.id == value:
             return instance
     return None
@@ -357,6 +360,32 @@ def accounts_dir() -> Path:
     """
     return ACCOUNTS_DIR
 
+def clear_alias(provider: str, name: str) -> bool:
+    """Drop a persisted alias so the account falls back to its derived id."""
+    _check_provider(provider)
+    _check_name(name)
+    with _save_lock:
+        path = meta_path(provider, name)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if not isinstance(data, dict) or "alias" not in data:
+            return False
+        data.pop("alias", None)
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+        try:
+            _chmod_fd_private(fd)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+                handle.write("\n")
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return True
+
+
 def meta_path(provider: str, name: str) -> Path:
     """Metadata file for one account (whether or not it exists yet)."""
     return accounts_dir() / f"{provider}__{name}.json"
@@ -428,7 +457,11 @@ def _stored_alias(provider: str, name: str, raw: object) -> str:
     value = str(raw or "").strip().lower()
     if not value or not _ALIAS_RE.match(value):
         return ""
-    if value == "local" or (value in PROVIDERS and value != provider):
+    if value == "local":
+        return ""
+    # rclone-backed destinations keep the service name the user chose ("mega",
+    # "webdav"), which is also a legacy provider id.
+    if value in PROVIDERS and value != provider and provider != "rclone":
         return ""
     if value == provider and name != DEFAULT_NAME:
         return ""
@@ -551,26 +584,33 @@ def list_instances() -> list[Instance]:
     with another account when hand-edited names such as ``work_2`` and
     ``work-2`` coexist, and the later one is suffixed rather than dropped.
     """
-    by_id: dict[str, Instance] = {}
-    for provider in PROVIDERS:
-        implicit = load_instance(provider, DEFAULT_NAME)
-        if implicit is not None:
-            implicit = _claim_alias(implicit, by_id)
-            by_id[implicit.id] = implicit
+    stored: list[Instance] = []
     for path in sorted(accounts_dir().glob("*__*.json")):
         stem = path.name[: -len(".json")]
         provider, sep, name = stem.partition("__")
         if not sep or provider not in PROVIDERS:
             continue  # not an account file (e.g. a *.creds.json sibling)
         if name == DEFAULT_NAME:
-            continue  # already loaded as the provider's implicit default
+            continue  # loaded as the provider's implicit default below
         try:
             instance = load_instance(provider, name)
         except ValueError:
             continue  # hand-edited nonsense name — ignore rather than crash
         if instance is not None:
-            instance = _claim_alias(instance, by_id)
-            by_id[instance.id] = instance
+            stored.append(instance)
+    # A stored alias outranks an implicit placeholder: an rclone destination
+    # named "mega" must keep that id, so the empty legacy placeholder for the
+    # mega provider steps aside instead of forcing a "-2" suffix.
+    stored_ids = {instance.id for instance in stored}
+    by_id: dict[str, Instance] = {}
+    for provider in PROVIDERS:
+        implicit = load_instance(provider, DEFAULT_NAME)
+        if implicit is not None and implicit.id not in stored_ids:
+            implicit = _claim_alias(implicit, by_id)
+            by_id[implicit.id] = implicit
+    for instance in stored:
+        instance = _claim_alias(instance, by_id)
+        by_id[instance.id] = instance
     ordered: list[Instance] = []
     for provider in PROVIDERS:
         ordered.extend(

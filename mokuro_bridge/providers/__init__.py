@@ -583,7 +583,13 @@ def _build_upload_methods() -> dict[str, UploadMethod]:
         )
     }
     default_method = _default_upload_method()
-    for instance in accounts.list_instances():
+    instances = list(accounts.list_instances())
+    claimed = {instance.id for instance in instances if instance.tracked}
+    for instance in instances:
+        # An unconfigured placeholder must not appear next to the account that
+        # took its id (an rclone destination aliased "mega", for example).
+        if not instance.tracked and instance.id in claimed:
+            continue
         provider = _PROVIDERS.get(instance.provider)
         # accounts.py gates the provider list, so the fallback view is only
         # reachable for a hand-edited account file; it matches the old default.

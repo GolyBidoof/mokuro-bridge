@@ -215,6 +215,9 @@
   .rclone-service.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
   .rclone-service span { color: var(--muted); font-size: 12px; }
   .rclone-auth { margin-top: 10px; }
+  .dest-usage { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+  .dest-usage strong { color: var(--text); font-weight: 600; }
+  .dest-usage .usage-text.muted { opacity: 0.85; }
   .pref { display: grid; grid-template-columns: minmax(0, 1fr) minmax(210px, 320px); gap: 14px 22px; padding: 15px 0; border-bottom: 1px solid var(--line); }
   .pref:last-of-type { border-bottom: 0; }
   .pref-label { font-weight: 600; font-size: 14px; }
@@ -1227,6 +1230,7 @@ function renderDestinations() {
       </div>
       <div class="dest-folder"><span class="k">Folder</span><code title="${esc(folderLine)}">${esc(folderLine || "not chosen yet")}</code>${!isLocal && PROVIDER_LINKS[provider] ? `<a class="folder-open" href="${esc(PROVIDER_LINKS[provider].web)}" target="_blank" rel="noopener" title="${esc(PROVIDER_LINKS[provider].webLabel)}" aria-label="${esc(PROVIDER_LINKS[provider].webLabel)}">${icon("external")}</a>` : ""}</div>
       ${st !== "connected" ? `<p class="dest-note">${esc(STATE_NOTE[st] || "")}</p>` : ""}
+      ${st === "connected" && m.provider === "rclone" ? `<div class="dest-usage" data-usage="${esc(alias)}"><span class="usage-text">Checking space…</span></div>` : ""}
       <div class="dest-actions">${primary}${defaultAction}</div>
       <div class="dest-links">${links.join("<span aria-hidden=\"true\">·</span>")}</div>
     </article>`;
@@ -1251,6 +1255,57 @@ function renderDestinations() {
       if (method) openReconnect(method);
     };
   });
+  $("destinations").querySelectorAll("[data-usage]").forEach((host) => loadUsage(host.dataset.usage));
+}
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "unknown";
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  let size = bytes;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }
+  return `${size >= 10 || unit === 0 ? Math.round(size) : size.toFixed(1)} ${units[unit]}`;
+}
+
+function renderUsage(host, data) {
+  if (!host) return;
+  if (!data || data.available === false) {
+    host.innerHTML = `<span class="usage-text muted">${esc((data && data.error) || "Space details are not available.")}</span>`;
+    return;
+  }
+  const parts = [];
+  const about = data.about;
+  if (about && (about.total || about.used || about.free)) {
+    parts.push(`<span class="usage-text"><strong>${formatBytes(about.used)}</strong> used · ${formatBytes(about.free)} free of ${formatBytes(about.total)}</span>`);
+  } else {
+    parts.push(`<span class="usage-text muted">This service does not report free space</span>`);
+  }
+  const folder = data.folder;
+  if (folder && Number.isFinite(Number(folder.bytes))) {
+    parts.push(`<span class="usage-text">Folder <strong>${formatBytes(folder.bytes)}</strong>${Number.isFinite(Number(folder.count)) ? ` in ${folder.count} files` : ""}</span>`);
+  } else if (data.folder_error) {
+    parts.push(`<span class="usage-text muted">Folder size unavailable</span>`);
+  }
+  parts.push(`<button class="link" type="button" data-usage-refresh>Refresh</button>`);
+  host.innerHTML = parts.join('<span aria-hidden="true"> · </span>');
+  const refresh = host.querySelector("[data-usage-refresh]");
+  if (refresh) refresh.onclick = () => loadUsage(host.dataset.usage, true);
+}
+
+async function loadUsage(alias, refresh) {
+  const host = document.querySelector(`[data-usage="${alias}"]`);
+  if (!host) return;
+  if (host.dataset.loading === "1" && !refresh) return;
+  host.dataset.loading = "1";
+  try {
+    const data = await api(`/config/rclone/usage?method=${encodeURIComponent(alias)}${refresh ? "&refresh=1" : ""}`);
+    renderUsage(host, data);
+  } catch (error) {
+    renderUsage(host, { available: false, error: "Space details are not available." });
+  } finally {
+    host.dataset.loading = "";
+  }
 }
 
 async function setDefault(alias) {
@@ -1699,20 +1754,6 @@ function unavailableNotes() {
   return notes.join("");
 }
 
-function rcloneAliasFor(provider) {
-  // Rclone-backed accounts use rclone-<service> names: "mega" and "webdav"
-  // already mean the legacy native provider, and dokuha must stay unambiguous.
-  const taken = new Set((state.config.methods || []).map((method) => aliasOf(method)));
-  const base = `rclone-${provider}`;
-  let candidate = base;
-  let suffix = 2;
-  while (taken.has(candidate)) {
-    candidate = `${base}-${suffix}`;
-    suffix += 1;
-  }
-  return candidate;
-}
-
 function nextAlias(provider) {
   const live = state.providers.find((p) => p.id === provider);
   if (live && live.alias_suggestion) return live.alias_suggestion;
@@ -1720,6 +1761,18 @@ function nextAlias(provider) {
   // and treating that as an account is the exact bug users notice.
   const count = (state.config.methods || []).filter((m) => providerOf(m) === provider && stateOf(m) !== "not_configured").length;
   return count ? `${provider}-${count + 1}` : provider;
+}
+
+async function postWithAliasReplace(url, fields) {
+  try {
+    return await postForm(url, fields);
+  } catch (error) {
+    if (error.status === 409 && /already used|already in use/i.test(error.message)
+        && window.confirm(`${error.message}\n\nMove that name to this new account?`)) {
+      return await postForm(url, { ...fields, replace: "1" });
+    }
+    throw error;
+  }
 }
 
 function watchRcloneVerify(result, alias) {
@@ -1779,7 +1832,7 @@ function renderRcloneAuthorize(flow, service, alias, label, root) {
       if (status.state === "ready") {
         clearInterval(timer);
         if (statusEl) statusEl.textContent = "Signed in. Creating the destination…";
-        const result = await postForm("/config/rclone/authorize/finish", { flow_id: flow.flow_id, alias, label, root });
+        const result = await postWithAliasReplace("/config/rclone/authorize/finish", { flow_id: flow.flow_id, alias, label, root });
         toast(`${result.method || alias} connected${result.identity ? ` · ${result.identity}` : ""}.`, "info");
         closeDialog("add-dialog");
         await loadConfig();
@@ -1810,7 +1863,7 @@ function openProviderForm(provider, mode, account) {
   form.hidden = false;
   state.add.rcloneService = "";
   const title = mode === "reconnect" ? `Reconnect ${meta.label}` : `Connect ${meta.label}`;
-  const alias = account ? aliasOf(account) : (rcloneBacked ? rcloneAliasFor(provider) : nextAlias(provider));
+  const alias = account ? aliasOf(account) : nextAlias(provider);
   const label = account ? (account.label || "") : "";
   const submitLabel = mode === "reconnect" ? "Reconnect" : `Connect ${meta.label}`;
   const rcloneRow = (state.providers || []).find((entry) => entry.id === "rclone") || {};
@@ -2068,7 +2121,7 @@ async function submitProviderForm() {
       const totp = ($("add-totp") && $("add-totp").value.trim()) || "";
       if (!email || !password) { addError("Enter the MEGA email and password."); restore(); return; }
       submit.textContent = "Saving…";
-      const result = await postForm("/config/rclone/mega", { alias, label, email, password, totp, root: "" });
+      const result = await postWithAliasReplace("/config/rclone/mega", { alias, label, email, password, totp, root: "" });
       watchRcloneVerify(result, alias);
       return;
     }
@@ -2086,7 +2139,7 @@ async function submitProviderForm() {
         return;
       }
       submit.textContent = "Saving…";
-      const result = await postForm("/config/rclone/webdav", { alias, label, url, username, password, root });
+      const result = await postWithAliasReplace("/config/rclone/webdav", { alias, label, url, username, password, root });
       watchRcloneVerify(result, alias);
       return;
     }
