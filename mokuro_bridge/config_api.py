@@ -851,7 +851,7 @@ async def add_mega_account(
 
 _WEBDAV_LIBS_HINT = (
     "WebDAV upload needs the requests library. Install it with "
-    "`pip install -r requirements-webdav.txt`, then retry."
+    "`pip install requests`, then retry."
 )
 
 
@@ -1161,7 +1161,7 @@ async def add_rclone_account(
 
 _MSAL_HINT = (
     "OneDrive sign-in needs the msal library. Install it with "
-    "`pip install -r requirements-onedrive.txt`, then retry."
+    "`pip install msal`, then retry."
 )
 
 
@@ -1295,7 +1295,7 @@ async def onedrive_status(flow_id: str = "") -> JSONResponse:
 
 _DRIVE_LIBS_HINT = (
     "Google Drive sign-in needs the google client libraries. Install them with "
-    "`pip install -r requirements-drive.txt`, then retry."
+    "`pip install google-api-python-client google-auth-oauthlib`, then retry."
 )
 
 

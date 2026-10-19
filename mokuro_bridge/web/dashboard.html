@@ -1972,7 +1972,7 @@ function unavailableNotes() {
     const link = PROVIDER_LINKS[id];
     const missing = (info.missing || []).join(", ");
     const lead = id === "onedrive"
-      ? `Install the Microsoft sign-in library with <code>pip install -r requirements-onedrive.txt</code> (missing: ${esc(missing || "msal")}). After that, the page can collect the one-time app ID itself.`
+      ? `Install the Microsoft sign-in library with <code>pip install msal</code> (missing: ${esc(missing || "msal")}). After that, the page can collect the one-time app ID itself.`
       : id === "rclone"
         ? `Install rclone (<code>brew install rclone</code>, <code>winget install Rclone.Rclone</code> or <code>apt install rclone</code>), run <code>rclone config</code> once, then reload this page.`
         : `This computer is missing ${esc(missing || "a dependency")}.`;

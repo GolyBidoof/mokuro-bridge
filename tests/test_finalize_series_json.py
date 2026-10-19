@@ -302,10 +302,19 @@ def test_remote_finalize_fails_loudly_when_the_manifest_cannot_be_read(
     monkeypatch.setattr(api, "download_file", broken_download)
     stream = _capture_and_finalize_remote(remote_bridge, title="Sample Series 2", pages=1)
     frames = _frames(stream)
-    assert frames[-1]["stage"] == "done"
-    assert frames[-1]["status"] == "partial_upload"
-    assert series_json.SERIES_FILE_NAME in frames[-1]["message"]
+    terminal = frames[-1]
+    assert terminal["stage"] == "done"
+    assert terminal["status"] == "partial_upload"
+    assert series_json.SERIES_FILE_NAME in terminal["message"]
     assert remote_bridge.store["series.json"] == before
+    # A partial terminal frame has the same shape as a successful one: clients
+    # read `series`, the OCR counter and per-file `size` off it before deciding
+    # what to report.
+    assert terminal["series"] == "Sample Series"
+    assert isinstance(terminal["pages_ocr_done"], int)
+    for entry in terminal["uploads"]:
+        assert isinstance(entry["size"], int), entry
+        assert "success" in entry and "url" in entry, entry
 
 
 def test_a_failed_manifest_upload_puts_the_previous_index_back(

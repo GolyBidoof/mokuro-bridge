@@ -71,6 +71,8 @@ The bridge and Bunko are independent processes. Bunko survives a bridge restart 
 - The finalize stream reports `series_json` with `external: true` instead of uploading the file.
 - If the marker disappears or goes stale, the bridge writes `series.json` again on the next finalize. That is also what the reader does after two marker TTLs.
 
+Ownership is decided per finalize, from the account's own metadata first: an account file under `~/.config/mokuro-bridge/accounts/` may carry `"series_owner": "mokuro-bunko"` (or `"bridge"` to force the old behaviour), which skips the probe entirely and is the escape hatch for a library whose marker the bridge cannot see. Without that setting the bridge reads `<account root>/.mokuro-bunko.json` through the account's own provider, treats a fresh active marker that lists `series.json` as ownership, and treats every read error, stale heartbeat, `released` state or unknown marker as "the bridge still owns it", because a manifest no one compiles would leave the series invisible in the reader.
+
 Nothing changes for a destination without Bunko: the bridge writes and merges `series.json` as before.
 
 ## Removing it

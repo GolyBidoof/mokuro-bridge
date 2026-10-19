@@ -442,12 +442,14 @@ def metadata_is_external(method: str) -> bool:
     True means the caller must not read, merge or upload the manifest: the
     destination (mokuro-bunko) owns it. Resolution order:
 
-    1. The account's non-secret ``series_owner`` setting, so a bunko 0.7 server
-       behind a proxy can be declared without probing.
-    2. The provider's own ``metadata_owner`` hook, used by WebDAV to combine
-       the cloud marker with the 0.7 ``/api/health`` fingerprint.
-    3. The generic ``.mokuro-bunko.json`` marker probe every provider supports,
-       because ``download`` and ``root`` already abstract the storage.
+    1. The account's non-secret ``series_owner`` setting, read from the account
+       metadata, so a library whose marker the bridge cannot see can be declared
+       without probing (``mokuro-bunko`` or ``bridge``).
+    2. The provider's optional ``metadata_owner`` hook, for a backend that needs
+       a signal the marker cannot carry. No shipped provider sets it.
+    3. The generic ``.mokuro-bunko.json`` marker probe, which is what every
+       shipped provider uses: ``download`` and ``root`` already abstract the
+       storage, so the probe works for MEGA, Drive, OneDrive, WebDAV and rclone.
 
     Any probe error is False: writing the manifest is always the safe fallback.
     """

@@ -225,3 +225,38 @@ def test_a_checkout_keeps_using_its_own_output_directory(package_file):
 
     expected = Path(package_file).resolve().parent.parent / "output"
     assert _default_output_dir(package_file) == expected
+
+
+def test_no_source_reference_sends_the_user_to_a_missing_requirements_file():
+    """An SDK hint must not name a file this repository does not ship.
+
+    The three per-provider requirements files were removed when rclone became
+    the dashboard's setup path, but the provider hints and the page still said
+    `pip install -r requirements-<provider>.txt`, which fails with "No such file"
+    on every install, wheel or checkout.
+    """
+    pattern = re.compile(r"requirements-[a-z]+\.txt")
+    referenced: set[str] = set()
+    sources = list((REPO_ROOT / "mokuro_bridge").rglob("*.py")) + list(
+        (REPO_ROOT / "mokuro_bridge" / "web").glob("*.html")
+    )
+    for source in sources:
+        referenced.update(pattern.findall(source.read_text(encoding="utf-8")))
+    assert not {name for name in referenced if not (REPO_ROOT / name).is_file()}
+
+
+def test_the_missing_sdk_wizard_installs_packages(monkeypatch, capsys):
+    """The wizard installs the packages it names, not a requirements file."""
+    from mokuro_bridge import util
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(util.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr("builtins.input", lambda *_args: "y")
+    monkeypatch.setattr(util.subprocess, "check_call", lambda argv: calls.append(argv))
+
+    assert util._ensure_python_deps(["msal"], ["msal>=1.24.0"]) is False
+
+    printed = capsys.readouterr().out
+    assert "requirements-" not in printed
+    assert "pip install msal>=1.24.0" in printed
+    assert calls == [[util.sys.executable, "-m", "pip", "install", "msal>=1.24.0"]]

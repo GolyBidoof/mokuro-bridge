@@ -78,11 +78,23 @@ def _list_uploads() -> None:
     for method in _build_upload_methods().values():
         if method.id == "local":
             continue
+        email = ""
+        if method.configured:
+            try:
+                from . import providers as _providers
+                from . import rclone_auth
+
+                instance = _providers.instance_for(method.id)
+                if instance is not None and instance.provider == "rclone":
+                    email = rclone_auth.account_email(method.id)
+            except Exception:
+                email = ""
         rows.append((
             method.id,
             method.name,
             "yes" if method.configured else "no",
             method.extra.get("creds_source") or "—",
+            email or "—",
             _method_current_folder(method.id),
         ))
     if not rows:
@@ -90,11 +102,42 @@ def _list_uploads() -> None:
         print("add one with: mokuro-bridge --setup-upload mega|drive|onedrive|webdav|rclone")
         return
     width = max(len(r[0]) for r in rows)
-    print(f"{'ACCOUNT'.ljust(width)}  {'READY':5}  {'CREDS':11}  REMOTE ROOT")
-    for account_id, _name, ready, creds, folder in rows:
-        print(f"{account_id.ljust(width)}  {ready:5}  {creds:11}  {folder}")
+    email_width = max(len(r[4]) for r in rows)
+    print(f"{'ACCOUNT'.ljust(width)}  {'READY':5}  {'CREDS':11}  {'EMAIL'.ljust(email_width)}  REMOTE ROOT")
+    for account_id, _name, ready, creds, email, folder in rows:
+        print(f"{account_id.ljust(width)}  {ready:5}  {creds:11}  {email.ljust(email_width)}  {folder}")
     print()
     print(f"default: {_default_upload_method()}")
+
+
+def _run_uninstall_mokuro() -> int:
+    """Remove the mokuro OCR engine from this interpreter."""
+    import subprocess as _subprocess
+
+    print("uninstalling mokuro; OCR pauses until it is installed again")
+    result = _subprocess.run(
+        [sys.executable, "-m", "pip", "uninstall", "-y", "mokuro"],
+        capture_output=True, text=True,
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+    print(output.strip()[-2000:])
+    if result.returncode == 0:
+        print("mokuro uninstalled")
+        return 0
+    print(f"uninstall failed (exit {result.returncode})")
+    return 1
+
+
+def _run_uninstall_bunko() -> int:
+    """Remove mokuro-bunko: stop it, then delete its binary, source and state."""
+    from . import bunko_agent
+
+    removed = bunko_agent.uninstall(log=print)
+    if removed:
+        print("mokuro-bunko uninstalled")
+    else:
+        print("mokuro-bunko was not installed")
+    return 0
 
 
 def _remove_upload(target: str) -> int:
@@ -746,6 +789,18 @@ def main() -> None:
         help="Refresh interval for --status (default 2).",
     )
     parser.add_argument(
+        "--uninstall-mokuro",
+        action="store_true",
+        help="Remove the mokuro OCR engine from this interpreter. OCR pauses "
+        "until it is installed again; the bridge itself keeps running.",
+    )
+    parser.add_argument(
+        "--uninstall-bunko",
+        action="store_true",
+        help="Stop mokuro-bunko and delete its binary, source, configuration "
+        "and state. Cloud uploads pause until it is installed again.",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -754,6 +809,10 @@ def main() -> None:
 
     if args.install_mokuro:
         raise SystemExit(_run_install_mokuro())
+    if args.uninstall_mokuro:
+        raise SystemExit(_run_uninstall_mokuro())
+    if args.uninstall_bunko:
+        raise SystemExit(_run_uninstall_bunko())
     if args.status:
         from . import status_tui
         raise SystemExit(status_tui.main(

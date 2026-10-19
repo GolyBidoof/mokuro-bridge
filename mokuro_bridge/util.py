@@ -30,23 +30,27 @@ def _truthy(value: str | None) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
-def _ensure_python_deps(module_names, requirements_file: str) -> bool:
+def _ensure_python_deps(module_names, packages) -> bool:
     """Make sure optional provider Python deps are installed before auth.
 
     module_names: importable top-level modules to check (e.g. ["requests"]).
-    requirements_file: repo-relative requirements file to install from.
+    packages: pip requirement specs to install them from (e.g.
+        ["requests>=2.31"]). The per-provider requirements files this used to
+        name were removed when rclone became the dashboard's setup path, so the
+        wizard installs the packages directly instead of pointing at a file
+        that no longer exists in a wheel or a fresh checkout.
 
     Returns True when the deps are available. If any is missing, offers to
-    install them right here (`pip install -r <file>`) — the user confirms
-    once — and returns whether they're then available. Never installs without
-    consent.
+    install them right here (with the user's one confirmation) and returns
+    whether they're then available. Never installs without consent.
     """
     missing = [m for m in module_names if importlib.util.find_spec(m) is None]
     if not missing:
         return True
+    command = f"pip install {' '.join(packages)}"
     print(
         f"mokuro-bridge needs: {', '.join(missing)}\n"
-        f"Install with:  pip install -r {requirements_file}"
+        f"Install with:  {command}"
     )
     try:
         answer = input("Install now? [y/N] ").strip().lower()
@@ -55,12 +59,10 @@ def _ensure_python_deps(module_names, requirements_file: str) -> bool:
     if answer not in ("y", "yes"):
         return False
     try:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-r", requirements_file]
-        )
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *packages])
     except subprocess.CalledProcessError:
         print(
-            f"error: 'pip install -r {requirements_file}' failed. "
+            f"error: '{command}' failed. "
             "Install it manually and re-run."
         )
         return False

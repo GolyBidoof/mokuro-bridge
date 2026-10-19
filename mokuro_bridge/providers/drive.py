@@ -29,7 +29,7 @@ from .base import (
 
 _DRIVE_IMPORT_HINT = (
     "Google Drive upload needs the google client libraries. "
-    "Install them with: pip install -r requirements-drive.txt"
+    "Install them with: pip install google-api-python-client google-auth-oauthlib google-auth"
 )
 
 # Google's installed-app OAuth endpoints (same values the client secrets file
@@ -517,11 +517,16 @@ def _run_setup_drive(
 
     if not _ensure_python_deps(
         ["google_auth_oauthlib", "googleapiclient", "requests"],
-        "requirements-drive.txt",
+        [
+            "google-api-python-client>=2.100.0",
+            "google-auth-oauthlib>=1.0.0",
+            "google-auth>=2.0.0",
+            "requests>=2.20.0",
+        ],
     ):
         print(
             "Google Drive setup needs the google client libraries. "
-            "Install them with:\n  pip install -r requirements-drive.txt\n"
+            "Install them with:\n  pip install google-api-python-client google-auth-oauthlib\n"
             "then re-run: mokuro-bridge --setup-upload drive"
         )
         return

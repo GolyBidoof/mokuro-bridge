@@ -32,7 +32,7 @@ from .base import (
 
 _ONEDRIVE_IMPORT_HINT = (
     "OneDrive upload needs the msal and requests libraries. "
-    "Install them with: pip install -r requirements-onedrive.txt"
+    "Install them with: pip install msal"
 )
 
 _CLIENT_ID_RE = re.compile(
@@ -369,10 +369,10 @@ def _run_setup_onedrive(
     """
     from ..util import _ensure_python_deps
 
-    if not _ensure_python_deps(["msal", "requests"], "requirements-onedrive.txt"):
+    if not _ensure_python_deps(["msal", "requests"], ["msal>=1.24.0", "requests>=2.31"]):
         print(
             "OneDrive setup needs the msal + requests libraries. "
-            "Install them with:\n  pip install -r requirements-onedrive.txt\n"
+            "Install them with:\n  pip install msal\n"
             "then re-run: mokuro-bridge --setup-upload onedrive"
         )
         return

@@ -553,6 +553,41 @@ async def _allow_private_network_requests(request, call_next):
 def ndjson(stage: str, message: str, **extra) -> str:
     return json.dumps({"stage": stage, "message": message, **extra}, ensure_ascii=False) + "\n"
 
+def _done_upload_entries(method: str, upload_results: list[dict]) -> list[dict]:
+    """The per-file array of a terminal `done` frame, for any destination.
+
+    One shape for a local and a remote finalize, and for `success` and
+    `partial_upload` alike: `file`, `size`, `success`, `url` and `stderr` are
+    always present, a remote entry adds the live-progress fields the
+    `upload_progress` frame already uses, and a local entry adds `path` and
+    `unchanged`. `size` is the field clients total (dokuha-cli reads only that
+    one), which is why it is repeated instead of leaving remote entries with
+    `bytes`/`total_bytes` alone.
+    """
+    entries: list[dict] = []
+    for result in upload_results:
+        total = result.get("size", 0)
+        duration = result.get("duration_s") or 0
+        entry = {
+            "file": result["file"],
+            "size": total,
+            "success": result["success"],
+            "url": result.get("url") if result["success"] else None,
+            "stderr": result.get("stderr"),
+            "duration_s": duration,
+        }
+        if method == "local":
+            entry["path"] = result.get("path")
+            entry["unchanged"] = bool(result.get("unchanged"))
+        else:
+            entry["bytes"] = total
+            entry["total_bytes"] = total
+            entry["current_bytes"] = total if result["success"] else 0
+            entry["percent"] = 100.0 if result["success"] else 0.0
+            entry["speed_bps"] = int(total / duration) if duration and result["success"] else 0
+        entries.append(entry)
+    return entries
+
 def _upload_progress_event(
     remote_name: str,
     bytes_done: int,
@@ -2933,6 +2968,9 @@ async def session_finalize(
                     error=None if all_success else "one or more files failed",
                 )
 
+            # One per-file shape for every terminal `done` frame below.
+            done_uploads = _done_upload_entries(method, upload_results)
+
             if not all_success:
                 failed = [r for r in upload_results if not r["success"]]
                 detail = "; ".join(
@@ -2946,11 +2984,13 @@ async def session_finalize(
                         title=session.safe_title,
                         series=series_dir_name,
                         pages=len(image_files),
+                        pages_ocr_done=snap["pages_ocr_done"],
                         output_dir=str(staging),
                         staging=str(staging),
                         remote_path=None,
                         mega_path=None,
-                        uploads=upload_results,
+                        uploads=done_uploads,
+                        reader_url=None,
                         method=method,
                     )
                     return
@@ -2959,10 +2999,15 @@ async def session_finalize(
                     f"{target_label} upload partially completed: " + detail,
                     status="partial_upload",
                     title=session.safe_title,
+                    series=series_dir_name,
                     pages=len(image_files),
+                    pages_ocr_done=snap["pages_ocr_done"],
                     remote_path=remote_dir,
                     mega_path=remote_dir if method_provider(method) == "mega" else None,
-                    uploads=upload_results,
+                    output_dir=None,
+                    staging=str(staging),
+                    uploads=done_uploads,
+                    reader_url="https://reader.mokuro.app/",
                     method=method,
                 )
                 return
@@ -3007,31 +3052,6 @@ async def session_finalize(
                 if method != "local"
                 else f"Done! {len(image_files)} pages OCR'd → {staging}"
             )
-            # Standardized per-file upload summary for the "done" event (only
-            # in remote mode); each entry mirrors the "upload_progress" schema.
-            # `size` is repeated here because it is the one field every client
-            # reads from the terminal frame (dokuha-cli totals it per artifact),
-            # and a local done frame carries only `size`. Without it a remote
-            # finalize reports NaN sizes while a local one reports real ones.
-            uploads_summary = []
-            if method != "local":
-                for r in upload_results:
-                    total = r.get("size", 0)
-                    dur = r.get("duration_s") or 0
-                    uploads_summary.append(
-                        {
-                            "file": r["file"],
-                            "size": total,
-                            "bytes": total,
-                            "total_bytes": total,
-                            "current_bytes": total if r["success"] else 0,
-                            "percent": 100.0 if r["success"] else 0.0,
-                            "speed_bps": int(total / dur) if dur and r["success"] else 0,
-                            "duration_s": dur,
-                            "success": r["success"],
-                            "url": r.get("url") if r["success"] else None,
-                        }
-                    )
             yield ndjson(
                 "done",
                 done_msg,
@@ -3044,7 +3064,7 @@ async def session_finalize(
                 mega_path=remote_dir if method_provider(method) == "mega" else None,
                 output_dir=str(staging) if method == "local" else None,
                 staging=str(staging),
-                uploads=uploads_summary if method != "local" else upload_results,
+                uploads=done_uploads,
                 reader_url="https://reader.mokuro.app/" if method != "local" else None,
                 method=method,
             )
@@ -3530,6 +3550,26 @@ async def health():
     result["mokuro_custom_fork"] = _MOKURO_REPO is not None
     result["mokuro_repo"] = str(_MOKURO_REPO) if _MOKURO_REPO is not None else None
     result["mokuro_fork_api"] = bool(getattr(_ocr, "_fork_supported_cache", False))
+    # Engine and Bunko state for the terminal status view. These read local
+    # files and a cached update check, so they are safe on every /health.
+    try:
+        from . import bunko_agent
+
+        state = bunko_agent.load_state()
+        sync = bunko_agent.sync_info()
+        result["bunko"] = {
+            "installed": sync.get("installed", False),
+            "running": sync.get("running", False),
+            "commit": getattr(state, "commit", None) if state is not None else None,
+            "method": sync.get("configured_method", ""),
+            "folder": sync.get("folder", ""),
+            "backend": sync.get("backend", ""),
+            "default_method": sync.get("default_method", ""),
+            "in_sync": sync.get("in_sync", False),
+            "update_available": bunko_agent.update_available(),
+        }
+    except Exception:
+        result["bunko"] = None
     if _mokuro_pkg is not None:
         result["mokuro_version"] = getattr(_mokuro_pkg, "__version__", "?")
         result["mokuro_path"] = getattr(_mokuro_pkg, "__file__", "?")

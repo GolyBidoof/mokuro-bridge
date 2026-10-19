@@ -40,7 +40,17 @@ def gateway_env(tmp_path, monkeypatch):
     monkeypatch.setattr(accounts, "ACCOUNTS_DIR", tmp_path / "accounts")
     monkeypatch.setattr(rclone, "_remotes_cache", None)
     accounts.save_instance("rclone", "default", root="lib", extra={"remote": "demo:"})
-    return tmp_path
+    try:
+        yield tmp_path
+    finally:
+        # `rclone serve` is started in its own session so it survives a bridge
+        # restart, which also means an unclosed test gateway outlives pytest.
+        # The fixture owns the isolated gateway dir, so stopping here cannot
+        # touch a gateway the user actually runs.
+        try:
+            rclone_gateway.stop_all()
+        except Exception:
+            pass
 
 
 @needs_rclone

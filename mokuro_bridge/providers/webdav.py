@@ -46,7 +46,7 @@ from .base import (
 
 _WEBDAV_IMPORT_HINT = (
     "WebDAV upload needs the requests library. "
-    "Install it with: pip install -r requirements-webdav.txt"
+    "Install it with: pip install requests"
 )
 
 # The keychain items the old single-account WebDAV provider used. Kept so an
@@ -922,10 +922,10 @@ def _run_setup_webdav(name: Optional[str] = None, root: str = "", label: str = "
     """
     from ..util import _ensure_python_deps
 
-    if not _ensure_python_deps(["requests"], "requirements-webdav.txt"):
+    if not _ensure_python_deps(["requests"], ["requests>=2.31"]):
         print(
             "WebDAV setup needs the requests library. "
-            "Install it with:\n  pip install -r requirements-webdav.txt\n"
+            "Install it with:\n  pip install requests\n"
             "then re-run: mokuro-bridge --setup-upload webdav"
         )
         return

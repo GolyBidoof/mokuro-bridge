@@ -11,7 +11,9 @@ import os
 import shutil
 import sys
 import time
+import threading
 import unicodedata
+import urllib.parse
 import urllib.request
 from urllib.parse import urlsplit, urlunsplit
 
@@ -362,6 +364,72 @@ def _row(segments, inner):
     return out
 
 
+_USAGE_LOCK = threading.Lock()
+_USAGE_CACHE: dict[str, tuple[float, dict]] = {}
+_USAGE_INFLIGHT: set[str] = set()
+_USAGE_TTL_S = 300.0
+
+
+def _format_usage(data):
+    if not isinstance(data, dict) or not data.get("available"):
+        return ""
+    about = data.get("about") or {}
+    folder = data.get("folder") or {}
+    parts = []
+    if about.get("total"):
+        parts.append(
+            f"{_bytes_human(about.get('used'))} used · {_bytes_human(about.get('free'))} free"
+        )
+    if isinstance(folder.get("bytes"), (int, float)):
+        parts.append(f"folder {_bytes_human(folder.get('bytes'))}")
+    return " · ".join(parts)
+
+
+def _prefetch_usage(base_url, health, fetch):
+    """Refresh usage in the background so a slow cloud never stalls the frame."""
+    if fetch is not _http_get_json:
+        return
+    methods = health.get("upload_methods")
+    if not isinstance(methods, list):
+        return
+    now = time.monotonic()
+    ids = ["local"] + [
+        method.get("id") for method in methods
+        if isinstance(method, dict) and method.get("id") and method.get("id") != "local"
+    ]
+    for method_id in ids:
+        if not method_id:
+            continue
+        cached = _USAGE_CACHE.get(method_id)
+        if cached is not None and now - cached[0] < _USAGE_TTL_S:
+            continue
+        with _USAGE_LOCK:
+            if method_id in _USAGE_INFLIGHT:
+                continue
+            _USAGE_INFLIGHT.add(method_id)
+
+        def load(method_id=method_id):
+            try:
+                data = fetch(
+                    base_url.rstrip("/")
+                    + "/config/usage?method="
+                    + urllib.parse.quote(method_id, safe="")
+                )
+            except Exception:
+                data = None
+            with _USAGE_LOCK:
+                _USAGE_INFLIGHT.discard(method_id)
+                if isinstance(data, dict):
+                    _USAGE_CACHE[method_id] = (time.monotonic(), data)
+
+        threading.Thread(target=load, name=f"usage-{method_id}", daemon=True).start()
+
+
+def _usage_text(method_id):
+    cached = _USAGE_CACHE.get(method_id)
+    return _format_usage(cached[1]) if cached is not None else ""
+
+
 def _destination_rows(health, inner):
     methods = health.get("upload_methods")
     if not isinstance(methods, list) or not methods:
@@ -382,7 +450,12 @@ def _destination_rows(health, inner):
             or method.get("email")
             or "-"
         )
-        rows.append([(f"  {star} {dot} {name}  {_clip(path, inner - name_width - 8)}", None)])
+        detail = _usage_text(method.get("id"))
+        email = str(method.get("email") or "")
+        if email and "·" not in email and email not in path:
+            detail = f"{email} · {detail}" if detail else email
+        suffix = f"  {detail}" if detail else ""
+        rows.append([(f"  {star} {dot} {name}  {_clip(path + suffix, inner - name_width - 8)}", None)])
     return rows or [[("  -", None)]]
 
 
@@ -446,6 +519,20 @@ def _normal_body(health, upload, inner):
     rows.append([(f"  tools      mokuro {_yes(health.get('mokuro_installed'))}"
                   f"   megatools {_yes(health.get('megatools_installed'))}", None)])
     rows.append([(f"  update     {_clip(_update_text(health), inner - 13)}", None)])
+    bunko = health.get("bunko")
+    if isinstance(bunko, dict):
+        commit = str(bunko.get("commit") or "")[:8] or "installed"
+        library = str(bunko.get("method") or "-")
+        state_text = "running" if bunko.get("running") else "stopped"
+        rows.append([(f"  bunko      {commit} {state_text} · library on {library}", None)])
+        if bunko.get("update_available"):
+            rows.append([("  bunko      update available: run mokuro-bridge --update-bunko", None)])
+    else:
+        rows.append([("  bunko      not installed", None)])
+    if health.get("mokuro_installed") is False:
+        rows.append([("  paused     OCR needs mokuro: run mokuro-bridge --install-mokuro", None)])
+    if not isinstance(bunko, dict):
+        rows.append([("  paused     uploads need mokuro-bunko: run mokuro-bridge --setup-bunko", None)])
 
     rows.append([])
     rows.append([("DESTINATIONS", CYAN)])
@@ -648,7 +735,9 @@ def run_status(base_url: str, *, interval_s: float = 2.0, stream=None, fetch=Non
     if not interactive:
         # A snapshot is full-height: it is not fighting the terminal for space.
         width, height = _terminal_size(reserve_last=False)
-        _single_frame(stream, _fetch_health(fetch, base_url), width, height, base_url)
+        snapshot = _fetch_health(fetch, base_url)
+        _prefetch_usage(base_url, snapshot, fetch)
+        _single_frame(stream, snapshot, width, height, base_url)
         return 0
 
     state = None
@@ -656,7 +745,9 @@ def run_status(base_url: str, *, interval_s: float = 2.0, stream=None, fetch=Non
         state = _enter_raw()
         if state is None:
             width, height = _terminal_size()
-            _single_frame(stream, _fetch_health(fetch, base_url), width, height, base_url)
+            snapshot = _fetch_health(fetch, base_url)
+            _prefetch_usage(base_url, snapshot, fetch)
+            _single_frame(stream, snapshot, width, height, base_url)
             return 0
 
     color = not _no_color()
@@ -669,6 +760,7 @@ def run_status(base_url: str, *, interval_s: float = 2.0, stream=None, fetch=Non
             now = time.monotonic()
             if now >= deadline:
                 health = _fetch_health(fetch, base_url)
+                _prefetch_usage(base_url, health, fetch)
                 stream.write(HOME + render_status(health, width=width, height=height, color=color,
                                                   upload=health.get("upload"), host_header=base_url))
                 stream.flush()

@@ -11,8 +11,9 @@ by this process. Two independent signals identify such a target:
   (bunko `docs/design/0.8-remote-storage.md` section 9.5).
 * **The health fingerprint.** A bunko 0.7 server answers `GET /api/health` with
   a body carrying `library_status`, `total_volumes` and an `ocr` object. There is
-  no marker before 0.8, so a WebDAV destination pointed at a 0.7 server is
-  recognised from that answer instead.
+  no marker before 0.8. `is_bunko_health` recognises that answer for a provider
+  that opts into a `metadata_owner` hook; the shipped path is the 0.8 marker,
+  because the bridge only sets up the `0.8/remote-storage` branch.
 
 Everything here is fail-open: an unreadable, stale, released or unknown marker
 means "the bridge still owns series.json". The alternative, skipping the file

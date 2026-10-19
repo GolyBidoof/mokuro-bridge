@@ -43,10 +43,12 @@ dependencies = [
 # pulls in PyTorch (several GB), and the bridge runs fine without it, reporting
 # mokuro_installed:false. Mirrors requirements-ocr.txt.
 ocr = ["mokuro>=0.2.0"]
-# Cloud destinations run through the rclone binary, which brings its own
-# Microsoft and Google app registrations. There is no per-provider Python SDK
-# to install, so `requests` (used by the local WebDAV gateway checks) is the
-# whole extra. Mirrors requirements-cloud.txt if one is added later.
+# The supported cloud setup path runs through the rclone binary, which brings
+# its own Microsoft and Google app registrations. There is no per-provider
+# Python SDK to install for that path, so `requests` (used by the WebDAV
+# provider and the local gateway checks) is the whole extra. The native Drive
+# and OneDrive wizards install their SDKs on request instead. Mirrors
+# requirements-cloud.txt if one is added later.
 cloud = [
   "requests>=2.31",
 ]

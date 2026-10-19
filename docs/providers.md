@@ -17,6 +17,7 @@ A provider module ends with a module level `PROVIDER` value, an instance of the 
 | `download` | `(name, remote_dir, filename) -> bytes or None` | Read one small sidecar back: `None` when the file is absent, a raise when the read fails, and a refusal above `DOWNLOAD_LIMIT_BYTES` (4 MiB) rather than pulling an arbitrary remote file into memory. Used only to merge into an existing `series.json`, and it must never create a folder. It is fail-closed on purpose: the caller's alternative to reading the file is to leave it alone, because the entries every other volume published live in it. |
 | `run_setup` | `(name, root, label) -> None` | The interactive wizard that `--setup-upload` calls. |
 | `account` | `(instance) -> ProviderAccount` | The presentation view described below. |
+| `metadata_owner` | `(name) -> bool` or `None` | Optional. Whether another program (mokuro-bunko) compiles this destination's `series.json`, so finalize skips its own read, merge and upload. All five shipped providers leave it `None` and are covered by the registry's generic `.mokuro-bunko.json` marker probe, which works through `download` and `root`; the hook exists for a backend that needs a signal the marker cannot carry. `series_owner` in the account metadata overrides either one, see [bunko.md](bunko.md). |
 
 The `root(name)` method on `Provider` is not a field: it resolves the account through `accounts.py` and falls back to the provider default, so a provider never duplicates the root mapping.
 
@@ -48,7 +49,7 @@ The callbacks let each provider keep its own request semantics. Drive resolves a
 1. Copy `providers/mega.py` or `providers/drive.py` to `providers/<id>.py` and adapt it. Keep the module level `PROVIDER` value at the end so it can reference the functions above it.
 2. Add the id to `accounts.PROVIDERS`, to `accounts.default_root` and to `accounts._PROVIDER_LABELS`. Accounts, ids and the `<provider>:<name>` spelling stay in `accounts.py` by design.
 3. Add `<module>.PROVIDER` to the tuple that builds `_PROVIDERS` in `providers/__init__.py`.
-4. Optionally add a `requirements-<id>.txt` and the matching extra in `pyproject.toml`, the way Drive, OneDrive and WebDAV do.
+4. Optionally name the provider's own optional dependency in its `_ensure_python_deps` call, so its wizard can install what is missing. The base and `cloud` extras deliberately ship no cloud SDK, because the supported setup path is rclone; the native Drive, OneDrive and WebDAV wizards install their SDK on request.
 
 Nothing in `cli.py`, `api.py` or the lookup functions changes, and the fake provider test below is the check that this stays true.
 
