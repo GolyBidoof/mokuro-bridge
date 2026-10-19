@@ -2745,8 +2745,11 @@ async function loadEngines() {
     if (running) startEnginePoll();
   } catch (error) {
     if (state.engines) return; // a good answer is already on screen
+    // The bridge may still be starting; keep trying until the cards are real
+    // instead of leaving "Checking the installed engine…" forever.
     state.engineRetries = (state.engineRetries || 0) + 1;
-    if (state.engineRetries <= 3) setTimeout(loadEngines, 3000);
+    const delay = Math.min(8000, 1000 * state.engineRetries);
+    setTimeout(loadEngines, delay);
   }
 }
 
