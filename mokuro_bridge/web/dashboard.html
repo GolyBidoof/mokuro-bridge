@@ -237,9 +237,9 @@
   .usage-bar { flex: 0 0 100%; display: flex; width: 100%; height: 7px; border-radius: 999px; overflow: hidden; background: var(--line); }
   .usage-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; }
   .usage-seg { display: block; height: 100%; }
-  .usage-folder { background: #3fb950; }
   .usage-other { background: color-mix(in srgb, var(--muted) 55%, var(--line)); }
-  .usage-free { background: color-mix(in srgb, var(--accent) 35%, var(--panel)); }
+  .usage-folder { background: var(--accent); }
+  .usage-free { background: #3fb950; }
   .dest-usage strong { color: var(--text); font-weight: 600; }
   .dest-usage .usage-text.muted { opacity: 0.85; }
   .pref { display: grid; grid-template-columns: minmax(0, 1fr) minmax(210px, 320px); gap: 14px 22px; padding: 15px 0; border-bottom: 1px solid var(--line); }
@@ -1442,8 +1442,8 @@ function renderUsage(host, data) {
       : 0;
     const other = Math.max(0, used - folderBytes);
     const pct = (value) => `${(value / total * 100).toFixed(3)}%`;
-    const label = `Folder ${formatBytes(folderBytes)} · other used ${formatBytes(other)} · free ${formatBytes(free)}`;
-    bar = `<div class="usage-bar" role="img" aria-label="${esc(label)}" title="${esc(label)}"><span class="usage-seg usage-folder" style="width:${pct(folderBytes)}"></span><span class="usage-seg usage-other" style="width:${pct(other)}"></span><span class="usage-seg usage-free" style="width:${pct(free)}"></span></div>`;
+    const label = `other used ${formatBytes(other)} · folder ${formatBytes(folderBytes)} · free ${formatBytes(free)}`;
+    bar = `<div class="usage-bar" role="img" aria-label="${esc(label)}" title="${esc(label)}"><span class="usage-seg usage-other" style="width:${pct(other)}"></span><span class="usage-seg usage-folder" style="width:${pct(folderBytes)}"></span><span class="usage-seg usage-free" style="width:${pct(free)}"></span></div>`;
     text.push(`<span class="usage-text"><strong>${formatBytes(used)}</strong> used · ${formatBytes(free)} free of ${formatBytes(total)}</span>`);
   } else {
     text.push(`<span class="usage-text muted">This service does not report free space</span>`);
