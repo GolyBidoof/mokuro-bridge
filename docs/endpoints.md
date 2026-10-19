@@ -168,11 +168,11 @@ Every upload account has a memorable, globally unique alias: `mega`, `mega-2`, `
 The Drive and OneDrive setup flows are held in memory for 10 minutes; a restart cancels a sign-in in progress, and an unknown or expired `flow_id` answers `200 {status: "error"}` so a polling client only branches on JSON. Covered by `tests/test_config_api.py`, including the origin gate, the local-root boundary, the credential check on the default, and the redaction of a provider failure. The browser account flows and alias resolution are covered by `tests/test_account_setup_api.py`, `tests/test_accounts.py` and `tests/test_upload_methods.py`.
 
 ## GET /queue
-Read-only OCR queue metrics for backpressure monitoring, with session ids and numeric counts only. Response `200` is the `ocr_queue_metrics()` snapshot: `scheduler` (`round_robin` or `fifo`), `queue_depth`, `processing_depth`, `total_depth`, `per_session` rows, `active_batch_sessions`, `active_sessions`, `source_ingesting_sessions` and a `worker` object with `started`, `alive`, `state` and `model_loaded`. Covered by `tests/test_ocr_scheduling.py`.
+Read-only OCR queue metrics for backpressure monitoring, with session ids and numeric counts only. Response `200` is the `ocr_queue_metrics()` snapshot: `scheduler` (`round_robin` or `fifo`), `queue_depth`, `processing_depth`, `total_depth`, `per_session` rows, `active_batch_sessions`, `active_sessions`, `source_ingesting_sessions` and a `worker` object with `started`, `alive`, `state` and `model_loaded`. The call is bounded: if a page writer holds the OCR lock, it answers a best-effort snapshot in tens of milliseconds with `partial: true` rather than waiting. Covered by `tests/test_ocr_scheduling.py` and `tests/test_responsiveness.py`.
 
 ## GET /health
 
-The one call a client makes before anything else. It never performs network I/O: the update state comes from a cache the CLI keeps warm. Response `200` includes:
+The one call a client makes before anything else. It never performs network I/O and never waits on the OCR queue or a session lock: a dedicated thread refreshes one snapshot per second (see `_health_snapshot_loop`), and this route returns the latest one plus the cheap live fields. Response `200` includes:
 
 - `app`, `version`, `status`
 - `update_check` (`disabled`, `pending`, `ok` or `error`), `latest_version`, `update_available`, `update_url`, `update_error`
@@ -183,6 +183,8 @@ The one call a client makes before anything else. It never performs network I/O:
 - `fetchProxyPorts`, `fetchUpstreams`, `fetchPathUpstream`
 - `active_sessions`, `ocr_chunk_size`, `ocr_idle_flush_s`, `ocr_queue_depth`, `ocr_processing_depth`, `ocr_queue_sessions`, `ocr_active_batch_sessions`, `ocr_worker`
 - `busy`, `busy_stage` and `busy_detail`, derived from the activity tracker plus queued work
+- `lanes`, one entry per independent work lane (`control`, `data`, `finalize`, `upload`) with `workers` and `queued`, so a developing stall names the lane that is behind
+- `health_snapshot`, the freshness of the cached document: `age_ms`, `interval_ms`, `stale` (true past five seconds) and `partial`; `error` is present when the last refresh failed and the previous snapshot is still being served
 - `upload`, present only while a volume is uploading: `file`, `percent`, `current_bytes`, `total_bytes` and `speed_human`, taken from the active session's upload state. The field is absent when nothing is uploading
 
-Covered by `tests/test_optional_ocr.py` at the route level and by `tests/test_update.py` for the update fields.
+Covered by `tests/test_optional_ocr.py` at the route level, `tests/test_update.py` for the update fields, and `tests/test_responsiveness.py` for the no-stall guarantee.

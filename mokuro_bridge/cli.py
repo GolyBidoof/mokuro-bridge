@@ -342,6 +342,102 @@ def _print_mokuro_state(label: str, state: dict) -> None:
         print(f"  module:         {state.get('module_path') or state.get('path')}")
 
 
+def _needs_onboarding() -> bool:
+    """Whether this looks like a first run: no managed account, settings or state.
+
+    A credential found in the OS store alone does not count. That case is how a
+    machine that once ran the terminal wizard looks, and it should still get the
+    click-through setup page so the user can see what exists and reconnect it.
+    """
+    try:
+        from . import accounts as _accounts
+
+        # list_instances() also yields the implicit per-provider defaults; only
+        # files mean the user (or the setup page) actually created an account.
+        directory = _accounts.accounts_dir()
+        if directory.is_dir() and any(directory.glob("*.json")):
+            return False
+    except Exception:
+        pass
+    try:
+        from . import settings as _settings
+
+        if _settings.load(refresh=True):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _reset_credentials() -> int:
+    """Delete every saved bridge credential and bit of setup state, then report."""
+    import shutil
+
+    from . import accounts as _accounts
+    from . import providers as _providers
+    from . import settings as _settings
+    from .config import (
+        DRIVE_CREDS_FILE,
+        MEGA_CREDS_FILE,
+        ONEDRIVE_TOKEN_FILE,
+        WEBDAV_CREDS_FILE,
+        WORK_DIR,
+    )
+    from .creds import _delete_mega_creds_keychain, _keychain_mega_account
+
+    removed: list[str] = []
+
+    account = _keychain_mega_account()
+    if account and _delete_mega_creds_keychain(account):
+        removed.append(f"MEGA keychain item for {account}")
+    try:
+        import keyring
+
+        for key in ("email", account):
+            if key and keyring.get_password("mokuro-bridge", key):
+                keyring.delete_password("mokuro-bridge", key)
+                removed.append(f"keychain entry {key}")
+    except Exception:
+        pass
+    try:
+        removed += [f"keychain: {item}" for item in _providers.webdav.forget_default_keychain()]
+    except Exception:
+        pass
+
+    for path in (
+        MEGA_CREDS_FILE,
+        DRIVE_CREDS_FILE,
+        ONEDRIVE_TOKEN_FILE,
+        WEBDAV_CREDS_FILE,
+        _settings.SETTINGS_FILE,
+        WORK_DIR / "local_dir_default.json",
+        WORK_DIR / "upload_method_default.json",
+    ):
+        try:
+            if path.is_file():
+                path.unlink()
+                removed.append(str(path))
+        except OSError:
+            pass
+    for directory in (_accounts.accounts_dir(), WORK_DIR / ".bridge_sessions"):
+        try:
+            if directory.is_dir():
+                shutil.rmtree(directory)
+                removed.append(str(directory))
+        except OSError:
+            pass
+
+    print("mokuro-bridge credentials reset.")
+    if removed:
+        for item in removed:
+            print(f"  removed {item}")
+    else:
+        print("  nothing to remove; already clean.")
+    print("")
+    print("Start mokuro-bridge again for the setup guide.")
+    return 0
+
+
 def _run_install_mokuro() -> int:
     """Replace the installed mokuro with the faster fork, then verify it.
 
@@ -527,6 +623,13 @@ def main() -> None:
         "addressed by the bare provider name ('mega').",
     )
     parser.add_argument(
+        "--reset-credentials",
+        action="store_true",
+        help="Delete saved accounts and credentials, including the MEGA keychain "
+        "item, settings, remembered folders and session state. For a clean "
+        "first run; your finished volumes are not touched.",
+    )
+    parser.add_argument(
         "--setup-mega",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -633,6 +736,8 @@ def main() -> None:
     if args.list_uploads:
         _list_uploads()
         return
+    if args.reset_credentials:
+        raise SystemExit(_reset_credentials())
     if args.remove_upload:
         raise SystemExit(_remove_upload(args.remove_upload))
 
@@ -668,6 +773,7 @@ def main() -> None:
 
     configured = [m.id for m in _UPLOAD_METHODS.values() if m.configured]
     remote_configured = [m.id for m in _UPLOAD_METHODS.values() if m.configured and m.id != "local"]
+    first_run = _needs_onboarding()
     upload_line = f"{_default_upload_method()} (default)"
     if configured:
         upload_line += ", " + ", ".join(c for c in configured if c != _default_upload_method())
@@ -683,7 +789,7 @@ def main() -> None:
     print("  Open this page to set things up and watch the bridge:")
     print(f"    {page_url}")
     print()
-    if not remote_configured:
+    if first_run:
         print("  First time? The page walks you through connecting a destination.")
         print()
     print("  Keep this window open while you use the bridge.")
@@ -750,7 +856,7 @@ def main() -> None:
         "MOKURO_BRIDGE_OPEN_BROWSER", ""
     ).strip().lower() in ("0", "false", "no", "off")
     if (
-        not remote_configured
+        first_run
         and not opening_disabled
         and sys.stdout.isatty()
         and sys.stdin.isatty()

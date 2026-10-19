@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import contextlib
 import hashlib
 import importlib
@@ -185,7 +186,6 @@ def _mokuro_submodule(name: str):
     return importlib.import_module(f"{_mokuro_pkg.__name__}.{name}")
 
 _generator_lock = threading.Lock()
-_assemble_lock = threading.Lock()
 
 _generator = None
 _fork_supported_cache: Optional[bool] = None
@@ -235,6 +235,36 @@ def _fork_supported() -> bool:
             return False
         return _fork_supported_cache
 
+def _engine_worker_processes() -> int:
+    """Pipeline worker processes the engine should start.
+
+    Zero by default: the bridge drives detection/recognition on its own single
+    OCR worker thread (``_ocr_batch_fork`` / ``_ocr_batch_stock``), so the fork's
+    extra pipeline processes would sit idle while still holding model memory.
+    Keeping this at zero means "one active OCR thread" is true on the machine,
+    not just in the bridge's own counters. Set MOKURO_BRIDGE_OCR_WORKERS>0 to
+    opt back in (endpoints that use ``process_volume`` would use them).
+    """
+    try:
+        value = int(os.environ.get("MOKURO_BRIDGE_OCR_WORKERS", "0"))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, value)
+
+
+def _new_generator(MokuroGenerator):
+    workers = _engine_worker_processes()
+    kwargs: dict = {}
+    if workers > 0 or hasattr(_mokuro_submodule("manga_page_ocr").MangaPageOcr, "worker_cfg"):
+        kwargs["num_workers"] = workers
+    try:
+        return MokuroGenerator(**kwargs)
+    except TypeError:
+        # Older fork without the num_workers keyword: no in-process pool existed
+        # to disable in the first place.
+        return MokuroGenerator()
+
+
 def _get_generator():
     """Lazy-init the mokuro engine (models stay warm across pages/sessions)."""
     global _generator
@@ -242,7 +272,7 @@ def _get_generator():
         if _generator is None:
             MokuroGenerator = _mokuro_submodule("mokuro_generator").MokuroGenerator
 
-            candidate = MokuroGenerator()
+            candidate = _new_generator(MokuroGenerator)
             with _quiet_model_load():
                 candidate.init_models()
             _generator = candidate
@@ -441,7 +471,7 @@ def _sync_ocr_cache_state(session: Session) -> None:
                         _ocr_session_order.append(session.session_id)
             # Keep the queue update and durable snapshot in the same
             # critical section as finalization's admission check.
-            if not _persist_session(session):
+            if not _persist_session(session, durable=False):
                 for item in queued_added:
                     try:
                         _ocr_queue.remove(item)
@@ -520,10 +550,10 @@ def _queue_page_ocr(
     if cached:
         if not _ocr_cv_held:
             with _ocr_cv:
-                if not _persist_session(session):
+                if not _persist_session(session, durable=False):
                     _restore_state()
                     raise RuntimeError("could not persist OCR page state")
-        elif not _persist_session(session):
+        elif not _persist_session(session, durable=False):
             _restore_state()
             raise RuntimeError("could not persist OCR page state")
         snap = session_snapshot(session)
@@ -533,7 +563,7 @@ def _queue_page_ocr(
     if not _ocr_cv_held:
         with _ocr_cv:
             queued_now = _enqueue_locked()
-            if not _persist_session(session):
+            if not _persist_session(session, durable=False):
                 if queued_now:
                     try:
                         _ocr_queue.remove((session.session_id, safe_name))
@@ -543,7 +573,7 @@ def _queue_page_ocr(
                 raise RuntimeError("could not persist OCR queue state")
     else:
         queued_now = _enqueue_locked()
-        if not _persist_session(session):
+        if not _persist_session(session, durable=False):
             if queued_now:
                 try:
                     _ocr_queue.remove((session.session_id, safe_name))
@@ -738,43 +768,79 @@ def _take_idle_batch() -> list[tuple[str, str]]:
     n = min(len(_ocr_queue), _OCR_CHUNK_SIZE)
     return [_ocr_queue.popleft() for _ in range(n)]
 
-def ocr_queue_metrics() -> dict:
+def ocr_queue_metrics(timeout: Optional[float] = None) -> dict:
     """Return a read-only, count-only snapshot of the shared OCR queue.
 
     The snapshot intentionally contains session ids and numeric counts only: it
     is safe for a monitoring client to poll without exposing page names, volume
     paths, or credentials.  Queue and processing state are captured under the
     same condition lock used by the worker so the totals are coherent.
+
+    ``timeout`` bounds the *total* time spent waiting for the two locks (and the
+    per-session state locks). Locks this function cannot take are skipped and
+    ``partial`` is true, so a caller on a cold path can ask for a best-effort
+    answer instead of stalling behind a page writer's session persist. The
+    default, no-timeout call is exact and is what /health's snapshot thread and
+    the tests use.
     """
-    with _ocr_cv:
-        pending_by: dict[str, int] = {}
-        for session_id, _filename in _ocr_queue:
-            pending_by[session_id] = pending_by.get(session_id, 0) + 1
-        processing_by: dict[str, int] = {}
-        for session_id, _filename in _ocr_processing:
-            processing_by[session_id] = processing_by.get(session_id, 0) + 1
-        active_batch_sessions = sorted(processing_by, key=str)
-        worker_started = bool(_ocr_worker_started)
-        worker_alive = bool(
-            _ocr_worker_thread is not None and _ocr_worker_thread.is_alive()
-        )
-        worker_state = (
-            "stopped"
-            if not worker_started or not worker_alive
-            else "processing"
-            if active_batch_sessions
-            else "idle"
-        )
-        queue_depth = len(_ocr_queue)
-        processing_depth = len(_ocr_processing)
+    deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+
+    def _acquire(lock) -> bool:
+        if deadline is None:
+            lock.acquire()
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        return bool(lock.acquire(timeout=remaining))
+
+    partial = False
+    if _acquire(_ocr_cv):
+        try:
+            pending_by: dict[str, int] = {}
+            for session_id, _filename in _ocr_queue:
+                pending_by[session_id] = pending_by.get(session_id, 0) + 1
+            processing_by: dict[str, int] = {}
+            for session_id, _filename in _ocr_processing:
+                processing_by[session_id] = processing_by.get(session_id, 0) + 1
+            active_batch_sessions = sorted(processing_by, key=str)
+            worker_started = bool(_ocr_worker_started)
+            worker_alive = bool(
+                _ocr_worker_thread is not None and _ocr_worker_thread.is_alive()
+            )
+            worker_state = (
+                "stopped"
+                if not worker_started or not worker_alive
+                else "processing"
+                if active_batch_sessions
+                else "idle"
+            )
+            queue_depth = len(_ocr_queue)
+            processing_depth = len(_ocr_processing)
+            model_loaded = _generator is not None
+        finally:
+            _ocr_cv.release()
+    else:
+        partial = True
+        pending_by, processing_by = {}, {}
+        active_batch_sessions = []
+        worker_started = worker_alive = False
+        worker_state = "unknown"
+        queue_depth = processing_depth = 0
         model_loaded = _generator is not None
 
     # Include live sessions with no queued pages as zero-count rows, while
     # keeping the lazy import here to avoid the sessions <-> ocr import cycle.
     try:
         from .sessions import _sessions, _sessions_lock
-        with _sessions_lock:
-            live_sessions = list(_sessions.items())
+        if _acquire(_sessions_lock):
+            try:
+                live_sessions = list(_sessions.items())
+            finally:
+                _sessions_lock.release()
+        else:
+            partial = True
+            live_sessions = []
     except Exception:
         live_sessions = []
     ingesting_by: dict[str, int] = {}
@@ -783,11 +849,16 @@ def ocr_queue_metrics() -> dict:
         lock = getattr(session, "lock", None)
         if lock is None:
             continue
-        with lock:
+        if not _acquire(lock):
+            partial = True
+            continue
+        try:
             reservations = getattr(session, "page_reservations", ())
             ingesting_by[session_id] = len(reservations)
             if getattr(session, "ingesting", False):
                 source_ingesting.add(session_id)
+        finally:
+            lock.release()
     live_session_ids = [session_id for session_id, _session in live_sessions]
 
     session_ids = set(pending_by) | set(processing_by) | set(live_session_ids)
@@ -803,7 +874,7 @@ def ocr_queue_metrics() -> dict:
         if session_id in source_ingesting:
             row["source_ingesting"] = True
         per_session.append(row)
-    return {
+    result = {
         "scheduler": "round_robin" if _OCR_FAIR_SCHEDULING else "fifo",
         "queue_depth": queue_depth,
         "processing_depth": processing_depth,
@@ -819,14 +890,22 @@ def ocr_queue_metrics() -> dict:
             "model_loaded": model_loaded,
         },
     }
+    if timeout is not None:
+        result["partial"] = partial
+    return result
 
 
 def _process_ocr_batch(items: list[tuple[str, str]]) -> None:
-    """Serialize model use with mokuro artifact assembly."""
+    """OCR one batch on the single OCR worker thread.
+
+    This deliberately takes no process-wide assembly lock: assembling a volume
+    reads per-page JSON that OCR writes atomically (temp file + replace), and a
+    volume is only assembled after its own OCR is complete. Holding a global
+    lock across a whole batch used to stop every finalize for minutes.
+    """
     if not items:
         return
-    with _assemble_lock:
-        _process_ocr_batch_unlocked(items)
+    _process_ocr_batch_unlocked(items)
 
 
 def _process_ocr_batch_unlocked(items: list[tuple[str, str]]) -> None:
@@ -1089,7 +1168,7 @@ def _save_page_result(session: Session, volume, filename: str, result: dict) -> 
             done = len(session.pages_ocr_done)
             total = len(session.pages_received)
             session.message = f"OCR {done}/{total} pages"
-            if not _persist_session(session):
+            if not _persist_session(session, durable=False):
                 session.pages_ocr_done.discard(filename)
                 # Keep the item retryable when only the state write failed;
                 # the cache itself is valid and a later retry can persist it.
@@ -1106,7 +1185,7 @@ def _mark_page_failed(session: Session, filename: str, error: Exception) -> None
             session.pages_ocr_failed.add(filename)
             session.pages_ocr_done.discard(filename)
             session.message = f"OCR failed on {filename}: {error}"
-            if not _persist_session(session):
+            if not _persist_session(session, durable=False):
                 session.pages_ocr_failed.discard(filename)
                 raise RuntimeError("could not persist failed OCR state")
         _log.error("ocr", f"{session.safe_title}: page {filename} failed: {error}")
@@ -1191,7 +1270,7 @@ def _ocr_worker_loop() -> None:
                             session.pages_ocr_failed.add(item[1])
                             session.pages_ocr_done.discard(item[1])
                             session.message = f"OCR failed on {item[1]} after {attempts} attempts"
-                            if not _persist_session(session):
+                            if not _persist_session(session, durable=False):
                                 session.pages_ocr_failed.discard(item[1])
                                 if item not in _ocr_queue:
                                     _ocr_queue.append(item)
@@ -1248,6 +1327,59 @@ def wait_for_session_ocr(session: Session) -> None:
         with _ocr_cv:
             _ocr_force_sessions.discard(sid)
             _ocr_cv.notify_all()
+
+
+async def _acquire_ocr_cv_async(timeout: float = 0.05) -> None:
+    """Take the OCR condition lock without ever blocking the event loop."""
+    while not _ocr_cv.acquire(timeout=timeout):
+        await asyncio.sleep(0.01)
+
+
+async def wait_for_session_ocr_async(session: Session) -> None:
+    """Wait for this session's OCR without parking a worker thread.
+
+    The old finalize path ran the blocking ``wait_for_session_ocr`` in
+    ``asyncio.to_thread``. Every finalizing volume then owned one thread of the
+    shared default executor for the whole OCR wait, which is minutes when 20-30
+    volumes finalize together, so health and session-start hops queued behind
+    them. This version yields between polls instead: the OCR worker wakes on its
+    own, no thread is held, and the finalize coroutine stays cancellable.
+
+    The condition lock is only ever taken with a timeout here. It is held for
+    milliseconds by page writers (state update + session persist), but this runs
+    on the event loop, and waiting for it without a bound was one more way a
+    busy OCR worker could freeze every other request.
+    """
+    sid = session.session_id
+    _ensure_ocr_worker()
+    try:
+        await _acquire_ocr_cv_async()
+        try:
+            _ocr_force_sessions.add(sid)
+            _ocr_cv.notify_all()
+        finally:
+            _ocr_cv.release()
+        while True:
+            pending: Optional[int] = None
+            if _ocr_cv.acquire(timeout=0.05):
+                try:
+                    pending = _pending_count_for(sid)
+                finally:
+                    _ocr_cv.release()
+            if pending is not None:
+                with session.lock:
+                    done = len(session.pages_ocr_done) + len(session.pages_ocr_failed)
+                    total = len(session.pages_received)
+                if pending == 0 and done >= total:
+                    return
+            await asyncio.sleep(0.05 if pending is None else 0.5)
+    finally:
+        await _acquire_ocr_cv_async()
+        try:
+            _ocr_force_sessions.discard(sid)
+            _ocr_cv.notify_all()
+        finally:
+            _ocr_cv.release()
 
 def find_mokuro_output(vol_dir: Path) -> Optional[Path]:
     """mokuro writes <title>.mokuro as a sibling of the volume directory."""

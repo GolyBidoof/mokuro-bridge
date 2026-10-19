@@ -1,6 +1,7 @@
 """Finalize writes and merges series.json, through the real app."""
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 from pathlib import Path
@@ -78,11 +79,20 @@ def bridge(tmp_path, monkeypatch):
         MokuroGenerator=_Generator(holder),
     )
     monkeypatch.setattr(api, "_mokuro_submodule", lambda name: stubs)
-    monkeypatch.setattr(api, "wait_for_session_ocr", lambda session: None)
+    monkeypatch.setattr(
+        api, "wait_for_session_ocr_async", lambda session: asyncio.sleep(0)
+    )
     monkeypatch.setattr(api, "_ensure_ocr_worker", lambda: None)
     monkeypatch.setattr(api, "_sync_ocr_cache_state", lambda session: (0, 0))
-    monkeypatch.setattr(api, "ocr_json_path", lambda volume, name: Path(volume.dir) / name)
-    monkeypatch.setattr(api, "_safe_ocr_cache_path", lambda path, root: True)
+    # Keep the OCR cache out of the image path: a cache path that resolves to
+    # the page image itself would make the "drop stale cache" step delete the
+    # just-written page. Production maps page.jpg to _ocr/<volume>/page.json.
+    monkeypatch.setattr(
+        api,
+        "ocr_json_path",
+        lambda volume, name: Path(volume.dir) / "_ocr" / (Path(name).stem + ".json"),
+    )
+    monkeypatch.setattr(api, "_safe_ocr_cache_path", lambda path, root, **kwargs: True)
     monkeypatch.setattr(api, "_valid_ocr_cache", lambda path, page: True)
     monkeypatch.setattr(
         api,

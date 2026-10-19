@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 from . import APP_NAME, __version__
 from . import update
 from . import fetchproxy as _fetchproxy
+from . import lanes as _lanes
 from . import log as _log
 from .config import (
     CORS_ORIGINS,
@@ -63,7 +64,7 @@ from .ocr import (
     ocr_json_path,
     cleanup_volume_artifacts,
     find_mokuro_output,
-    wait_for_session_ocr,
+    wait_for_session_ocr_async,
 )
 from .providers import (
     DOWNLOAD_LIMIT_BYTES,
@@ -122,7 +123,11 @@ import threading as _threading  # noqa: E402
 
 _activity_lock = _threading.Lock()
 _activity = {"stage": "idle", "detail": "", "owners": {}}
-_session_create_lock = _threading.RLock()
+# Serializes the mkdir+persist critical section of session creation. It has to
+# be an asyncio lock: a threading lock acquired on the event loop and held across
+# `await` blocks every other coroutine, which is exactly how 50 concurrent
+# starts froze the bridge. It is never held while arbitrary blocking code runs.
+_session_create_lock = asyncio.Lock()
 _assemble_locks_guard = _threading.Lock()
 _assemble_locks: dict[str, _threading.Lock] = {}
 _title_locks_guard = _threading.Lock()
@@ -389,7 +394,12 @@ def _unlock_platform(handle) -> None:
 
 @contextlib.asynccontextmanager
 async def _volume_creation_lock(safe_title: str):
-    """Serialize same-title creation without blocking the event loop."""
+    """Serialize same-title creation without blocking the event loop.
+
+    ``_try_platform_lock`` is a non-blocking flock/msvcrt probe, so it runs
+    inline; hopping through a worker thread only added latency and made the
+    route depend on the shared executor being free.
+    """
     canonical_title = str(safe_title).casefold()
     lock_path = WORK_DIR / f".{canonical_title}.create.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -397,7 +407,7 @@ async def _volume_creation_lock(safe_title: str):
     local_key = f"local:{canonical_title}"
     local_acquired = False
     try:
-        result = await asyncio.to_thread(_try_platform_lock, handle)
+        result = _try_platform_lock(handle)
         if result is None:
             with _local_creation_guard:
                 if local_key in _local_creation_leases:
@@ -407,14 +417,14 @@ async def _volume_creation_lock(safe_title: str):
         else:
             while not result:
                 await asyncio.sleep(0.05)
-                result = await asyncio.to_thread(_try_platform_lock, handle)
+                result = _try_platform_lock(handle)
         yield
     finally:
         if local_acquired:
             with _local_creation_guard:
                 _local_creation_leases.discard(local_key)
         else:
-            await asyncio.to_thread(_unlock_platform, handle)
+            _unlock_platform(handle)
         try:
             handle.close()
         except Exception:
@@ -664,7 +674,8 @@ def _has_stem_collision(vol_dir: Path, destination: Path) -> bool:
 
 
 async def _run_thread_owned(func, *args):
-    task = asyncio.create_task(asyncio.to_thread(func, *args))
+    """Run page-byte work on the data lane without holding a request thread."""
+    task = asyncio.create_task(_lanes.to_data(func, *args))
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
@@ -1063,7 +1074,7 @@ async def _session_start_body(title: str, reuse_existing: str, safe_title: str):
     do_reuse = _truthy(reuse_existing)
 
     if do_reuse:
-        existing = await asyncio.to_thread(_find_session_by_safe_title, safe_title)
+        existing = await _lanes.to_control(_find_session_by_safe_title, safe_title)
         if existing:
             with existing.lock:
                 if existing.finalized or existing.finalizing or existing.cover_uploading or existing.ingesting or existing.page_reservations:
@@ -1079,13 +1090,13 @@ async def _session_start_body(title: str, reuse_existing: str, safe_title: str):
             try:
                 _ensure_safe_work_volume(existing.vol_dir)
                 existing.vol_dir.mkdir(parents=True, exist_ok=True)
-                sync_task = asyncio.create_task(asyncio.to_thread(_sync_ocr_cache_state, existing))
+                sync_task = asyncio.create_task(_lanes.to_data(_sync_ocr_cache_state, existing))
                 try:
                     await asyncio.shield(sync_task)
                 except asyncio.CancelledError:
                     await _drain_task_even_if_cancelled(sync_task)
                     raise
-                if not _persist_session(existing):
+                if not await _lanes.to_data(_persist_session, existing):
                     with _ocr_cv:
                         for index in range(len(_ocr_queue) - 1, -1, -1):
                             if _ocr_queue[index][0] == existing.session_id:
@@ -1118,19 +1129,19 @@ async def _session_start_body(title: str, reuse_existing: str, safe_title: str):
                 with existing.lock:
                     existing.ingesting = False
 
-        with _session_create_lock:
+        async with _session_create_lock:
             async with _volume_creation_lock(safe_title):
                 # A different process may have restored/registered the same
                 # title after the optimistic lookup. Never create a duplicate
                 # live session against one volume.
-                raced = await asyncio.to_thread(_find_session_by_safe_title, safe_title)
+                raced = await _lanes.to_control(_find_session_by_safe_title, safe_title)
                 if raced:
                     raise HTTPException(status_code=409, detail="A session for this title was created concurrently; retry reuse")
                 # Reuse the on-disk volume even with no live session (keeps OCR cache).
                 vol_dir = _ensure_safe_work_volume(WORK_DIR / safe_title)
                 vol_dir.mkdir(parents=True, exist_ok=True)
     else:
-        with _session_create_lock:
+        async with _session_create_lock:
             async with _volume_creation_lock(safe_title):
                 # The collision check has to happen BEFORE the directory is made.
                 # _ensure_safe_work_volume() ends in mkdir(exist_ok=True), so
@@ -1163,13 +1174,13 @@ async def _session_start_body(title: str, reuse_existing: str, safe_title: str):
         _sessions[session_id] = session
     try:
         if do_reuse:
-            sync_task = asyncio.create_task(asyncio.to_thread(_sync_ocr_cache_state, session))
+            sync_task = asyncio.create_task(_lanes.to_data(_sync_ocr_cache_state, session))
             try:
                 await asyncio.shield(sync_task)
             except asyncio.CancelledError:
                 await _drain_task_even_if_cancelled(sync_task)
                 raise
-        if not _persist_session(session):
+        if not await _lanes.to_data(_persist_session, session):
             raise RuntimeError("could not persist new session")
         _ensure_ocr_worker()
     except BaseException:
@@ -1231,7 +1242,7 @@ async def _session_resume_body(title: str, source_dir: str, safe_title: str):
     - Queues only the missing pages
     """
     created_here = False
-    existing = await asyncio.to_thread(_find_session_by_safe_title, safe_title)
+    existing = await _lanes.to_control(_find_session_by_safe_title, safe_title)
     if existing:
         with existing.lock:
             if existing.finalized or existing.finalizing or existing.cover_uploading or existing.ingesting or existing.page_reservations:
@@ -1246,9 +1257,9 @@ async def _session_resume_body(title: str, source_dir: str, safe_title: str):
     else:
         # Hold the cross-process file lock only for the short volume/session
         # admission step; source hashing/copying happens after it is released.
-        with _session_create_lock:
+        async with _session_create_lock:
             async with _volume_creation_lock(safe_title):
-                raced = await asyncio.to_thread(_find_session_by_safe_title, safe_title)
+                raced = await _lanes.to_control(_find_session_by_safe_title, safe_title)
                 if raced:
                     raise HTTPException(status_code=409, detail="A session for this title was created concurrently; retry reuse")
                 vol_dir = _ensure_safe_work_volume(WORK_DIR / safe_title)
@@ -1347,14 +1358,14 @@ async def _session_resume_body(title: str, source_dir: str, safe_title: str):
                     if _sync_one_image(img):
                         synced += 1
 
-            source_task = asyncio.create_task(asyncio.to_thread(_sync_source_directory))
+            source_task = asyncio.create_task(_lanes.to_data(_sync_source_directory))
             try:
                 await asyncio.shield(source_task)
             except asyncio.CancelledError:
                 await _drain_task_even_if_cancelled(source_task)
                 raise
 
-        sync_task = asyncio.create_task(asyncio.to_thread(_sync_ocr_cache_state, session))
+        sync_task = asyncio.create_task(_lanes.to_data(_sync_ocr_cache_state, session))
         try:
             await asyncio.shield(sync_task)
         except asyncio.CancelledError:
@@ -1382,14 +1393,14 @@ async def _session_resume_body(title: str, source_dir: str, safe_title: str):
                 queued_count += 1
             return queued_count, cached_count
 
-        queue_task = asyncio.create_task(asyncio.to_thread(_queue_missing_images))
+        queue_task = asyncio.create_task(_lanes.to_data(_queue_missing_images))
         try:
             queued, cached = await asyncio.shield(queue_task)
         except asyncio.CancelledError:
             await _drain_task_even_if_cancelled(queue_task)
             raise
 
-        if not _persist_session(session):
+        if not await _lanes.to_data(_persist_session, session):
             raise RuntimeError("could not persist resumed session")
         _ensure_ocr_worker()
         snap = session_snapshot(session)
@@ -1457,6 +1468,25 @@ def _unlink_ocr_cache(session, name: str) -> None:
         pass
 
 
+def _page_ocr_cache_path(session, safe_name: str):
+    """Resolve a page's OCR cache path, or None when the engine is not installed.
+
+    The optional mokuro engine is imported lazily, and importing it pulls in
+    torch. Doing that on the event loop froze /health for about half a second on
+    the first captured page of a run, so callers on a route await this on a
+    worker lane instead. An absent engine means no cache can exist, which is the
+    same outcome the old in-handler ``except Exception: pass`` produced.
+    """
+    try:
+        cache_volume = _mokuro_submodule("volume").Volume(session.vol_dir)
+    except Exception:
+        return None
+    cache_path = ocr_json_path(cache_volume, safe_name)
+    if not _safe_ocr_cache_path(cache_path, cache_volume.path_ocr_cache, allow_missing=True):
+        raise HTTPException(status_code=400, detail="OCR cache path is unsafe")
+    return cache_path
+
+
 def _supersede_stale_page(session, page_num, safe_name: str) -> None:
     """
     Drop this session's older file for `page_num` when the page arrives renamed.
@@ -1519,7 +1549,7 @@ async def session_page(
     page_num: Optional[int] = Form(None),
 ):
     """Accept one captured page and queue OCR immediately (non-blocking)."""
-    session = await asyncio.to_thread(_get_session, session_id)
+    session = await _lanes.to_control(_get_session, session_id)
     if session.finalized or session.finalizing or session.cover_uploading or session.ingesting:
         raise HTTPException(status_code=400, detail="Session is finalizing or already finalized")
 
@@ -1535,6 +1565,9 @@ async def session_page(
     # worker thread. Finalization and OCR selection only see the short commit
     # section after the bytes are durably staged.
     _ensure_ocr_worker()
+    # Resolve the cache path off the event loop: the first call imports the
+    # optional OCR engine (and torch), which must not block every other request.
+    cache_path = await _lanes.to_data(_page_ocr_cache_path, session, safe_name)
     reserved = False
     try:
         async with _upload_memory_slot():
@@ -1542,7 +1575,7 @@ async def session_page(
             if not _looks_like_image(data):
                 raise HTTPException(status_code=400, detail="Uploaded page is not a recognized image")
             incoming_digest = hashlib.sha256(data).hexdigest()
-            existing_digest = await asyncio.to_thread(_file_digest, dest) if dest.exists() else None
+            existing_digest = await _lanes.to_data(_file_digest, dest) if dest.exists() else None
             with _ocr_cv:
                 with session.lock:
                     if session.finalized or session.finalizing or session.cover_uploading or session.ingesting:
@@ -1583,16 +1616,11 @@ async def session_page(
             with session.lock:
                 if session.finalized or session.finalizing:
                     raise HTTPException(status_code=409, detail="Session is finalizing or already finalized")
-                try:
-                    cache_volume = _mokuro_submodule("volume").Volume(session.vol_dir)
-                    cache_path = ocr_json_path(cache_volume, safe_name)
-                    if not _safe_ocr_cache_path(cache_path, cache_volume.path_ocr_cache, allow_missing=True):
-                        raise HTTPException(status_code=400, detail="OCR cache path is unsafe")
-                    cache_path.unlink(missing_ok=True)
-                except HTTPException:
-                    raise
-                except Exception:
-                    pass
+                if cache_path is not None:
+                    try:
+                        cache_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 session.pages_ocr_done.discard(safe_name)
                 session.pages_ocr_failed.discard(safe_name)
                 snap = _queue_page_ocr(session, safe_name, _ocr_cv_held=True)
@@ -1613,7 +1641,7 @@ async def session_page_local(
     page_num: Optional[int] = Form(None),
 ):
     """Same-machine ingest: copy a local image into the session and queue OCR."""
-    session = await asyncio.to_thread(_get_session, session_id)
+    session = await _lanes.to_control(_get_session, session_id)
     if session.finalized or session.finalizing or session.cover_uploading or session.ingesting:
         raise HTTPException(status_code=400, detail="Session is finalizing or already finalized")
 
@@ -1628,7 +1656,7 @@ async def session_page_local(
     safe_name = _validated_page_name(filename, f"page_{int(page_num or 0):03d}{src.suffix.lower()}")
 
     async with _upload_memory_slot():
-        if not _looks_like_image(await asyncio.to_thread(_read_source_limited, src)):
+        if not _looks_like_image(await _lanes.to_data(_read_source_limited, src)):
             raise HTTPException(status_code=400, detail="Source file is not a recognized image")
     # Volume dir can disappear after MEGA cleanup while the session is still live.
     _ensure_safe_work_volume(session.vol_dir)
@@ -1638,6 +1666,7 @@ async def session_page_local(
     # Reserve the filename under the scheduler lock, then copy outside it. A
     # 100 MiB local-page copy must not stall OCR/finalization for other volumes.
     _ensure_ocr_worker()
+    cache_path = await _lanes.to_data(_page_ocr_cache_path, session, safe_name)
     reserved = False
     copied = False
     try:
@@ -1669,16 +1698,11 @@ async def session_page_local(
             with session.lock:
                 if session.finalized or session.finalizing:
                     raise HTTPException(status_code=409, detail="Session is finalizing or already finalized")
-                try:
-                    cache_volume = _mokuro_submodule("volume").Volume(session.vol_dir)
-                    cache_path = ocr_json_path(cache_volume, safe_name)
-                    if not _safe_ocr_cache_path(cache_path, cache_volume.path_ocr_cache, allow_missing=True):
-                        raise HTTPException(status_code=400, detail="OCR cache path is unsafe")
-                    cache_path.unlink(missing_ok=True)
-                except HTTPException:
-                    raise
-                except Exception:
-                    pass
+                if cache_path is not None:
+                    try:
+                        cache_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 session.pages_ocr_done.discard(safe_name)
                 session.pages_ocr_failed.discard(safe_name)
                 snap = _queue_page_ocr(session, safe_name, _ocr_cv_held=True)
@@ -1707,11 +1731,11 @@ async def session_cover(
     re-uploading the cover to the same destination. Returns JSON (not NDJSON):
     {ok, method, file, remote_path|path, url|None, size}.
     """
-    session = await asyncio.to_thread(_get_session, session_id)
+    session = await _lanes.to_control(_get_session, session_id)
     if session.finalized or session.finalizing or session.cover_uploading or session.ingesting:
         raise HTTPException(status_code=400, detail="Session is finalizing or already finalized")
     try:
-        method = await asyncio.to_thread(resolve_upload_method, str(upload_method).strip() or None)
+        method = await _lanes.to_control(resolve_upload_method, str(upload_method).strip() or None)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     with session.lock:
@@ -1737,7 +1761,7 @@ async def session_cover(
         data = await _read_upload_limited(cover)
         if not _looks_like_image(data):
             raise HTTPException(status_code=400, detail="Cover is not a recognized image")
-        data = await asyncio.to_thread(_normalize_cover_bytes, data)
+        data = await _lanes.to_data(_normalize_cover_bytes, data)
     except BaseException:
         _release_cover_slot()
         with session.lock:
@@ -1756,7 +1780,7 @@ async def session_cover(
 
     if method == "local":
         try:
-            base = await asyncio.to_thread(_effective_local_output_base, local_dir) or OUTPUT_DIR
+            base = await _lanes.to_control(_effective_local_output_base, local_dir) or OUTPUT_DIR
             dest_dir = base / series
         except BaseException:
             _release_cover_slot()
@@ -1791,13 +1815,13 @@ async def session_cover(
                 raise HTTPException(status_code=400, detail="Cover destination must not be a symlink")
             _ensure_safe_work_volume(session.vol_dir)
             await _run_thread_owned(_write_atomic_no_follow, dest, data)
-            digest = await asyncio.to_thread(_file_digest, dest)
+            digest = await _lanes.to_data(_file_digest, dest)
             if digest is None:
                 raise HTTPException(status_code=500, detail="Could not verify written cover")
             rec = {"method": "local", "file": remote_name, "path": str(dest), "remote_path": None, "size": size, "sha256": digest}
             with session.lock:
                 session.cover_uploaded = rec
-            if not _persist_session(session):
+            if not await _lanes.to_data(_persist_session, session):
                 with session.lock:
                     session.cover_uploaded = None
                 raise HTTPException(status_code=500, detail="Could not persist cover metadata")
@@ -1844,7 +1868,7 @@ async def session_cover(
                 speed_bps=speed_bps, speed_human=speed_human, remote_path=remote_dir,
             )
 
-        upload_task = asyncio.create_task(asyncio.to_thread(
+        upload_task = asyncio.create_task(_lanes.to_upload(
             upload_file, method, tmp, remote_dir, _prog, "overwrite"
         ))
         with session.lock:
@@ -1852,7 +1876,7 @@ async def session_cover(
         ok, err, url = await asyncio.shield(upload_task)
         if not ok:
             raise HTTPException(status_code=502, detail=f"cover upload failed: {_safe_provider_error(err or 'unknown')}")
-        digest = await asyncio.to_thread(_file_digest, tmp)
+        digest = await _lanes.to_data(_file_digest, tmp)
         if digest is None:
             raise HTTPException(status_code=500, detail="Could not verify uploaded cover")
         rec = {
@@ -1861,7 +1885,7 @@ async def session_cover(
         }
         with session.lock:
             session.cover_uploaded = rec
-        if not _persist_session(session):
+        if not await _lanes.to_data(_persist_session, session):
             with session.lock:
                 session.cover_uploaded = None
             raise HTTPException(status_code=500, detail="Could not persist cover metadata")
@@ -1887,19 +1911,21 @@ async def list_sessions():
     """Active pipelined sessions (useful when several capture clients run at once)."""
     def _snapshot_all():
         _restore_persisted_sessions()
-        queue = ocr_queue_metrics()
+        # Prefer the health snapshot's queue metrics: they are refreshed off the
+        # request path and computed under the OCR lock that a busy queue holds.
+        queue = _cached_queue_snapshot() or ocr_queue_metrics(0.05)
         if queue.get("queue_depth", 0) or queue.get("processing_depth", 0):
             _ensure_ocr_worker()
         with _sessions_lock:
             return [session_snapshot(s) for s in _sessions.values()]
-    snaps = await asyncio.to_thread(_snapshot_all)
+    snaps = await _lanes.to_control(_snapshot_all)
     return JSONResponse({"sessions": snaps, "count": len(snaps)})
 
 @app.get("/session/{session_id}/status")
 async def session_status(session_id: str):
     # Restored-session reconciliation may hash a large volume; keep status
     # polling responsive to other sessions.
-    session = await asyncio.to_thread(_get_session, session_id)
+    session = await _lanes.to_control(_get_session, session_id)
     return JSONResponse(session_snapshot(session))
 
 def _canonical_uuid(value: object) -> Optional[str]:
@@ -1966,11 +1992,11 @@ async def session_finalize(
     output directory (must be under your home dir or system temp; created if
     missing). Ignored for remote methods.
     """
-    session = await asyncio.to_thread(_get_session, session_id)
+    session = await _lanes.to_control(_get_session, session_id)
     do_delete = _truthy(delete_after_upload)
     raw_target = str(upload_method).strip() or str(upload_to_mega).strip() or None
     try:
-        method = await asyncio.to_thread(resolve_upload_method, raw_target)
+        method = await _lanes.to_control(resolve_upload_method, raw_target)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     finalize_lease = _acquire_finalize_lock(session_id)
@@ -1992,9 +2018,9 @@ async def session_finalize(
         # finalization lease; a losing concurrent finalize must not change the
         # process-wide defaults.
         if raw_target is not None:
-            await asyncio.to_thread(_remember_upload_method, method)
+            await _lanes.to_control(_remember_upload_method, method)
         local_output_base = (
-            await asyncio.to_thread(_effective_local_output_base, local_dir)
+            await _lanes.to_control(_effective_local_output_base, local_dir)
             if method == "local"
             else None
         )
@@ -2018,7 +2044,7 @@ async def session_finalize(
             )
             await asyncio.sleep(0)
 
-            wait_task = asyncio.create_task(asyncio.to_thread(wait_for_session_ocr, session))
+            wait_task = asyncio.create_task(wait_for_session_ocr_async(session))
             with session.lock:
                 session.finalize_wait_task = wait_task
             while not wait_task.done():
@@ -2047,12 +2073,10 @@ async def session_finalize(
                     pages=snap["pages_received"],
                 )
                 return
-            try:
-                volume_for_cache = _mokuro_submodule("volume").Volume(session.vol_dir)
-            except Exception as error:
-                yield ndjson("error", f"Could not inspect OCR cache: {error}")
-                return
             def _find_missing_cache() -> list[str]:
+                # Resolve the engine here, on the finalize lane: the first import
+                # pulls in torch and must not freeze the event loop mid-run.
+                volume_for_cache = _mokuro_submodule("volume").Volume(session.vol_dir)
                 missing: list[str] = []
                 for page in sorted(session.vol_dir.iterdir(), key=lambda p: p.name):
                     if page.is_symlink() or not page.is_file() or page.suffix.lower() not in IMAGE_EXTENSIONS:
@@ -2065,7 +2089,11 @@ async def session_finalize(
                         missing.append(page.name)
                 return missing
 
-            missing_cache = await asyncio.to_thread(_find_missing_cache)
+            try:
+                missing_cache = await _lanes.to_finalize(_find_missing_cache)
+            except Exception as error:
+                yield ndjson("error", f"Could not inspect OCR cache: {error}")
+                return
             if missing_cache:
                 yield ndjson(
                     "error",
@@ -2087,7 +2115,13 @@ async def session_finalize(
             Volume = volume_mod.Volume
 
             def _assemble():
-                with _assemble_session_lock(session.session_id), _ocr._assemble_lock:
+                # No process-wide assembly lock: each volume writes only its own
+                # directory and artifacts, so independent series assemble in
+                # parallel on the finalize lane. This used to share a global lock
+                # with the OCR worker, which held it for a whole 32-page batch and
+                # therefore stalled every finalize (and every thread queued behind
+                # them) for minutes.
+                with _assemble_session_lock(session.session_id):
                     # Never accept a stale artifact if the generator silently
                     # skips output for this run.
                     sibling = session.vol_dir.parent / f"{session.vol_dir.name}.mokuro"
@@ -2185,7 +2219,7 @@ async def session_finalize(
                                 pass
 
             assembly_task = asyncio.create_task(
-                asyncio.to_thread(_assemble), name=f"assemble-{session_id}"
+                _lanes.to_finalize(_assemble), name=f"assemble-{session_id}"
             )
             with session.lock:
                 session.finalize_assembly_task = assembly_task
@@ -2243,7 +2277,7 @@ async def session_finalize(
                 )
                 return
             try:
-                await asyncio.to_thread(
+                await _lanes.to_finalize(
                     _validate_mokuro_artifact,
                     mokuro_file,
                     len(image_files),
@@ -2406,7 +2440,7 @@ async def session_finalize(
                 return outcome
 
             pack_task = asyncio.create_task(
-                asyncio.to_thread(_package_artifacts), name=f"package-{session_id}"
+                _lanes.to_finalize(_package_artifacts), name=f"package-{session_id}"
             )
             with session.lock:
                 session.finalize_pack_task = pack_task
@@ -2725,7 +2759,7 @@ async def session_finalize(
                         )
                     return results
 
-                upload_task = asyncio.create_task(asyncio.to_thread(_upload_batch))
+                upload_task = asyncio.create_task(_lanes.to_upload(_upload_batch))
                 with session.lock:
                     session.finalize_upload_task = upload_task
                 while not upload_task.done():
@@ -2784,7 +2818,7 @@ async def session_finalize(
                         remote_path=remote_dir,
                     )
                     await asyncio.sleep(0)
-                    series_result = await asyncio.to_thread(_publish_remote_series_json)
+                    series_result = await _lanes.to_upload(_publish_remote_series_json)
                     upload_results.append(series_result)
                     all_success = bool(series_result["success"])
                     if series_result["success"] and series_result.get("unchanged"):
@@ -2884,7 +2918,7 @@ async def session_finalize(
                 yield ndjson("cleanup", "Cleaning up working files…")
                 await asyncio.sleep(0)
                 cleanup_task = asyncio.create_task(
-                    asyncio.to_thread(cleanup_volume_artifacts, session.vol_dir),
+                    _lanes.to_data(cleanup_volume_artifacts, session.vol_dir),
                     name=f"cleanup-{session_id}",
                 )
                 with session.lock:
@@ -2901,7 +2935,7 @@ async def session_finalize(
             # record rather than an inaccessible finalized ghost.
             with session.lock:
                 session.finalized = True
-            if not _persist_session(session):
+            if not await _lanes.to_data(_persist_session, session):
                 with session.lock:
                     session.finalized = False
                 yield ndjson("error", "Finalization completed output but could not persist session state", status="persistence_error")
@@ -3012,7 +3046,7 @@ async def session_finalize(
             _release_finalize_lock(finalize_lease)
             if still_live:
                 try:
-                    _persist_session(session)
+                    await _lanes.to_data(_persist_session, session)
                 except Exception:
                     pass
 
@@ -3101,7 +3135,7 @@ async def session_finalize(
 @app.get("/upload-methods")
 async def upload_methods():
     methods = []
-    for m in (await asyncio.to_thread(_build_upload_methods)).values():
+    for m in (await _lanes.to_control(_build_upload_methods)).values():
         entry = {
             "id": m.id,
             "name": m.name,
@@ -3153,7 +3187,7 @@ async def destination_check(
         raise HTTPException(status_code=400, detail=f"destination {method_id!r} is not configured")
     remote_dir = f"{method_root(method_id).rstrip('/')}/{series}".strip("/")
     try:
-        exists = await asyncio.to_thread(remote_file_exists, method_id, remote_dir, filename)
+        exists = await _lanes.to_upload(remote_file_exists, method_id, remote_dir, filename)
     except Exception as error:
         raise HTTPException(
             status_code=502,
@@ -3167,10 +3201,33 @@ async def destination_check(
         "exists": exists,
     })
 
-@app.get("/queue")
-async def queue_status():
-    """Read-only OCR queue metrics for multi-volume backpressure monitoring."""
-    return JSONResponse(await asyncio.to_thread(ocr_queue_metrics))
+# ---------------------------------------------------------------------------
+# Health reporting
+#
+# /health is the liveness probe every client polls and the terminal display
+# redraws from. It used to do real work on the request path: walk the OCR queue
+# under its global lock, take every session lock in turn, rebuild the upload
+# method registry and ask the OS keychain where MEGA credentials live. With 20-30
+# volumes finalizing that took seconds and the whole UI froze with it.
+#
+# Now a dedicated thread refreshes one snapshot per second and /health returns
+# the last snapshot without touching the OCR queue, session locks, keychain or
+# any worker lane. The response can only ever be as old as the refresh interval,
+# and `health_snapshot.stale` says so honestly when the builder itself is stuck.
+# ---------------------------------------------------------------------------
+
+_HEALTH_REFRESH_INTERVAL_S = 1.0
+_HEALTH_SNAPSHOT_STALE_AFTER_S = 5.0
+_HEALTH_MEGA_SOURCE_TTL_S = 15.0
+
+_health_snapshot_guard = _threading.Lock()
+_health_snapshot_payload: Optional[dict] = None
+_health_snapshot_queue: Optional[dict] = None
+_health_snapshot_built_at = 0.0
+_health_snapshot_error: Optional[str] = None
+_health_thread: Optional[_threading.Thread] = None
+_health_stop_event = _threading.Event()
+_health_mega_source_cache: tuple[float, Optional[str]] = (0.0, None)
 
 
 def _health_upload_methods(methods: dict) -> list[dict]:
@@ -3189,37 +3246,25 @@ def _health_upload_methods(methods: dict) -> list[dict]:
     return rows
 
 
-@app.get("/health")
-async def health():
-    # Keeps the cached version check warm without ever blocking this request:
-    # armed by the CLI at startup, a no-op otherwise (and always a no-op when
-    # MOKURO_BRIDGE_UPDATE_CHECK=0). See mokuro_bridge/update.py.
-    update.maybe_refresh_async()
-    queue = await asyncio.to_thread(ocr_queue_metrics)
-    upload_methods = await asyncio.to_thread(_build_upload_methods)
-    with _sessions_lock:
-        active_sessions = len(_sessions)
+def _health_base_payload() -> dict:
+    """Cheap, lock-free fields: environment and install provenance only."""
     result = {
         "app": APP_NAME,
         "version": __version__,
         "status": "ok",
         **update.health_fields(),
         # Which mokuro this is: upstream, the faster fork, absent or unknown.
-        # Read from install provenance in a thread (local files only), so a
-        # client can tell the two engines apart without trusting a version.
-        **await asyncio.to_thread(mokuro_flavor.health_fields),
-        "mokuro_installed": False,
+        # detect() caches and reads local files only, so this is safe per poll.
+        **mokuro_flavor.health_fields(),
+        "mokuro_installed": _mokuro_pkg is not None,
         "mokuro_custom_fork": _MOKURO_REPO is not None,
         "mokuro_repo": str(_MOKURO_REPO) if _MOKURO_REPO is not None else None,
-        "mokuro_fork_api": False,
+        "mokuro_fork_api": bool(getattr(_ocr, "_fork_supported_cache", False)),
         "megatools_installed": bool(shutil.which("megatools")),
         "mega_configured": False,
         "mega_creds_source": None,
         "mega_library_root": method_root("mega") or MEGA_LIBRARY_ROOT,
         "upload_default": _MEGA_UPLOAD_DEFAULT,
-        # current_folder is included so a client (and --status) can show where a
-        # target writes without a second request; /upload-methods always had it.
-        "upload_methods": await asyncio.to_thread(_health_upload_methods, upload_methods),
         "upload_method_default": _default_upload_method(),
         "upload_method_selected": None,
         "work_dir": str(WORK_DIR),
@@ -3235,17 +3280,57 @@ async def health():
         # (/_bwdd/<host>/<path>), which keeps the page's request CORS-simple and
         # so avoids one preflight per page. See mokuro_bridge/fetchproxy.py.
         "fetchPathUpstream": True,
-        "active_sessions": active_sessions,
         "ocr_chunk_size": _OCR_CHUNK_SIZE,
         "ocr_idle_flush_s": _OCR_IDLE_FLUSH_S,
+        # Per-lane worker/backlog counts: a developing stall names the lane that
+        # is behind instead of surfacing only as one slow route.
+        "lanes": _lanes.lane_stats(),
+    }
+    if _mokuro_pkg is not None:
+        result["mokuro_version"] = getattr(_mokuro_pkg, "__version__", "?")
+        result["mokuro_path"] = getattr(_mokuro_pkg, "__file__", "?")
+    return result
+
+
+def _health_mega_source() -> Optional[str]:
+    """Where MEGA creds would come from, cached: the lookup reaches the keychain."""
+    global _health_mega_source_cache
+    now = time.monotonic()
+    cached_at, cached_value = _health_mega_source_cache
+    if now - cached_at < _HEALTH_MEGA_SOURCE_TTL_S:
+        return cached_value
+    try:
+        source = _mega_creds_source()
+    except Exception:
+        source = None
+    _health_mega_source_cache = (now, source)
+    return source
+
+
+def _health_build_payload() -> tuple[dict, dict]:
+    """Build the full snapshot. Runs on the health thread, never on a request."""
+    queue = ocr_queue_metrics()
+    upload_methods = _build_upload_methods()
+    with _sessions_lock:
+        active_sessions = len(_sessions)
+    result = _health_base_payload()
+    result.update({
+        # current_folder is included so a client (and --status) can show where a
+        # target writes without a second request; /upload-methods always had it.
+        "upload_methods": _health_upload_methods(upload_methods),
+        "active_sessions": active_sessions,
         # Keep the historical scalar field and add count-only details for
-        # multi-volume backpressure.  /queue exposes the same snapshot.
+        # multi-volume backpressure. /queue exposes the same snapshot.
         "ocr_queue_depth": queue["queue_depth"],
         "ocr_processing_depth": queue["processing_depth"],
         "ocr_queue_sessions": queue["per_session"],
         "ocr_active_batch_sessions": queue["active_batch_sessions"],
         "ocr_worker": queue["worker"],
-    }
+    })
+    source = _health_mega_source()
+    if source is not None:
+        result["mega_configured"] = True
+        result["mega_creds_source"] = source
     # Only present while an upload is actually in flight, so `--status` can show
     # a progress bar without a second request and plain clients see no change.
     active_upload = _active_upload_snapshot()
@@ -3279,16 +3364,141 @@ async def health():
         result["busy"] = False
         result["busy_stage"] = "idle"
         result["busy_detail"] = ""
+    return result, queue
+
+
+def _refresh_health_snapshot() -> None:
+    """Rebuild the snapshot; failures keep the previous one and are reported."""
+    global _health_snapshot_payload, _health_snapshot_queue
+    global _health_snapshot_built_at, _health_snapshot_error
+    try:
+        payload, queue = _health_build_payload()
+    except Exception as error:  # the reporter must never die on one bad poll
+        with _health_snapshot_guard:
+            _health_snapshot_error = f"{type(error).__name__}: {error}"
+        return
+    with _health_snapshot_guard:
+        _health_snapshot_payload = payload
+        _health_snapshot_queue = queue
+        _health_snapshot_built_at = time.monotonic()
+        _health_snapshot_error = None
+
+
+def _health_snapshot_loop() -> None:
+    while not _health_stop_event.wait(_HEALTH_REFRESH_INTERVAL_S):
+        _refresh_health_snapshot()
+
+
+def _ensure_health_reporter() -> None:
+    """Build the first snapshot and start the refresher (idempotent)."""
+    global _health_thread
+    _health_stop_event.clear()
+    _refresh_health_snapshot()
+    with _health_snapshot_guard:
+        if _health_thread is not None and _health_thread.is_alive():
+            return
+        thread = _threading.Thread(
+            target=_health_snapshot_loop, name="mokuro-health-snapshot", daemon=True
+        )
+        _health_thread = thread
+    thread.start()
+
+
+def _stop_health_reporter() -> None:
+    """Stop the refresher (ASGI shutdown, tests). Idempotent."""
+    _health_stop_event.set()
+    with _health_snapshot_guard:
+        thread = _health_thread
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2.0)
+
+
+def _health_snapshot_view() -> tuple[Optional[dict], float, Optional[str]]:
+    with _health_snapshot_guard:
+        return _health_snapshot_payload, _health_snapshot_built_at, _health_snapshot_error
+
+
+def _cached_queue_snapshot() -> Optional[dict]:
+    """The OCR queue metrics from the last health snapshot, or None before one."""
+    with _health_snapshot_guard:
+        return _health_snapshot_queue
+
+
+@app.get("/queue")
+async def queue_status():
+    """Read-only OCR queue metrics for multi-volume backpressure monitoring.
+
+    The metrics call is bounded and runs on the control lane: under a busy
+    writer it returns a best-effort snapshot in tens of milliseconds instead of
+    waiting for the global OCR lock, and it cannot occupy a lane the request
+    path needs.
+    """
+    return JSONResponse(await _lanes.to_control(ocr_queue_metrics, 0.05))
+
+
+@app.get("/health")
+async def health():
+    # Keeps the cached version check warm without ever blocking this request:
+    # armed by the CLI at startup, a no-op otherwise (and always a no-op when
+    # MOKURO_BRIDGE_UPDATE_CHECK=0). See mokuro_bridge/update.py.
+    update.maybe_refresh_async()
+    payload, built_at, snapshot_error = _health_snapshot_view()
+    if payload is None:
+        # No lifespan (a bare TestClient, an embedder that drives the ASGI app
+        # without startup) or a first-request race: build immediately and let the
+        # reporter take over. This is the only path that builds on a request.
+        _ensure_health_reporter()
+        payload, built_at, snapshot_error = _health_snapshot_view()
+    if payload is None:
+        # The builder itself failed. Report that honestly instead of 500ing the
+        # liveness probe: clients should see a partial but valid document.
+        payload = _health_base_payload()
+        built_at = time.monotonic()
+        snapshot_error = "health snapshot builder failed"
+        partial = True
+    else:
+        partial = False
+    result = dict(payload)
+    # Cheap live overlays: they must reflect a change made a millisecond ago
+    # (tests, the dashboard applying a setting) without rebuilding the snapshot.
+    result.update(update.health_fields())
+    result.update(mokuro_flavor.health_fields())
+    result["mokuro_installed"] = _mokuro_pkg is not None
+    result["mokuro_custom_fork"] = _MOKURO_REPO is not None
+    result["mokuro_repo"] = str(_MOKURO_REPO) if _MOKURO_REPO is not None else None
+    result["mokuro_fork_api"] = bool(getattr(_ocr, "_fork_supported_cache", False))
     if _mokuro_pkg is not None:
-        result["mokuro_installed"] = True
         result["mokuro_version"] = getattr(_mokuro_pkg, "__version__", "?")
         result["mokuro_path"] = getattr(_mokuro_pkg, "__file__", "?")
-        cached_fork = getattr(_ocr, "_fork_supported_cache", None)
-        result["mokuro_fork_api"] = bool(cached_fork) if cached_fork is not None else False
-
-    source = await asyncio.to_thread(_mega_creds_source)
-    if source is not None:
-        result["mega_configured"] = True
-        result["mega_creds_source"] = source
-
+    else:
+        result.pop("mokuro_version", None)
+        result.pop("mokuro_path", None)
+    result.pop("upload", None)
+    active_upload = _active_upload_snapshot()
+    if active_upload is not None:
+        result["upload"] = active_upload
+    age = max(0.0, time.monotonic() - built_at)
+    result["health_snapshot"] = {
+        "age_ms": int(age * 1000),
+        "interval_ms": int(_HEALTH_REFRESH_INTERVAL_S * 1000),
+        "stale": age > _HEALTH_SNAPSHOT_STALE_AFTER_S,
+        "partial": partial,
+    }
+    if snapshot_error is not None:
+        result["health_snapshot"]["error"] = snapshot_error
     return JSONResponse(result)
+
+
+# The reporter is a daemon thread, so it starts with the ASGI lifespan and does
+# not keep the process alive on its own. FastAPI versions differ on
+# add_event_handler, so the lifespan context is wrapped directly.
+@contextlib.asynccontextmanager
+async def _bridge_lifespan(_application):
+    _ensure_health_reporter()
+    try:
+        yield
+    finally:
+        _stop_health_reporter()
+
+
+app.router.lifespan_context = _bridge_lifespan

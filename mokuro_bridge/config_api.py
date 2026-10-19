@@ -56,6 +56,11 @@ from .providers import webdav as webdav_provider
 
 router = APIRouter()
 DASHBOARD_HTML = Path(__file__).with_name("web") / "dashboard.html"
+_ENGINE_LOCK = threading.Lock()
+_ENGINE_JOBS: dict[str, dict] = {
+    "mokuro": {"state": "idle", "code": None, "output": "", "started": 0.0, "finished": 0.0},
+    "bunko": {"state": "idle", "code": None, "output": "", "started": 0.0, "finished": 0.0},
+}
 _LOCAL_ID = "local"
 _MAX_DIRS = 400
 
@@ -481,6 +486,7 @@ def _method_rows() -> list[dict]:
                 "current_folder": _method_current_folder(method.id),
                 "needs_reauth": needs_reauth,
                 "state": state,
+                "tracked": instance is not None,
                 "extra": extra,
             }
         )
@@ -669,6 +675,39 @@ async def add_mega_account(
     password_value = str(password or "")
     if not email_value or not password_value:
         raise HTTPException(status_code=400, detail="MEGA email and password are required")
+    try:
+        duplicates = [
+            instance
+            for instance in accounts.instances_for("mega")
+            if instance.name != name
+            and (instance.email or "").strip().lower() == email_value.lower()
+        ]
+    except Exception:
+        duplicates = []
+    if duplicates:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This MEGA email is already connected as {duplicates[0].id}. "
+                "Reconnect or remove that account instead of adding it twice."
+            ),
+        )
+    # The default account can be configured through the old keychain path with
+    # no account file, so it has no recorded email to compare against.
+    if name != accounts.DEFAULT_NAME and not accounts.load_instance("mega", accounts.DEFAULT_NAME).tracked:
+        try:
+            legacy_email = mega_provider._keychain_mega_account() or ""
+        except Exception:
+            legacy_email = ""
+        if legacy_email.strip().lower() == email_value.lower():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This MEGA email is already set up as the first MEGA account "
+                    "(found in Keychain). Remove that account first, then add it "
+                    "under this name."
+                ),
+            )
     if shutil.which("megatools") is None:
         raise HTTPException(status_code=400, detail=_MEGATOOLS_HINT)
     if name == accounts.DEFAULT_NAME and (
@@ -1200,3 +1239,156 @@ async def update_account(
             "default_method": await asyncio.to_thread(_default_upload_method),
         }
     )
+
+
+def _mokuro_engine_status() -> dict:
+    try:
+        from . import mokuro_flavor
+
+        info = mokuro_flavor.detect(refresh=True)
+    except Exception as error:  # detection itself never raises, but be safe
+        return {"installed": False, "version": None, "flavour": "unknown", "detail": str(error)}
+    flavour = info.get("flavor") or "unknown"
+    if flavour == "fork":
+        detail = "GolyBidoof fork"
+    elif flavour == "upstream":
+        detail = "upstream build"
+    elif info.get("installed"):
+        detail = flavour
+    else:
+        detail = "not installed"
+    return {
+        "installed": bool(info.get("installed")),
+        "version": info.get("version"),
+        "flavour": flavour,
+        "detail": detail,
+        "can_install": flavour != "fork",
+    }
+
+
+def _bunko_engine_status() -> dict:
+    try:
+        from . import bunko_agent
+    except Exception:
+        return {
+            "available": False,
+            "installed": False,
+            "version": None,
+            "detail": "mokuro-bunko support is not part of this build yet",
+            "can_install": False,
+        }
+    try:
+        state = bunko_agent.load_state()
+        return {
+            "available": True,
+            "installed": state is not None,
+            "version": getattr(state, "commit", None) if state else None,
+            "detail": bunko_agent.status_line(state),
+            "can_install": True,
+        }
+    except Exception as error:
+        return {"available": True, "installed": False, "version": None, "detail": str(error), "can_install": True}
+
+
+def _engine_job_json(name: str) -> dict:
+    with _ENGINE_LOCK:
+        job = dict(_ENGINE_JOBS[name])
+    if job["state"] == "running":
+        job["elapsed_s"] = max(0, round(time.time() - job["started"], 1))
+    return job
+
+
+def _run_mokuro_install_job() -> None:
+    import contextlib
+    import io
+
+    buffer = io.StringIO()
+    code = 1
+    try:
+        from .cli import _run_install_mokuro
+
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+            code = _run_install_mokuro()
+    except Exception as error:
+        buffer.write(f"{type(error).__name__}: {error}\n")
+        code = 1
+    output = buffer.getvalue()
+    with _ENGINE_LOCK:
+        _ENGINE_JOBS["mokuro"].update(
+            state="done" if code == 0 else "error",
+            code=code,
+            output=output[-6000:],
+            finished=time.time(),
+        )
+
+
+def _run_bunko_install_job() -> None:
+    import contextlib
+    import io
+
+    buffer = io.StringIO()
+    code = 1
+    try:
+        from . import bunko_agent
+
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+            bunko_agent.setup(log=buffer.write)
+        code = 0
+    except Exception as error:
+        buffer.write(f"{type(error).__name__}: {error}\n")
+        code = 1
+    with _ENGINE_LOCK:
+        _ENGINE_JOBS["bunko"].update(
+            state="done" if code == 0 else "error",
+            code=code,
+            output=buffer.getvalue()[-6000:],
+            finished=time.time(),
+        )
+
+
+@router.get("/config/engines")
+async def read_engines() -> JSONResponse:
+    return JSONResponse(
+        {
+            "mokuro": await asyncio.to_thread(_mokuro_engine_status),
+            "bunko": await asyncio.to_thread(_bunko_engine_status),
+            "jobs": {
+                "mokuro": _engine_job_json("mokuro"),
+                "bunko": _engine_job_json("bunko"),
+            },
+        }
+    )
+
+
+def _start_engine_job(name: str, runner) -> None:
+    with _ENGINE_LOCK:
+        _ENGINE_JOBS[name].update(
+            state="running", code=None, output="", started=time.time(), finished=0.0
+        )
+    threading.Thread(target=runner, name=f"install-{name}", daemon=True).start()
+
+
+@router.post("/config/engines/mokuro/install")
+async def install_mokuro_engine(request: Request) -> JSONResponse:
+    _require_local_origin(request)
+    status = await asyncio.to_thread(_mokuro_engine_status)
+    if status.get("flavour") == "fork":
+        raise HTTPException(status_code=409, detail="the fast mokuro fork is already installed")
+    with _ENGINE_LOCK:
+        if _ENGINE_JOBS["mokuro"]["state"] == "running":
+            raise HTTPException(status_code=409, detail="a mokuro install is already running")
+    _start_engine_job("mokuro", _run_mokuro_install_job)
+    return JSONResponse({"ok": True, "state": "running"}, status_code=202)
+
+
+@router.post("/config/engines/bunko/install")
+async def install_bunko_engine(request: Request) -> JSONResponse:
+    _require_local_origin(request)
+    status = await asyncio.to_thread(_bunko_engine_status)
+    if not status.get("available"):
+        raise HTTPException(status_code=400, detail=status.get("detail") or "mokuro-bunko is not available")
+    with _ENGINE_LOCK:
+        if _ENGINE_JOBS["bunko"]["state"] == "running":
+            raise HTTPException(status_code=409, detail="a mokuro-bunko install is already running")
+    _start_engine_job("bunko", _run_bunko_install_job)
+    return JSONResponse({"ok": True, "state": "running"}, status_code=202)

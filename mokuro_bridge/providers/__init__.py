@@ -441,13 +441,22 @@ def forget_account(target: str) -> dict:
         notes.append("it was the default destination; the default was reset")
 
     if provider == "mega":
-        if email and email in siblings:
-            notes.append(f"{email} is still used by another MEGA account; its keychain item was kept")
-        elif email:
-            if _delete_mega_creds_keychain(email):
-                removed.append(f"keychain:mega.nz/{email}")
+        # A default account configured before the account files existed has no
+        # recorded email; the keychain itself is the only place to learn it.
+        target_email = email
+        if not target_email:
+            from ..creds import _keychain_mega_account
+
+            target_email = _keychain_mega_account() or ""
+        if target_email and target_email in siblings:
+            notes.append(f"{target_email} is still used by another MEGA account; its keychain item was kept")
+        elif target_email:
+            if _delete_mega_creds_keychain(target_email):
+                removed.append(f"keychain:mega.nz/{target_email}")
+            else:
+                notes.append(f"could not remove the keychain item for {target_email}")
         else:
-            notes.append("no account file records a MEGA email, so any keychain item was left alone")
+            notes.append("no MEGA email is recorded, so no keychain item could be identified")
     elif provider == "webdav" and name == accounts.DEFAULT_NAME:
         # Only the default account ever used the shared keychain item.
         removed += webdav.forget_default_keychain()

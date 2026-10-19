@@ -91,7 +91,17 @@ def _safe_volume_dir(value: object) -> Optional[Path]:
     return path
 
 
-def _persist_session(session: Session) -> bool:
+def _persist_session(session: Session, durable: bool = True) -> bool:
+    """Write the session state atomically; return False when the write failed.
+
+    ``durable=False`` skips the fsync. Page capture calls it that way: the state
+    file is a resumability hint, while the per-page OCR JSON written by the OCR
+    worker is the durable source of truth, and a resume reconciles against it
+    (``_sync_ocr_cache_state``). Fsyncing once per captured page on the event
+    loop was stealing hundreds of milliseconds from health and start requests
+    during a 50-volume run, which is exactly the stall this file is used on the
+    request path for. Session creation and finalize still fsync.
+    """
     path = _session_path(session.session_id)
     if path is None:
         return False
@@ -141,8 +151,9 @@ def _persist_session(session: Session) -> bool:
                 with os.fdopen(fd, "w", encoding="utf-8") as handle:
                     fd = -1
                     handle.write(json.dumps(data, ensure_ascii=False))
-                    handle.flush()
-                    os.fsync(handle.fileno())
+                    if durable:
+                        handle.flush()
+                        os.fsync(handle.fileno())
                 os.replace(temporary, path)
             finally:
                 if fd != -1:
