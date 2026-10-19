@@ -234,8 +234,10 @@
   .dot[data-state="off"] { background: #e5534b; }
   .dot[data-state="unknown"] { background: var(--muted); opacity: .5; }
   .ver strong.is-action { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
-  .gate-note { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
-  .gate-note .link { margin-left: 4px; font-size: 12px; }
+  .engine-alert { margin: 14px 0 0; padding: 11px 14px; border: 1px solid #d4a72c; border-radius: var(--radius); background: color-mix(in srgb, #d4a72c 13%, var(--panel)); display: flex; flex-direction: column; gap: 7px; font-size: 13px; }
+  .alert-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .alert-line > span:first-child { color: #b0801f; font-size: 15px; line-height: 1; }
+  .alert-line strong { font-weight: 600; }
   .dest-usage { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; margin-top: 8px; color: var(--muted); font-size: 12px; }
   .usage-bar { flex: 0 0 100%; display: flex; width: 100%; height: 7px; border-radius: 999px; overflow: hidden; background: var(--line); }
   .usage-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; }
@@ -476,7 +478,6 @@
           </dd>
         </div>
       </dl>
-      <p class="gate-note" id="ocr-gate" hidden></p>
       <div class="accel" id="accel" data-on="false">
         <span class="accel-dot" aria-hidden="true"></span>
         <span class="accel-name">Browser acceleration</span>
@@ -488,6 +489,8 @@
       </div>
     </section>
 
+    <div id="engine-alert" class="engine-alert" hidden></div>
+
     <div id="notices"></div>
 
     <section aria-labelledby="dest-heading">
@@ -495,7 +498,6 @@
         <div>
           <h2 id="dest-heading">Destinations</h2>
           <p class="lede">Finished volumes go to the one marked <strong>Default</strong>, unless a dokuha script names another.</p>
-          <p class="gate-note" id="upload-gate" hidden></p>
         </div>
         <div class="spacer"></div>
         <button class="btn primary" id="add-destination" type="button">Add destination</button>
@@ -1320,22 +1322,18 @@ function mokuroReady() {
 }
 
 function renderGates() {
-  const ocr = $("ocr-gate");
-  if (ocr) {
-    ocr.hidden = mokuroReady();
-    if (!mokuroReady()) {
-      ocr.innerHTML = `OCR paused until mokuro is installed. <button class="link" type="button" data-gate="mokuro">Install mokuro</button>`;
-    }
+  const host = $("engine-alert");
+  if (!host) return;
+  const missing = [];
+  if (!mokuroReady()) {
+    missing.push(`<div class="alert-line"><span aria-hidden="true">⚠</span><span><strong>OCR is paused</strong> until mokuro is installed.</span><button class="link" type="button" data-gate="mokuro">Install mokuro</button></div>`);
   }
-  const upload = $("upload-gate");
-  if (upload) {
-    const paused = Boolean(state.engines) && !enginesReady();
-    upload.hidden = !paused;
-    if (paused) {
-      upload.innerHTML = `Cloud uploads paused until mokuro-bunko is installed. <button class="link" type="button" data-gate="bunko">Set up mokuro-bunko</button>`;
-    }
+  if (state.engines && !enginesReady()) {
+    missing.push(`<div class="alert-line"><span aria-hidden="true">⚠</span><span><strong>Cloud uploads are paused</strong> until mokuro-bunko is installed.</span><button class="link" type="button" data-gate="bunko">Install mokuro-bunko</button></div>`);
   }
-  document.querySelectorAll("[data-gate]").forEach((button) => {
+  host.hidden = missing.length === 0;
+  host.innerHTML = missing.join("");
+  host.querySelectorAll("[data-gate]").forEach((button) => {
     button.onclick = () => {
       const section = document.getElementById("engines-heading");
       if (section) section.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -2713,7 +2711,7 @@ function renderEngines() {
   const button = $("install-mokuro");
   if (mokuro.installed) {
     detail.textContent = `Installed${mokuro.version ? " (mokuro " + mokuro.version + ")" : ""} · ${mokuro.detail || mokuro.flavour}.`;
-    stateLine.textContent = mokuro.flavour === "fork" ? "Fast engine ready" : "Installed";
+    stateLine.textContent = "Ready";
     if (mokuroJob.state === "done") {
       detail.textContent += " Loaded automatically; new volumes use it right away.";
       stateLine.textContent = "Ready";
@@ -2726,7 +2724,7 @@ function renderEngines() {
       uninstall.innerHTML = state.busyMokuroUninstall ? `<span class="spinner"></span> Uninstalling…` : "Uninstall mokuro";
     }
   } else {
-    detail.textContent = "Not installed. Reading pages needs mokuro; the bridge still packages and files volumes without it.";
+    detail.textContent = "Not installed. Reading pages needs mokuro; packaging and filing still work.";
     stateLine.textContent = "Not installed";
     button.hidden = false;
     button.disabled = mokuroJob.state === "running";
@@ -2751,9 +2749,9 @@ function renderEngines() {
   if (bunko.available) {
     const ready = remoteDestinationReady();
     $("engine-bunko-detail").textContent = bunko.installed
-      ? (bunko.detail || "Connected.")
-      : (ready ? (bunko.detail || "Available.") : "Add a cloud destination first; Bunko reads the folder the bridge uploads to.");
-    $("engine-bunko-state").textContent = bunko.installed ? "Installed" : (ready ? "Available" : "Needs a destination");
+      ? "Installed and following the default destination."
+      : (ready ? "Not installed. Uploads and the library index need mokuro-bunko." : "Add a cloud destination first; mokuro-bunko reads the folder the bridge uploads to.");
+    $("engine-bunko-state").textContent = bunko.installed ? "Ready" : "Not installed";
     const canInstall = bunko.can_install !== false;
     const prereqOk = !bunko.prerequisites || Object.values(bunko.prerequisites).every(Boolean);
     bunkoButton.disabled = bunko.installed || bunkoJob.state === "running" || !ready || !prereqOk;
