@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **mokuro-bunko can own the destination's metadata.** `mokuro-bridge --setup-bunko` builds the newest commit of Bunko's `0.8/remote-storage` development branch (server-only, no OCR engines), writes a cloud-library config for the bridge's upload account, signs in through Bunko's loopback control API, and starts it. Finalize then skips reading, merging and uploading `series.json` for that destination, uploads the `.mokuro` before the `.cbz` so Bunko never queues OCR for a pre-OCR'd volume, and reports a `series_json` frame with `external: true`. Marker detection is fail-open, so a destination without Bunko keeps the old behaviour. `--update-bunko`, `--bunko-status`, `--bunko-logs` and `--stop-bunko` manage the instance; `MOKURO_BUNKO_REF`, `MOKURO_BUNKO_BIN` and `MOKURO_BUNKO_OFFLINE` cover pinned, prebuilt and air-gapped installs. See [docs/bunko.md](docs/bunko.md).
+- **A `.mokuro-bunko.json` marker probe and a `Provider.metadata_owner` capability.** The bridge understands the marker the reader also uses (fresh active state, `compiles` listing `series.json`, heartbeat inside `ttl_s + 5 min`), and a WebDAV/Bunko destination can declare metadata ownership explicitly through the account's `series_owner` setting.
+
 ## v0.10.0
 
 ### Added

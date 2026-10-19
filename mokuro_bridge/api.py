@@ -78,6 +78,7 @@ from .providers import (
     method_label,
     method_provider,
     method_root,
+    metadata_is_external,
     remote_file_exists,
     resolve_upload_method,
     upload_file,
@@ -2524,6 +2525,10 @@ async def session_finalize(
                 all_success = upload_results[0]["success"]
 
             if method != "local":
+                # A mokuro-bunko destination compiles series.json itself, so
+                # this finalize must not touch the manifest. The flag is also
+                # what selects the sidecar-first upload order below.
+                external_metadata = metadata_is_external(method)
                 _set_activity("uploading", f"{target_label} → {remote_dir}", session_id)
                 # Announce every file that will upload (with its size) before
                 # any bytes flow, so clients can pre-size the overall progress
@@ -2533,12 +2538,21 @@ async def session_finalize(
                 # Cover .webp first: it is tiny, so it completes almost instantly,
                 # giving clients immediate visible progress and a usable file
                 # URL (and failing fast on a broken destination) before the big
-                # .cbz/.mokuro transfers start.
-                file_plan = [
-                    {"file": f"{file_base}.webp", "total_bytes": titled_cover.stat().st_size},
-                    {"file": f"{file_base}.cbz", "total_bytes": titled_cbz.stat().st_size},
-                    {"file": f"{file_base}.mokuro", "total_bytes": titled_mokuro.stat().st_size},
-                ]
+                # .cbz/.mokuro transfers start. A bunko destination gets the
+                # .mokuro before the .cbz so its OCR debt never sees an archive
+                # without a sidecar.
+                if external_metadata:
+                    file_plan = [
+                        {"file": f"{file_base}.webp", "total_bytes": titled_cover.stat().st_size},
+                        {"file": f"{file_base}.mokuro", "total_bytes": titled_mokuro.stat().st_size},
+                        {"file": f"{file_base}.cbz", "total_bytes": titled_cbz.stat().st_size},
+                    ]
+                else:
+                    file_plan = [
+                        {"file": f"{file_base}.webp", "total_bytes": titled_cover.stat().st_size},
+                        {"file": f"{file_base}.cbz", "total_bytes": titled_cbz.stat().st_size},
+                        {"file": f"{file_base}.mokuro", "total_bytes": titled_mokuro.stat().st_size},
+                    ]
                 yield ndjson(
                     "upload",
                     f"Uploading to {target_label}… ({series_dir_name}/)",
@@ -2652,11 +2666,18 @@ async def session_finalize(
 
                 def _upload_batch():
                     results = []
-                    items = [
-                        (titled_cover, f"{file_base}.webp"),
-                        (titled_cbz, f"{file_base}.cbz"),
-                        (titled_mokuro, f"{file_base}.mokuro"),
-                    ]
+                    if external_metadata:
+                        items = [
+                            (titled_cover, f"{file_base}.webp"),
+                            (titled_mokuro, f"{file_base}.mokuro"),
+                            (titled_cbz, f"{file_base}.cbz"),
+                        ]
+                    else:
+                        items = [
+                            (titled_cover, f"{file_base}.webp"),
+                            (titled_cbz, f"{file_base}.cbz"),
+                            (titled_mokuro, f"{file_base}.mokuro"),
+                        ]
                     # The cover may already have been pushed early via
                     # POST /session/{id}/cover — don't upload it again.
                     cover_pre = None
@@ -2808,9 +2829,28 @@ async def session_finalize(
 
                 all_success = all(r["success"] for r in upload_results)
 
-                # Published only once its volume is there. A failure here fails
-                # the finalize: a folder with no index is the bug being fixed.
-                if all_success:
+                if all_success and external_metadata:
+                    # The destination compiles the manifest itself. Report it
+                    # as a success so clients keep the same stage sequence, but
+                    # do not read, merge or upload the file here.
+                    _log.info(
+                        "upload",
+                        f"{session.safe_title}: {SERIES_FILE_NAME} is compiled by mokuro-bunko",
+                    )
+                    yield ndjson(
+                        "series_json",
+                        f"{SERIES_FILE_NAME} is compiled by mokuro-bunko",
+                        ok=True,
+                        external=True,
+                        managed_by="mokuro-bunko",
+                        file=SERIES_FILE_NAME,
+                        remote_path=remote_dir,
+                    )
+                    await asyncio.sleep(0)
+
+                if all_success and not external_metadata:
+                    # Published only once its volume is there. A failure here fails
+                    # the finalize: a folder with no index is the bug being fixed.
                     yield ndjson(
                         "series_json",
                         f"Updating {SERIES_FILE_NAME}…",

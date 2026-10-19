@@ -38,6 +38,12 @@ Accounts are added and managed in the page: MEGA with an email and password, Goo
 
 For a service running in the background, `mokuro-bridge --status` draws the same picture in a terminal: destinations with the default starred, the OCR queue, the pipeline and worker, the proxy ports, a live upload progress bar when one is active, and `?` for help. Keys are `r` refresh, `c` dashboard address, `?` help, `q` quit. Piped output is one full-height frame with no escape sequences, so `mokuro-bridge --status | head -30` is a snapshot you can paste into an issue.
 
+## mokuro-bunko next to the bridge
+
+`mokuro-bridge --setup-bunko` installs [mokuro-bunko](https://github.com/Gnathonic/mokuro-bunko), signs it in to the same cloud account the bridge uploads to, and runs it beside the bridge. Bunko compiles `series.json` and `catalog.json` in the cloud folder itself, so the bridge stops writing `series.json` for that destination, and it uploads the `.mokuro` before the `.cbz` so Bunko never queues OCR for a volume the bridge already read.
+
+The installer follows the newest commit of Bunko's `0.8/remote-storage` development branch, since remote storage is not released yet. The first run builds the server-only binary from source with cargo and takes several minutes; later installs reuse it, and `--update-bunko` moves an existing install to a newer commit. `MOKURO_BUNKO_REF` pins a commit when reproducibility matters, `MOKURO_BUNKO_BIN` uses an existing binary, and MEGA and WebDAV sign-in are automatic. Google Drive and OneDrive sign-in run through Bunko's own browser or code flow. See [docs/bunko.md](docs/bunko.md).
+
 ## Key advantages
 
 - **Store-agnostic.** The bridge knows nothing about any store, so a storefront redesign cannot break OCR or delivery.
@@ -113,6 +119,7 @@ When a newer release exists the service logs one line about it at startup, and `
 | [docs/dashboard.md](docs/dashboard.md) | The web dashboard, browser account setup, aliases, settings precedence, the terminal status display and the origin gate |
 | [docs/browser-acceleration.md](docs/browser-acceleration.md) | The fetch-proxy ports, the browser connection limits behind them, and when to change the port count |
 | [docs/series-json.md](docs/series-json.md) | The `series.json` sidecar: its format, why the uploader writes it, and the pin on upstream |
+| [docs/bunko.md](docs/bunko.md) | Installing, signing in and running mokuro-bunko beside the bridge so it owns the metadata |
 | [docs/endpoints.md](docs/endpoints.md) | Every HTTP route: method, path, form fields, response shape, error codes and test coverage |
 | [docs/destinations.md](docs/destinations.md) | Upload targets, named accounts, credential stores and the sticky default |
 | [docs/clients.md](docs/clients.md) | How dokuha-cli and dokuha-userscript drive the bridge, with the exact request sequence |

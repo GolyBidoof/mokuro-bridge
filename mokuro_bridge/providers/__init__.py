@@ -3,11 +3,12 @@ import json
 import os
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from .. import accounts
+from .. import accounts, bunko
 from ..accounts import DEFAULT_NAME
 from ..config import (
     WORK_DIR,
@@ -58,6 +59,7 @@ __all__ = [
     "remote_file_exists",
     "download_file",
     "list_remote_folders",
+    "metadata_is_external",
     "safe_provider_error",
     "safe_provider_url",
     "forget_account",
@@ -414,6 +416,72 @@ def download_file(method: str, remote_dir: str, filename: str) -> Optional[bytes
     if provider is None:
         raise ValueError(f"unknown upload provider: {instance.provider}")
     return provider.download(instance.name, remote_dir, filename)
+
+
+# Whether another program compiles series.json for a target changes once per
+# setup, not once per volume, so a probe result is cached briefly. The cache is
+# process-wide; a new bunko is picked up after the window, and a stopped one
+# keeps the skip for at most the same window.
+_METADATA_OWNER_CACHE_SECONDS = 120.0
+_metadata_owner_cache: dict[tuple[str, str], tuple[float, bool]] = {}
+_metadata_owner_lock = threading.Lock()
+
+_EXTERNAL_OWNER_VALUES = {"bunko", "external", "true", "yes", "on", "1"}
+_BRIDGE_OWNER_VALUES = {"bridge", "own", "false", "no", "off", "0"}
+
+
+def metadata_is_external(method: str) -> bool:
+    """Whether ``method``'s destination compiles ``series.json`` itself.
+
+    True means the caller must not read, merge or upload the manifest: the
+    destination (mokuro-bunko) owns it. Resolution order:
+
+    1. The account's non-secret ``series_owner`` setting, so a bunko 0.7 server
+       behind a proxy can be declared without probing.
+    2. The provider's own ``metadata_owner`` hook, used by WebDAV to combine
+       the cloud marker with the 0.7 ``/api/health`` fingerprint.
+    3. The generic ``.mokuro-bunko.json`` marker probe every provider supports,
+       because ``download`` and ``root`` already abstract the storage.
+
+    Any probe error is False: writing the manifest is always the safe fallback.
+    """
+    if method == _LOCAL_ID:
+        return False
+    try:
+        instance = instance_for(method)
+    except ValueError:
+        return False
+    if instance is None:
+        return False
+    override = str(instance.extra.get("series_owner", "") or "").strip().lower()
+    if override in _EXTERNAL_OWNER_VALUES:
+        return True
+    if override in _BRIDGE_OWNER_VALUES:
+        return False
+    provider = _PROVIDERS.get(instance.provider)
+    if provider is None:
+        return False
+    try:
+        root = provider.root(instance.name)
+    except Exception:
+        return False
+    key = (method, root)
+    now = time.monotonic()
+    with _metadata_owner_lock:
+        cached = _metadata_owner_cache.get(key)
+        if cached is not None and now - cached[0] < _METADATA_OWNER_CACHE_SECONDS:
+            return cached[1]
+    try:
+        if provider.metadata_owner is not None:
+            value = bool(provider.metadata_owner(instance.name))
+        else:
+            value = bunko.probe_marker(provider.download, instance.name, root)
+    except Exception:
+        value = False
+    with _metadata_owner_lock:
+        _metadata_owner_cache[key] = (now, bool(value))
+    return bool(value)
+
 
 def forget_account(target: str) -> dict:
     """Remove one account: metadata, its secret files, and its keychain item.
