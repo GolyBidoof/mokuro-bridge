@@ -1309,7 +1309,10 @@ function renderVersions() {
 
 function enginesReady() {
   const bunko = state.engines && state.engines.bunko;
-  return Boolean(bunko && bunko.installed);
+  // Lock only on a definitive "not installed" answer. Unknown or unsupported
+  // must never leave connected cards stuck on "Uploads locked".
+  if (!bunko || bunko.available === false) return true;
+  return bunko.installed !== false;
 }
 
 function mokuroReady() {
@@ -2758,6 +2761,7 @@ async function loadEngines() {
     renderEngines();
     renderGates();
     renderVersions();
+    if (state.config) renderDestinations();
     const running = ["mokuro", "bunko"].some((name) => engineJob(name).state === "running");
     if (running) startEnginePoll();
   } catch (error) {
