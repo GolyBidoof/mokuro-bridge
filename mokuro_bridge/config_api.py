@@ -58,6 +58,9 @@ from .providers import webdav as webdav_provider
 router = APIRouter()
 DASHBOARD_HTML = Path(__file__).with_name("web") / "dashboard.html"
 _ENGINE_LOCK = threading.Lock()
+# A default change that lands while a Bunko sync is running is remembered and
+# followed as soon as that sync finishes, instead of being dropped.
+_BUNKO_PENDING = {"method": ""}
 _ENGINE_JOBS: dict[str, dict] = {
     "mokuro": {"state": "idle", "code": None, "output": "", "started": 0.0, "finished": 0.0},
     "bunko": {"state": "idle", "code": None, "output": "", "started": 0.0, "finished": 0.0},
@@ -610,6 +613,7 @@ async def save_default(request: Request, method: str = Form(...)) -> JSONRespons
     if resolved != _LOCAL_ID and (await asyncio.to_thread(_build_upload_methods)).get(resolved) is None:
         raise HTTPException(status_code=404, detail=f"unknown destination: {method}")
     await asyncio.to_thread(_remember_upload_method, resolved)
+    _start_bunko_sync(resolved)
     if resolved != _LOCAL_ID and (
         await asyncio.to_thread(_default_upload_method)
     ) != resolved:
@@ -962,6 +966,105 @@ async def add_webdav_account(
 
 
 # --- adding an account: rclone (a remote from rclone's own config) ---------
+
+def _run_bunko_sync_job(method: str) -> None:
+    import contextlib
+    import io
+
+    def stream(message: str) -> None:
+        line = str(message).rstrip()
+        if not line:
+            return
+        with _ENGINE_LOCK:
+            current = _ENGINE_JOBS["bunko"].get("output", "")
+            _ENGINE_JOBS["bunko"]["output"] = (current + "\n" + line)[-6000:]
+
+    buffer = io.StringIO()
+    code = 1
+    try:
+        from . import bunko_agent
+
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+            bunko_agent.repoint(method, log=stream)
+        code = 0
+    except Exception as error:
+        stream(f"{type(error).__name__}: {error}")
+        code = 1
+    finally:
+        tail = buffer.getvalue().strip()
+        if tail:
+            stream(tail)
+        with _ENGINE_LOCK:
+            _ENGINE_JOBS["bunko"].update(
+                state="done" if code == 0 else "error",
+                code=code,
+                finished=time.time(),
+            )
+            pending = _BUNKO_PENDING["method"]
+            _BUNKO_PENDING["method"] = ""
+        if code == 0:
+            # Follow a default that changed while this sync was running.
+            _start_bunko_sync(pending or None)
+
+
+def _start_bunko_sync(method: Optional[str] = None) -> bool:
+    """Follow a destination change automatically, in the background."""
+    from . import bunko_agent
+
+    try:
+        info = bunko_agent.sync_info()
+    except Exception:
+        return False
+    if not info.get("installed") or info.get("in_sync"):
+        return False
+    target = str(method or info.get("default_method") or "")
+    if target in ("", "local"):
+        return False
+    with _ENGINE_LOCK:
+        if _ENGINE_JOBS["bunko"]["state"] == "running":
+            _BUNKO_PENDING["method"] = target
+            return False
+        _ENGINE_JOBS["bunko"].update(
+            state="running", code=None, output="", started=time.time(), finished=0.0
+        )
+    threading.Thread(
+        target=_run_bunko_sync_job, args=(target,), name="bunko-auto-sync", daemon=True
+    ).start()
+    return True
+
+
+@router.post("/config/bunko/sync")
+async def sync_bunko(request: Request) -> JSONResponse:
+    """Re-point the running Bunko library at the bridge's current default."""
+    _require_local_origin(request)
+    from . import bunko_agent
+
+    info = await asyncio.to_thread(bunko_agent.sync_info)
+    if not info.get("installed"):
+        raise HTTPException(status_code=400, detail="set up mokuro-bunko first")
+    if info.get("default_method") in ("", "local"):
+        raise HTTPException(status_code=400, detail="make a cloud destination the default first")
+    if info.get("in_sync"):
+        raise HTTPException(status_code=409, detail="mokuro-bunko already follows the default destination")
+    with _ENGINE_LOCK:
+        if _ENGINE_JOBS["bunko"]["state"] == "running":
+            raise HTTPException(status_code=409, detail="a mokuro-bunko job is already running")
+        _ENGINE_JOBS["bunko"].update(
+            state="running", code=None, output="", started=time.time(), finished=0.0
+        )
+    threading.Thread(
+        target=_run_bunko_sync_job, args=(info["default_method"],), name="bunko-sync", daemon=True
+    ).start()
+    return JSONResponse(
+        {
+            "ok": True,
+            "state": "running",
+            "method": info["default_method"],
+            "needs_sign_in": info.get("needs_sign_in", False),
+        },
+        status_code=202,
+    )
+
 
 _RCLONE_LIBS_HINT = (
     "rclone destinations need the rclone command-line tool. Install it with "
@@ -1495,6 +1598,7 @@ def _bunko_engine_status() -> dict:
             "can_install": can_install,
             "method": method,
             "prerequisites": prerequisites,
+            "sync": bunko_agent.sync_info(),
         }
     except Exception as error:
         return {"available": True, "installed": False, "version": None, "detail": str(error), "can_install": True}
@@ -1576,6 +1680,78 @@ def _start_engine_job(name: str, runner, *args) -> None:
             state="running", code=None, output="", started=time.time(), finished=0.0
         )
     threading.Thread(target=runner, args=args, name=f"install-{name}", daemon=True).start()
+
+
+@router.post("/config/update/check")
+async def check_bridge_update(request: Request) -> JSONResponse:
+    """Force a fresh release check and return the same fields /health shows."""
+    _require_local_origin(request)
+    from . import update
+
+    result = await asyncio.to_thread(update.refresh, force=True)
+    return JSONResponse({"ok": True, **result})
+
+
+@router.post("/config/engines/mokuro/uninstall")
+async def uninstall_mokuro_engine(request: Request) -> JSONResponse:
+    """Remove the OCR engine from this interpreter and unload it."""
+    _require_local_origin(request)
+    import contextlib
+    import io
+    import sys as _sys
+
+    from . import api as api_module
+    from . import ocr
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+        result = await asyncio.to_thread(
+            lambda: __import__("subprocess").run(
+                [_sys.executable, "-m", "pip", "uninstall", "-y", "mokuro"],
+                capture_output=True, text=True,
+            )
+        )
+        buffer.write(result.stdout or "")
+        buffer.write(result.stderr or "")
+        await asyncio.to_thread(ocr.reload_engine)
+    api_module._mokuro_pkg = ocr._mokuro_pkg
+    api_module._MOKURO_REPO = ocr._MOKURO_REPO
+    return JSONResponse(
+        {"ok": result.returncode == 0, "output": buffer.getvalue()[-2000:]}
+    )
+
+
+@router.post("/config/engines/bunko/uninstall")
+async def uninstall_bunko_engine(request: Request) -> JSONResponse:
+    """Stop Bunko and delete its binary, source, config and state."""
+    _require_local_origin(request)
+    from . import bunko_agent
+
+    buffer: list[str] = []
+    removed = await asyncio.to_thread(bunko_agent.uninstall, log=buffer.append)
+    with _ENGINE_LOCK:
+        _ENGINE_JOBS["bunko"].update(
+            state="idle", code=None, output="\n".join(buffer)[-2000:], started=0.0, finished=time.time()
+        )
+    return JSONResponse({"ok": True, "removed": removed, "output": "\n".join(buffer)[-2000:]})
+
+
+@router.post("/config/engines/mokuro/reload")
+async def reload_mokuro_engine(request: Request) -> JSONResponse:
+    """Load a freshly installed engine into the running bridge."""
+    _require_local_origin(request)
+    from . import api as api_module
+    from . import ocr
+
+    info = await asyncio.to_thread(ocr.reload_engine)
+    api_module._mokuro_pkg = ocr._mokuro_pkg
+    api_module._MOKURO_REPO = ocr._MOKURO_REPO
+    if not info.get("installed"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"the engine is installed but could not be imported: {info.get('error', 'unknown error')}",
+        )
+    return JSONResponse({"ok": True, **info})
 
 
 @router.post("/config/engines/mokuro/install")
@@ -1689,7 +1865,8 @@ def _rclone_save_account(
                 "exists and this user can write to it."
             ),
         ) from error
-    _promote_default_if_local(instance.id)
+    if _promote_default_if_local(instance.id):
+        _start_bunko_sync(instance.id)
     # Start the shared gateway now so the first upload does not pay for it.
     try:
         from . import rclone_gateway

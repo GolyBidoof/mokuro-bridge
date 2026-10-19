@@ -215,6 +215,16 @@
   .rclone-service.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
   .rclone-service span { color: var(--muted); font-size: 12px; }
   .rclone-auth { margin-top: 10px; }
+  .btn.big { padding: 11px 18px; font-size: 14px; }
+  .versions-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .ver { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+  .ver-name { color: var(--muted); font-size: 12px; }
+  .ver strong { font-size: 15px; }
+  .ver-note { color: var(--muted); font-size: 12px; }
+  .ver .pill { font-size: 11px; color: var(--muted); }
+  .ver .pill a { color: var(--accent); }
+  .gate-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin: 0 0 14px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+  .gate-banner strong { color: var(--text); }
   .dest-usage { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; margin-top: 8px; color: var(--muted); font-size: 12px; }
   .dest-usage strong { color: var(--text); font-weight: 600; }
   .dest-usage .usage-text.muted { opacity: 0.85; }
@@ -459,6 +469,8 @@
 
     <div id="notices"></div>
 
+    <div id="engine-gates"></div>
+
     <section aria-labelledby="dest-heading">
       <div class="section-head">
         <div>
@@ -479,27 +491,34 @@
           <p class="lede">Optional. The bridge works without one, but reading pages needs mokuro. The faster GolyBidoof build can be installed here; no terminal needed.</p>
         </div>
       </div>
+      <div class="versions-strip" aria-label="Installed versions">
+        <div class="ver"><span class="ver-name">mokuro-bridge</span><strong id="ver-bridge">—</strong><span class="pill" id="ver-bridge-state">checking…</span><button class="link" type="button" id="check-update">Check now</button></div>
+        <div class="ver"><span class="ver-name">mokuro</span><strong id="ver-mokuro">—</strong><span class="ver-note" id="ver-mokuro-note"></span></div>
+        <div class="ver"><span class="ver-name">mokuro-bunko</span><strong id="ver-bunko">—</strong><span class="ver-note" id="ver-bunko-note"></span></div>
+      </div>
       <div class="prefs-panel engine-panel">
         <div class="engine-row">
           <div>
-            <div class="pref-label">mokuro</div>
+            <div class="pref-label">mokuro <a class="inline-link" href="https://github.com/GolyBidoof/mokuro" target="_blank" rel="noopener">GitHub ↗</a></div>
             <p class="pref-help" id="engine-mokuro-detail">Checking the installed engine…</p>
             <div class="pref-meta"><span class="prov" id="engine-mokuro-state">—</span></div>
           </div>
           <div class="engine-actions">
-            <button class="btn primary" id="install-mokuro" type="button">Install fast mokuro</button>
+            <button class="btn primary big" id="install-mokuro" type="button">Install mokuro</button>
+            <button class="btn danger big" id="uninstall-mokuro" type="button" hidden>Uninstall mokuro</button>
           </div>
           <pre class="engine-log" id="engine-mokuro-log" hidden></pre>
         </div>
         <div class="engine-row">
           <div>
-            <div class="pref-label">mokuro-bunko</div>
+            <div class="pref-label">mokuro-bunko <a class="inline-link" href="https://github.com/Gnathonic/mokuro-bunko" target="_blank" rel="noopener">GitHub ↗</a></div>
             <p class="pref-help" id="engine-bunko-detail">Checking whether this build supports it…</p>
             <div class="pref-meta"><span class="prov" id="engine-bunko-state">—</span></div>
           </div>
           <div class="engine-actions">
             <div class="engine-actions">
-              <button class="btn" id="install-bunko" type="button" disabled>Not available</button>
+              <button class="btn big" id="install-bunko" type="button" disabled>Not available</button>
+              <button class="btn danger big" id="uninstall-bunko" type="button" hidden>Uninstall mokuro-bunko</button>
             </div>
             <details class="engine-field" id="engine-bunko-totp-row" hidden>
               <summary>MEGA two-factor code</summary>
@@ -1188,6 +1207,86 @@ function setupHintFor(provider) {
   return providerDescriptor(provider).setupHint;
 }
 
+function renderVersions() {
+  const h = state.health || {};
+  const bridge = $("ver-bridge");
+  if (bridge) bridge.textContent = h.version ? `v${h.version}` : "unknown";
+  const bridgeState = $("ver-bridge-state");
+  if (bridgeState) {
+    if (h.update_error) {
+      bridgeState.textContent = "check failed";
+      bridgeState.title = String(h.update_error);
+    } else if (h.update_available && h.latest_version) {
+      bridgeState.innerHTML = `<a class="inline-link" href="${esc(h.update_url || "#")}" target="_blank" rel="noopener">v${esc(h.latest_version)} available ↗</a>`;
+    } else if (h.latest_version) {
+      bridgeState.textContent = "up to date";
+    } else {
+      bridgeState.textContent = "not checked yet";
+    }
+  }
+  const mokuro = $("ver-mokuro");
+  if (mokuro) {
+    const installed = h.mokuro_installed !== false;
+    mokuro.textContent = installed && h.mokuro_version ? `v${h.mokuro_version}` : "not installed";
+    const note = $("ver-mokuro-note");
+    if (note) note.textContent = installed
+      ? (h.mokuro_flavor === "fork" ? "GolyBidoof fork" : h.mokuro_flavor === "upstream" ? "upstream build" : (h.mokuro_flavor || "installed"))
+      : "";
+  }
+  const bunko = $("ver-bunko");
+  const bunkoNote = $("ver-bunko-note");
+  const info = state.engines && state.engines.bunko;
+  if (bunko) {
+    if (!info) {
+      bunko.textContent = "—";
+      if (bunkoNote) bunkoNote.textContent = "";
+    } else if (!info.installed) {
+      bunko.textContent = "not installed";
+      if (bunkoNote) bunkoNote.textContent = "";
+    } else {
+      const short = String(info.version || "").slice(0, 8);
+      bunko.textContent = short ? short : "installed";
+      const sync = info.sync || {};
+      if (bunkoNote) {
+        bunkoNote.textContent = sync.running
+          ? `following ${sync.configured_method || "the default"}`
+          : (sync.configured_method ? `library on ${sync.configured_method}` : "installed");
+      }
+    }
+  }
+}
+
+function enginesReady() {
+  const bunko = state.engines && state.engines.bunko;
+  return Boolean(bunko && bunko.installed);
+}
+
+function mokuroReady() {
+  const h = state.health || {};
+  return h.mokuro_installed !== false;
+}
+
+function renderGates() {
+  const host = $("engine-gates");
+  if (!host) return;
+  const notes = [];
+  if (!mokuroReady()) {
+    notes.push(`<div class="gate-banner"><span><strong>OCR is paused.</strong> Install mokuro to read pages.</span><button class="btn primary big" type="button" data-gate="mokuro">Install mokuro</button></div>`);
+  }
+  if (state.engines && !enginesReady()) {
+    notes.push(`<div class="gate-banner"><span><strong>Cloud uploads are paused.</strong> Install mokuro-bunko to upload and index finished volumes.</span><button class="btn primary big" type="button" data-gate="bunko">Set up mokuro-bunko</button></div>`);
+  }
+  host.innerHTML = notes.join("");
+  host.querySelectorAll("[data-gate]").forEach((button) => {
+    button.onclick = () => {
+      const section = document.getElementById("engines-heading");
+      if (section) section.scrollIntoView({ behavior: "smooth", block: "center" });
+      const target = button.dataset.gate === "bunko" ? $("install-bunko") : $("install-mokuro");
+      if (target && !target.hidden) target.focus();
+    };
+  });
+}
+
 function renderDestinations() {
   const config = state.config;
   if (!config) return;
@@ -1206,9 +1305,12 @@ function renderDestinations() {
     const folder = tidyFolder(m.root || m.current_folder);
     const isLocal = provider === "local";
     const folderLine = folder || (isLocal ? state.config.output_dir : "");
-    const primary = st === "connected"
-      ? `<button class="btn small" type="button" data-choose="${esc(alias)}">Change folder</button>`
-      : `<button class="btn small primary" type="button" data-reconnect="${esc(alias)}">${st === "needs_sign_in" ? "Reconnect" : "Connect"}</button>`;
+    const uploadLocked = !isLocal && st === "connected" && !enginesReady();
+    const primary = uploadLocked
+      ? `<span class="btn small" aria-disabled="true">Uploads locked</span>`
+      : st === "connected"
+        ? `<button class="btn small" type="button" data-choose="${esc(alias)}">Change folder</button>`
+        : `<button class="btn small primary" type="button" data-reconnect="${esc(alias)}">${st === "needs_sign_in" ? "Reconnect" : "Connect"}</button>`;
     const defaultAction = m.default
       ? `<span class="default-mark">${icon("star")} Default</span>`
       : st === "connected"
@@ -1230,6 +1332,7 @@ function renderDestinations() {
       </div>
       <div class="dest-folder"><span class="k">Folder</span><code title="${esc(folderLine)}">${esc(folderLine || "not chosen yet")}</code>${!isLocal && PROVIDER_LINKS[provider] ? `<a class="folder-open" href="${esc(PROVIDER_LINKS[provider].web)}" target="_blank" rel="noopener" title="${esc(PROVIDER_LINKS[provider].webLabel)}" aria-label="${esc(PROVIDER_LINKS[provider].webLabel)}">${icon("external")}</a>` : ""}</div>
       ${st !== "connected" ? `<p class="dest-note">${esc(STATE_NOTE[st] || "")}</p>` : ""}
+      ${uploadLocked ? `<p class="dest-note">Install mokuro-bunko to resume uploads.</p>` : ""}
       ${st === "connected" && m.provider === "rclone" ? `<div class="dest-usage" data-usage="${esc(alias)}"><span class="usage-text">Checking space…</span></div>` : ""}
       <div class="dest-actions">${primary}${defaultAction}</div>
       <div class="dest-links">${links.join("<span aria-hidden=\"true\">·</span>")}</div>
@@ -1256,6 +1359,7 @@ function renderDestinations() {
     };
   });
   $("destinations").querySelectorAll("[data-usage]").forEach((host) => loadUsage(host.dataset.usage));
+  renderGates();
 }
 
 function formatBytes(value) {
@@ -1474,6 +1578,7 @@ async function loadHealth() {
   if (gen !== healthGen) return;
   state.health = health;
   state.reaching = false;
+  renderVersions();
   renderLive();
 }
 
@@ -2452,6 +2557,34 @@ function bindDialogPlumbing() {
   $("open-wizard").onclick = () => openWizard(true);
   $("install-mokuro").onclick = () => installEngine("mokuro");
   $("install-bunko").onclick = () => installEngine("bunko", { totp: (document.getElementById("engine-bunko-totp") || {}).value || "" });
+  $("check-update").onclick = async () => {
+    try {
+      await postForm("/config/update/check", {});
+      await loadHealth();
+      toast(state.health && state.health.update_available
+        ? `mokuro-bridge ${state.health.latest_version} is available.`
+        : "mokuro-bridge is up to date.", "info");
+    } catch (error) { toast(error.message, "bad"); }
+  };
+  $("uninstall-mokuro").onclick = async () => {
+    if (!window.confirm("Uninstall mokuro? OCR pauses until it is installed again.")) return;
+    try {
+      const result = await postForm("/config/engines/mokuro/uninstall", {});
+      toast(result.ok ? "mokuro uninstalled." : "The uninstall did not finish; see the log.", result.ok ? "info" : "bad");
+      await loadEngines();
+      await loadHealth();
+    } catch (error) { toast(error.message, "bad"); }
+  };
+  $("uninstall-bunko").onclick = async () => {
+    if (!window.confirm("Uninstall mokuro-bunko? Cloud uploads pause until it is installed again.")) return;
+    try {
+      const result = await postForm("/config/engines/bunko/uninstall", {});
+      toast(result.removed ? "mokuro-bunko uninstalled." : "Nothing was installed to remove.", "info");
+      await loadEngines();
+      await loadHealth();
+    } catch (error) { toast(error.message, "bad"); }
+  };
+
   $("wizard-next").onclick = () => { wizard.step = 1; wizard.branch = null; renderWizard(); };
   $("wizard-back").onclick = () => { if (wizard.step > 0) { wizard.step -= 1; wizard.branch = null; renderWizard(); } };
   $("wizard-skip").onclick = () => { closeWizard(); toast("You can reopen the setup guide from the footer.", "info"); };
@@ -2504,10 +2637,12 @@ function renderEngines() {
     detail.textContent = `Installed${mokuro.version ? " (mokuro " + mokuro.version + ")" : ""} · ${mokuro.detail || mokuro.flavour}.`;
     stateLine.textContent = mokuro.flavour === "fork" ? "Fast engine ready" : "Installed";
     if (mokuroJob.state === "done") {
-      detail.textContent += " Restart the bridge to load it.";
-      stateLine.textContent = "Restart needed";
+      detail.textContent += " Loaded automatically; new volumes use it right away.";
+      stateLine.textContent = "Ready";
     }
     button.hidden = true;
+    const uninstall = $("uninstall-mokuro");
+    if (uninstall) uninstall.hidden = false;
   } else {
     detail.textContent = "Not installed. Reading pages needs mokuro; the bridge still packages and files volumes without it.";
     stateLine.textContent = "Not installed";
@@ -2521,6 +2656,8 @@ function renderEngines() {
     mokuroLog.innerHTML = linkify((mokuroJob.output || "").trim().split("\n").slice(-10).join("\n"));
   }
   const bunkoButton = $("install-bunko");
+  const bunkoUninstall = $("uninstall-bunko");
+  if (bunkoUninstall) bunkoUninstall.hidden = !bunko.installed;
   if (bunko.available) {
     const ready = remoteDestinationReady();
     $("engine-bunko-detail").textContent = bunko.installed
@@ -2535,6 +2672,15 @@ function renderEngines() {
     if (bunko.can_install === false && bunko.detail) $("engine-bunko-detail").textContent = bunko.detail;
     const totpRow = $("engine-bunko-totp-row");
     if (totpRow) totpRow.hidden = !(String(bunko.method || "").startsWith("mega") && ready && !bunko.installed && bunko.can_install !== false);
+    const sync = bunko.sync || null;
+    if (sync && sync.installed && !sync.in_sync && sync.can_sync) {
+      const syncing = bunkoJob.state === "running";
+      const following = sync.configured_method ? `on ${sync.configured_method}` : "not configured";
+      $("engine-bunko-detail").textContent = syncing
+        ? `Following the default destination (${sync.default_method})…`
+        : `mokuro-bunko is ${following}, but the default destination is ${sync.default_method}. It is re-pointed automatically.`;
+      $("engine-bunko-state").textContent = syncing ? "Syncing…" : "Out of sync";
+    }
     const bunkoLog = $("engine-bunko-log");
     if (bunkoLog) {
       bunkoLog.hidden = !bunkoJob.output || bunkoJob.state === "idle";
@@ -2547,12 +2693,17 @@ function renderEngines() {
     bunkoButton.textContent = "Not available";
   }
   renderWizardEngineActions();
+  if (["mokuro", "bunko"].some((name) => engineJob(name).state === "running") && !state.enginePoll) {
+    startEnginePoll();
+  }
 }
 
 async function loadEngines() {
   try {
     state.engines = await api("/config/engines");
     renderEngines();
+    renderGates();
+    renderVersions();
     const running = ["mokuro", "bunko"].some((name) => engineJob(name).state === "running");
     if (running) startEnginePoll();
   } catch (error) { /* older backend without the endpoint */ }
@@ -2569,9 +2720,18 @@ function startEnginePoll() {
         clearInterval(state.enginePoll);
         state.enginePoll = 0;
         const mokuroJob = engineJob("mokuro");
-        if (mokuroJob.state === "done") toast("Engine installed. Restart the bridge to load it.", "info");
-        else if (mokuroJob.state === "error") toast("The engine install failed. See Details under Reading engine.", "bad");
+        if (mokuroJob.state === "done") {
+          try {
+            await postForm("/config/engines/mokuro/reload", {});
+            toast("Engine installed and loaded. New volumes use it right away.", "info");
+          } catch (reloadError) {
+            toast(`${reloadError.message} Restart the bridge to load the engine.`, "bad");
+          }
+        } else if (mokuroJob.state === "error") {
+          toast("The engine install failed. See Details under Reading engine.", "bad");
+        }
         loadHealth();
+        loadEngines();
       }
     } catch (error) {
       clearInterval(state.enginePoll);

@@ -206,6 +206,36 @@ _ocr_session_order: deque[str] = deque()
 _ocr_schedule_cursor: Optional[str] = None
 _ocr_force_turn = False
 
+def reload_engine() -> dict:
+    """Re-import mokuro after an install, without restarting the bridge.
+
+    The engine was imported (or found absent) when this module loaded, so a
+    fresh install needs the module cache, the resolver globals and the fork
+    capability cache refreshed. In-flight OCR batches keep the old module
+    objects; new batches use the new ones.
+    """
+    global _mokuro_pkg, _MOKURO_REPO, _fork_supported_cache
+    importlib.invalidate_caches()
+    for name in [name for name in sys.modules if name == "mokuro" or name.startswith("mokuro.")]:
+        sys.modules.pop(name, None)
+    _MOKURO_REPO = _resolve_mokuro_repo()
+    if _MOKURO_REPO is not None and str(_MOKURO_REPO) not in sys.path:
+        sys.path.insert(0, str(_MOKURO_REPO))
+    try:
+        _mokuro_pkg = importlib.import_module("mokuro")
+    except Exception as error:
+        _mokuro_pkg = None
+        _fork_supported_cache = None
+        return {"installed": False, "error": str(error)}
+    _fork_supported_cache = None
+    return {
+        "installed": True,
+        "module": getattr(_mokuro_pkg, "__file__", ""),
+        "version": getattr(_mokuro_pkg, "__version__", ""),
+        "fork_api": _fork_supported(),
+    }
+
+
 def _fork_supported() -> bool:
     """Whether the loaded mokuro exposes the fork's batched OCR API.
 

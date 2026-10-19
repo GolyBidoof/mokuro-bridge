@@ -938,6 +938,14 @@ def main() -> None:
             _bunko_state = bunko_agent.ensure_running(
                 log=lambda message: print(f"  bunko:      {message}") if verbose else None
             )
+            try:
+                from . import config_api as _config_api
+
+                # Same background job the page polls, so a catch-up after a
+                # restart shows progress and errors instead of failing silently.
+                _config_api._start_bunko_sync()
+            except Exception:
+                pass
             if _bunko_state is not None and verbose:
                 print(f"  bunko:      {bunko_agent.status_line(_bunko_state)}")
         except Exception as error:  # optional; never keep the bridge down

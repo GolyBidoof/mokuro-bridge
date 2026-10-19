@@ -704,6 +704,7 @@ def setup(
     create: bool = True,
     wait_for_marker: bool = True,
     totp: Optional[str] = None,
+    reuse_install: bool = False,
 ) -> AgentState:
     """Install, configure, sign in and start Bunko for one bridge destination."""
     method = (method or providers._default_upload_method()).strip()
@@ -727,7 +728,11 @@ def setup(
         binary="", commit="", port=port,
     )
     payload = connect_payload(state, totp=totp)
-    info = install(log=log, runner=install_runner)
+    info = installed() if reuse_install else None
+    if info is None:
+        info = install(log=log, runner=install_runner)
+    else:
+        log(f"reusing mokuro-bunko at {info.binary}")
     state = replace(state, binary=info.binary, commit=info.commit)
     config = config_yaml(
         base_path=storage_dir(),
@@ -797,6 +802,116 @@ def _wait_for_marker(state: AgentState, *, log: Callable[[str], None] = print) -
         "series.json until the marker is there."
     )
     return False
+
+
+def _disconnect_library(state: AgentState, *, log: Callable[[str], None] = print) -> None:
+    """Release the cloud library Bunko currently manages, if any.
+
+    Bunko refuses to connect to a different library while it owns one, so a
+    re-point has to release the old claim first. The CLI writes `released` into
+    the marker and leaves the files alone.
+    """
+    binary = Path(state.binary) if state.binary else None
+    if binary is None or not binary.is_file():
+        return
+    env = dict(os.environ)
+    env["MOKURO_CONFIG"] = state.config
+    try:
+        result = subprocess.run(
+            [str(binary), "library", "disconnect", "--yes", "--discard", "--wait", "0"],
+            capture_output=True, text=True, timeout=60.0, env=env,
+        )
+        detail = (result.stdout or "").strip() or (result.stderr or "").strip()
+        log("releasing the previous Bunko library" + (f": {detail[-200:]}" if detail else ""))
+    except (OSError, subprocess.SubprocessError) as error:
+        log(f"could not release the previous library automatically ({error}); continuing")
+
+
+def _stop_strays(*, log: Callable[[str], None] = print) -> None:
+    """Terminate Bunko processes that no state file points at.
+
+    A failed sync can leave an instance holding the storage lock, and the next
+    instance dies during connect. Only processes running this installation's
+    binary are touched.
+    """
+    import signal
+
+    binary = data_home() / "bin" / "mokuro-bunko"
+    if not binary.is_file():
+        return
+    try:
+        found = subprocess.run(
+            ["pgrep", "-f", str(binary)], capture_output=True, text=True, timeout=10.0
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    own = os.getpid()
+    for raw in (found.stdout or "").splitlines():
+        try:
+            pid = int(raw.strip())
+        except ValueError:
+            continue
+        if pid == own:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            log(f"stopped a stale Bunko process (pid {pid})")
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def repoint(method: Optional[str] = None, *, log: Callable[[str], None] = print) -> AgentState:
+    """Stop the running instance, release its library, and use another destination."""
+    state = load_state()
+    if state is not None and _pid_alive(state.pid):
+        log(f"stopping the running Bunko (pid {state.pid})")
+        stop_server(state)
+    _stop_strays(log=log)
+    if state is not None:
+        _disconnect_library(state, log=log)
+    target = method or sync_info()["default_method"]
+    log(f"re-pointing mokuro-bunko to {target}")
+    return setup(target, log=log, reuse_install=True)
+
+
+def sync_info() -> dict:
+    """How Bunko's library compares with the bridge's default destination."""
+    from . import providers as _providers
+
+    state = load_state()
+    default = _providers._default_upload_method()
+    configured = state.method if state is not None else ""
+    provider = _providers.method_provider(default) if default and default != "local" else ""
+    return {
+        "configured_method": configured,
+        "default_method": default,
+        "in_sync": bool(state is not None and configured == default),
+        "installed": state is not None,
+        "running": bool(state is not None and _pid_alive(state.pid)),
+        "backend": state.backend if state is not None else "",
+        "folder": state.folder if state is not None else "",
+        "needs_sign_in": provider in ("drive", "onedrive"),
+        "can_sync": state is not None and bool(provider),
+    }
+
+
+def uninstall(*, log: Callable[[str], None] = print) -> bool:
+    """Stop Bunko and remove its binary, source, config and state."""
+    import shutil
+
+    state = load_state()
+    if state is not None and _pid_alive(state.pid):
+        log(f"stopping mokuro-bunko (pid {state.pid})")
+        try:
+            stop_server(state)
+        except Exception:
+            pass
+    home = data_home()
+    if not home.exists():
+        return False
+    shutil.rmtree(home, ignore_errors=True)
+    log(f"removed {home}")
+    return True
 
 
 def ensure_running(*, log: Callable[[str], None] = print) -> Optional[AgentState]:
