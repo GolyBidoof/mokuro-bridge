@@ -46,6 +46,12 @@ dokuha-cli hands over a folder of finished pages with `--mokuro`. dokuha-userscr
 
 The three projects are documented together under [docs/clients.md](docs/clients.md), which gives the exact request sequence each client uses.
 
+## mokuro-bunko next to the bridge
+
+`mokuro-bridge --setup-bunko` installs [mokuro-bunko](https://github.com/Gnathonic/mokuro-bunko), signs it in to the same cloud account the bridge uploads to, and runs it beside the bridge. Bunko compiles `series.json` and `catalog.json` in the cloud folder itself, so the bridge stops writing `series.json` for that destination, and it uploads the `.mokuro` before the `.cbz` so Bunko never queues OCR for a volume the bridge already read.
+
+The installer follows the newest commit of Bunko's `0.8/remote-storage` development branch, since remote storage is not released yet. The first run builds the server-only binary from source with cargo and takes several minutes; later installs reuse it, and `--update-bunko` moves an existing install to a newer commit. `MOKURO_BUNKO_REF` pins a commit when reproducibility matters, `MOKURO_BUNKO_BIN` uses an existing binary, and MEGA and WebDAV sign-in are automatic. Google Drive and OneDrive sign-in run through Bunko's own browser or code flow. See [docs/bunko.md](docs/bunko.md).
+
 ## Key advantages
 
 - **Store-agnostic.** The bridge knows nothing about any store, so a storefront redesign cannot break OCR or delivery.
@@ -132,6 +138,7 @@ The bridge is unauthenticated and binds to `127.0.0.1`, which is the whole acces
 | --- | --- |
 | [docs/dashboard.md](docs/dashboard.md) | The configuration dashboard, the terminal status display, settings precedence and the origin gate |
 | [docs/series-json.md](docs/series-json.md) | The `series.json` sidecar: its format, why the uploader writes it, and the pin on upstream |
+| [docs/bunko.md](docs/bunko.md) | Installing, signing in and running mokuro-bunko beside the bridge so it owns the metadata |
 | [docs/endpoints.md](docs/endpoints.md) | Every HTTP route: method, path, form fields, response shape, error codes and test coverage |
 | [docs/destinations.md](docs/destinations.md) | Upload targets, named accounts, credential stores and the sticky default |
 | [docs/clients.md](docs/clients.md) | How dokuha-cli and dokuha-userscript drive the bridge, with the exact request sequence |

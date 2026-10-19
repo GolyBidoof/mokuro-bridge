@@ -531,6 +531,43 @@ def main() -> None:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--setup-bunko",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="METHOD",
+        help="Install the newest mokuro-bunko development build (the 0.8 remote-"
+        "storage branch head, built from source), sign it "
+        "in to the bridge's default upload account and start it, so Bunko "
+        "compiles series.json in the cloud and the bridge stops writing it. "
+        "Pass an account id such as 'mega' or 'mega:work'; the default upload "
+        "account is used when omitted. The first run builds Bunko with cargo "
+        "and takes several minutes.",
+    )
+    parser.add_argument(
+        "--bunko-status",
+        action="store_true",
+        help="Print whether mokuro-bunko is installed, configured and running.",
+    )
+    parser.add_argument(
+        "--stop-bunko",
+        action="store_true",
+        help="Stop the mokuro-bunko instance started by --setup-bunko.",
+    )
+    parser.add_argument(
+        "--bunko-logs",
+        action="store_true",
+        help="Print the tail of the mokuro-bunko log.",
+    )
+    parser.add_argument(
+        "--update-bunko",
+        action="store_true",
+        help="Move the installed mokuro-bunko to the newest development commit, "
+        "rebuilding it when the branch head moved, and restart the running "
+        "instance. MOKURO_BUNKO_REF pins a branch, tag or commit; "
+        "MOKURO_BUNKO_OFFLINE=1 keeps what is installed.",
+    )
     parser.add_argument("--host", default=os.environ.get("MOKURO_BRIDGE_HOST", "127.0.0.1"))
     parser.add_argument(
         "--port",
@@ -619,6 +656,62 @@ def main() -> None:
     if args.remove_upload:
         raise SystemExit(_remove_upload(args.remove_upload))
 
+    if args.bunko_status:
+        from . import bunko_agent
+
+        state = bunko_agent.load_state()
+        print(bunko_agent.status_line(state))
+        running = bool(state and bunko_agent._pid_alive(state.pid))
+        raise SystemExit(0 if running else 1)
+    if args.stop_bunko:
+        from . import bunko_agent
+
+        state = bunko_agent.load_state()
+        if state is None:
+            print("mokuro-bunko: not configured")
+            raise SystemExit(1)
+        bunko_agent.stop_server(state)
+        state.save()
+        print(bunko_agent.status_line(state))
+        return
+    if args.bunko_logs:
+        from . import bunko_agent
+
+        log_file = bunko_agent.log_path()
+        if not log_file.is_file():
+            print(f"no Bunko log at {log_file}")
+            raise SystemExit(1)
+        lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        print("\n".join(lines[-80:]))
+        return
+    if args.setup_bunko is not None:
+        from . import bunko_agent
+
+        try:
+            state = bunko_agent.setup(args.setup_bunko or None, log=print)
+        except bunko_agent.BunkoAgentError as error:
+            print(f"error: {error}")
+            raise SystemExit(2)
+        print(bunko_agent.status_line(state))
+        return
+    if args.update_bunko:
+        from . import bunko_agent
+
+        if bunko_agent.load_state() is None:
+            print("mokuro-bunko: not configured (run mokuro-bridge --setup-bunko)")
+            raise SystemExit(1)
+        try:
+            info, changed = bunko_agent.update(log=print)
+        except bunko_agent.BunkoAgentError as error:
+            print(f"error: {error}")
+            raise SystemExit(2)
+        print(
+            f"mokuro-bunko: {'updated to' if changed else 'already at'} "
+            f"{info.commit[:9]} ({info.label})"
+        )
+        print(bunko_agent.status_line())
+        return
+
     setup_method = args.setup_upload or ("mega" if args.setup_mega else None)
     if setup_method:
         try:
@@ -697,6 +790,17 @@ def main() -> None:
         print(f"  fd limit:   {_fd_limit} (raised for the proxy)")
     elif fetchproxy.FETCH_PORTS > 0 and reload_on:
         print("  fetch proxy: off (UVICORN_RELOAD=1 is incompatible with extra ports)")
+    if os.environ.get("MOKURO_BRIDGE_BUNKO_AUTOSTART", "1").strip().lower() not in ("0", "false", "no", "off"):
+        try:
+            from . import bunko_agent
+
+            _bunko_state = bunko_agent.ensure_running(
+                log=lambda message: print(f"  bunko:      {message}")
+            )
+            if _bunko_state is not None:
+                print(f"  bunko:      {bunko_agent.status_line(_bunko_state)}")
+        except Exception as error:  # optional; never keep the bridge down
+            print(f"  bunko:      not started ({error})")
     print("=" * 60)
     print(f"  dashboard:  http://{args.host}:{args.port}/      (configuration and health)")
 
