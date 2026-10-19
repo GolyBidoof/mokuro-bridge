@@ -219,12 +219,14 @@ def test_the_provider_row_lists_the_remotes(client, rclone_env, monkeypatch):
     assert row["remotes"] == ["demo:"]
 
 
-def test_the_page_offers_the_rclone_form_and_its_steps():
+def test_the_page_offers_the_rclone_shortcuts():
+    """The page configures every service through rclone, not a terminal step."""
     page = (REPO_ROOT / "mokuro_bridge" / "web" / "dashboard.html").read_text(encoding="utf-8")
     for marker in (
         'id="add-rclone-remote"',
-        "rclone config",
-        "rclone has its own Microsoft app registration",
-        "add-use-rclone",
+        'id="add-rclone-root"',
+        '"/config/rclone/mega"',
+        '"/config/rclone/webdav"',
+        '"/config/rclone/authorize/start"',
     ):
-        assert marker in page, f"the dashboard lost the rclone helper {marker!r}"
+        assert marker in page, f"the dashboard lost the rclone shortcut {marker!r}"

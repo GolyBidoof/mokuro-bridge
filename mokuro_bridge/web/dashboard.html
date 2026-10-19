@@ -209,6 +209,12 @@
   .we-field { display: block; margin-top: 8px; color: var(--muted); font-size: 12px; }
   .we-field input { display: block; margin-top: 6px; max-width: 160px; }
   .wizard-engine-actions .engine-log { margin: 12px 0 0; }
+  .rclone-services { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 8px; }
+  .rclone-service { display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); color: var(--text); cursor: pointer; }
+  .rclone-service:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .rclone-service.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .rclone-service span { color: var(--muted); font-size: 12px; }
+  .rclone-auth { margin-top: 10px; }
   .pref { display: grid; grid-template-columns: minmax(0, 1fr) minmax(210px, 320px); gap: 14px 22px; padding: 15px 0; border-bottom: 1px solid var(--line); }
   .pref:last-of-type { border-bottom: 0; }
   .pref-label { font-weight: 600; font-size: 14px; }
@@ -710,27 +716,27 @@ const PROVIDER_LINKS = {
 const PROVIDER_META = {
   mega: {
     label: "MEGA", kind: "form",
-    blurb: "Email and password, checked before anything is saved.",
+    blurb: "Email and password, signed in once through rclone and kept in its config.",
     empty: "megatools is not installed. Install it with <code>brew install megatools</code> first.",
   },
   drive: {
     label: "Google Drive", kind: "oauth",
-    blurb: "Sign in with Google in a new tab. Nothing else to type.",
+    blurb: "One Google consent tab, handled by rclone. Nothing to paste.",
     empty: "The Google client libraries are not installed.",
   },
   onedrive: {
     label: "OneDrive", kind: "device_code",
-    blurb: "A short Microsoft code, entered once in your browser. Needs a free Azure app ID once.",
+    blurb: "One Microsoft consent tab; rclone brings its own app registration, so no Azure setup.",
     empty: "The Microsoft sign-in library is not installed.",
   },
   webdav: {
     label: "WebDAV", kind: "form",
-    blurb: "Nextcloud, ownCloud, Synology, Box, pCloud, HiDrive or any other WebDAV server.",
+    blurb: "Nextcloud, ownCloud, Synology, Box, pCloud or any other WebDAV server, signed in through rclone.",
     empty: "The requests library is not installed.",
   },
   rclone: {
-    label: "rclone remote", kind: "form",
-    blurb: "OneDrive, Google Drive, S3 and more through rclone. Its OneDrive sign-in brings its own Microsoft app ID, so no Azure account is needed.",
+    label: "Existing rclone remote", kind: "form",
+    blurb: "Use a remote you already made with rclone config, including S3 and other services.",
     empty: "The rclone command-line tool is not installed.",
   },
   local: { label: "This computer", kind: null, blurb: "", empty: "" },
@@ -909,6 +915,7 @@ function tidyFolder(value) {
 
 function providerOf(method) {
   if (!method) return "local";
+  if (method.provider === "rclone" && method.service) return method.service;
   if (method.provider) return method.provider;
   const id = String(method.id || "");
   if (id === "local") return "local";
@@ -1644,8 +1651,14 @@ function compatibilityProvider(provider) {
   return { meta, live, available, missing, count, kind };
 }
 
+function providerIdsForUi() {
+  // The four service cards are the familiar shape; each one is backed by
+  // rclone now. The last card is for an existing custom remote.
+  return ["mega", "drive", "onedrive", "webdav", "rclone"];
+}
+
 function renderProviderPicker() {
-  const providers = ["mega", "drive", "onedrive", "webdav", "rclone"];
+  const providers = providerIdsForUi();
   $("add-picker").innerHTML = `<div class="provider-picker">${providers.map((id) => {
     const info = compatibilityProvider(id);
     const unavailable = !info.available;
@@ -1671,7 +1684,7 @@ function renderProviderPicker() {
 
 function unavailableNotes() {
   const notes = [];
-  ["mega", "drive", "onedrive", "webdav", "rclone"].forEach((id) => {
+  providerIdsForUi().forEach((id) => {
     const info = compatibilityProvider(id);
     if (info.available) return;
     const link = PROVIDER_LINKS[id];
@@ -1695,6 +1708,48 @@ function nextAlias(provider) {
   return count ? `${provider}-${count + 1}` : provider;
 }
 
+function renderRcloneAuthorize(flow, service, alias, label, root) {
+  const host = $("add-rclone-fields");
+  const submit = $("add-submit");
+  if (submit) submit.disabled = true;
+  const link = flow.url
+    ? `<a class="inline-link" id="rclone-auth-link" href="${esc(flow.url)}" target="_blank" rel="noopener">Open the sign-in page ${icon("external")}</a>`
+    : `<span class="hint">Waiting for the sign-in page…</span>`;
+  if (host) {
+    host.innerHTML = `<div class="rclone-auth">
+      <p class="hint">${link}</p>
+      <p class="hint" id="rclone-auth-status">Waiting for you to finish signing in…</p>
+    </div>`;
+  }
+  const timer = setInterval(async () => {
+    try {
+      const status = await api(`/config/rclone/authorize/status?flow_id=${encodeURIComponent(flow.flow_id)}`);
+      const linkEl = $("rclone-auth-link");
+      if (status.url && linkEl) linkEl.href = status.url;
+      const statusEl = $("rclone-auth-status");
+      if (status.state === "ready") {
+        clearInterval(timer);
+        if (statusEl) statusEl.textContent = "Signed in. Creating the destination…";
+        const result = await postForm("/config/rclone/authorize/finish", { flow_id: flow.flow_id, alias, label, root });
+        toast(`${result.method || alias} connected${result.identity ? ` · ${result.identity}` : ""}.`, "info");
+        closeDialog("add-dialog");
+        await loadConfig();
+      } else if (status.state === "error") {
+        clearInterval(timer);
+        if (statusEl) statusEl.textContent = status.error || "The sign-in did not finish.";
+        if (submit) submit.disabled = false;
+      }
+    } catch (error) {
+      if (error.status === 404) {
+        clearInterval(timer);
+        const statusEl = $("rclone-auth-status");
+        if (statusEl) statusEl.textContent = "That sign-in expired. Close this and start again.";
+        if (submit) submit.disabled = false;
+      }
+    }
+  }, 2000);
+}
+
 function openProviderForm(provider, mode, account) {
   const info = compatibilityProvider(provider);
   const meta = info.meta;
@@ -1704,12 +1759,15 @@ function openProviderForm(provider, mode, account) {
   $("add-picker").hidden = true;
   const form = $("add-form");
   form.hidden = false;
+  state.add.rcloneService = "";
   const title = mode === "reconnect" ? `Reconnect ${meta.label}` : `Connect ${meta.label}`;
   const alias = account ? aliasOf(account) : nextAlias(provider);
   const label = account ? (account.label || "") : "";
   const submitLabel = mode === "reconnect" ? "Reconnect" : `Connect ${meta.label}`;
   const rcloneRow = (state.providers || []).find((entry) => entry.id === "rclone") || {};
   const rcloneRemotes = rcloneRow.remotes || [];
+  const rcloneRoot = rcloneRow.default_root || "mokuro-reader";
+  const rcloneBacked = !!(info.live && info.live.rclone_backed);
   const onedriveRow = (state.providers || []).find((entry) => entry.id === "onedrive") || {};
   const onedriveClient = onedriveRow.client_id || "";
   const onedrivePinned = onedriveRow.client_id_source === "env";
@@ -1723,6 +1781,12 @@ function openProviderForm(provider, mode, account) {
     onedrive: "This page shows a short code. Enter it once on Microsoft's site, then come back; it finishes by itself. The app ID is the free one-time step that lets this bridge ask Microsoft to sign you in.",
     webdav: "The server's own username and password. They are checked once against the server, then kept in this computer's credential store.",
   };
+  if (rcloneBacked) {
+    notes.drive = "One Google consent tab opens. rclone handles the sign-in; there is nothing to paste.";
+    notes.onedrive = "One Microsoft consent tab opens. rclone brings its own app registration, so no Azure setup is needed.";
+    notes.mega = "MEGA email and password are handed to rclone, which stores them in its own config on this computer.";
+    notes.webdav = "The server address, username and password are handed to rclone, which stores them in its own config.";
+  }
   form.innerHTML = `<div class="form-grid">
     <div class="form-grid two">
       <div class="field">
@@ -1738,7 +1802,8 @@ function openProviderForm(provider, mode, account) {
     ${provider === "mega" ? `<div class="form-grid two">
       <div class="field"><label for="add-email">MEGA email</label><input id="add-email" type="email" autocomplete="username" required></div>
       <div class="field"><label for="add-password">Password</label><input id="add-password" type="password" autocomplete="current-password" required></div>
-    </div>` : ""}
+    </div>
+    <div class="field"><label for="add-totp">Two-factor code <span class="hint">(only if your MEGA account uses one)</span></label><input id="add-totp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"><span class="hint">rclone asks for this once at sign-in, then the shared gateway keeps the session.</span></div>` : ""}
     ${provider === "webdav" ? `<div class="field" id="add-dav-preset-field" ${mode === "reconnect" ? "hidden" : ""}>
       <label for="add-dav-preset">Which server do you use? <span class="hint">(optional)</span></label>
       <select id="add-dav-preset">
@@ -1788,7 +1853,7 @@ function openProviderForm(provider, mode, account) {
         <label class="check-row"><input id="add-dav-insecure" type="checkbox" ${davInsecure ? "checked" : ""}><span>Accept a self-signed certificate <span class="hint">Only for your own NAS or home server. It turns off certificate checking for this account.</span></span></label>
       </div>
     </details>` : ""}
-    ${provider === "onedrive" ? `<div class="field">
+    ${provider === "onedrive" && !rcloneBacked ? `<div class="field">
       <label for="add-onedrive-client-id">Azure app ID <span class="hint">(one-time)</span></label>
       <input id="add-onedrive-client-id" type="text" autocomplete="off" spellcheck="false" value="${esc(onedriveClient)}" ${onedrivePinned ? "disabled" : ""} placeholder="00000000-0000-0000-0000-000000000000">
       <span class="hint">${onedrivePinned
@@ -1814,24 +1879,14 @@ function openProviderForm(provider, mode, account) {
         : `<input id="add-rclone-remote" type="text" autocomplete="off" spellcheck="false" placeholder="onedrive:">`}
       <span class="hint">${rcloneRemotes.length
         ? `A remote from <code>rclone config</code> (${esc(rcloneRemotes.join(", "))}).`
-        : "No rclone remotes are configured yet. Run <code>rclone config</code> in a terminal first."}</span>
-      <details class="dav-help" ${rcloneRemotes.length ? "" : "open"}><summary>Set up OneDrive without an Azure account</summary>
-        <div class="dav-help-body">
-          <p>rclone has its own Microsoft app registration, so this needs no Azure subscription and no app registration. It takes about two minutes.</p>
-          <p><strong>1.</strong> Install rclone: <code>brew install rclone</code> on macOS, <code>winget install Rclone.Rclone</code> on Windows, or <code>apt install rclone</code> on Debian/Ubuntu.</p>
-          <p><strong>2.</strong> Run <code>rclone config</code>, choose <em>n</em> for a new remote, name it <code>onedrive</code>, then choose <em>Microsoft OneDrive</em>.</p>
-          <p><strong>3.</strong> Leave the client ID and secret blank; rclone supplies its own.</p>
-          <p><strong>4.</strong> Let rclone open the browser and sign in with your Microsoft account.</p>
-          <p><strong>5.</strong> Reload this page and pick the new remote above.</p>
-        </div>
-      </details>
+        : "No remotes yet. The four cards above create them for you; this is only for a custom remote."}</span>
     </div>
     <div class="field">
       <label for="add-rclone-root">Upload folder</label>
-      <input id="add-rclone-root" type="text" autocomplete="off" spellcheck="false" value="mokuro-reader">
+      <input id="add-rclone-root" type="text" autocomplete="off" spellcheck="false" value="${esc(rcloneRoot)}">
       <span class="hint">Created on the remote, with one folder per series inside it.</span>
     </div>` : ""}
-    ${provider === "drive" ? `<div class="field" id="drive-client-fields" ${info.live && info.live.client_preset ? "hidden" : ""}>
+    ${provider === "drive" && !rcloneBacked ? `<div class="field" id="drive-client-fields" ${info.live && info.live.client_preset ? "hidden" : ""}>
       <label for="add-client-id">Google client ID</label>
       <input id="add-client-id" type="text" autocomplete="off" spellcheck="false" placeholder="…apps.googleusercontent.com">
       <label for="add-client-secret" style="margin-top:8px">Client secret</label>
@@ -1839,7 +1894,7 @@ function openProviderForm(provider, mode, account) {
       <span class="hint">Only needed once per computer. Create a <em>Desktop app</em> OAuth client in the Google Cloud console; the secret is used for this sign-in and not saved.</span>
     </div>` : ""}
     <p class="hint">${notes[provider] || ""}</p>
-    ${provider === "drive" && !(info.live && info.live.client_preset) ? `<p class="hint">This computer has no Google client yet. Paste a Desktop-app client ID and secret once; it is used for this sign-in and not saved. <a class="inline-link" href="${esc(PROVIDER_LINKS.drive.setup)}" target="_blank" rel="noopener">${esc(PROVIDER_LINKS.drive.setupLabel)} ${icon("external")}</a></p>` : ""}
+    ${provider === "drive" && !rcloneBacked && !(info.live && info.live.client_preset) ? `<p class="hint">This computer has no Google client yet. Paste a Desktop-app client ID and secret once; it is used for this sign-in and not saved. <a class="inline-link" href="${esc(PROVIDER_LINKS.drive.setup)}" target="_blank" rel="noopener">${esc(PROVIDER_LINKS.drive.setupLabel)} ${icon("external")}</a></p>` : ""}
     <p class="hint">${PROVIDER_LINKS[provider] ? `<a class="inline-link" href="${esc(PROVIDER_LINKS[provider].web)}" target="_blank" rel="noopener">${esc(PROVIDER_LINKS[provider].webLabel)} ${icon("external")}</a>` : ""}</p>
     <div class="form-error" id="add-error" role="alert"></div>
     <div class="form-actions">
@@ -1950,10 +2005,11 @@ async function submitProviderForm() {
     if (provider === "mega") {
       const email = $("add-email").value.trim();
       const password = $("add-password").value;
+      const totp = ($("add-totp") && $("add-totp").value.trim()) || "";
       if (!email || !password) { addError("Enter the MEGA email and password."); restore(); return; }
-      submit.textContent = "Checking…";
-      const result = await postForm("/config/accounts/mega", { alias, label, email, password });
-      toast(`${result.method || alias} connected.`, "info");
+      submit.textContent = "Signing in through rclone…";
+      const result = await postForm("/config/rclone/mega", { alias, label, email, password, totp, root: "" });
+      toast(`${result.method || alias} connected${result.identity ? ` · ${result.identity}` : ""}.`, "info");
       closeDialog("add-dialog");
       await loadConfig();
       restore();
@@ -1964,7 +2020,6 @@ async function submitProviderForm() {
       const username = $("add-username").value.trim();
       const password = $("add-password").value;
       const root = ($("add-dav-root") && $("add-dav-root").value.trim()) || "";
-      const insecure = !!($("add-dav-insecure") && $("add-dav-insecure").checked);
       if (!url) { addError("Enter the server address first, for example https://cloud.example.com."); restore(); return; }
       if (!/^https?:\/\//i.test(url)) { addError("The server address must start with https:// (or http:// for a local server)."); restore(); return; }
       if (!username) { addError("Enter the WebDAV username your server uses."); restore(); return; }
@@ -1973,34 +2028,23 @@ async function submitProviderForm() {
         restore();
         return;
       }
-      submit.textContent = "Checking the server…";
-      const result = await postForm("/config/accounts/webdav", { alias, label, url, username, password, root, insecure: insecure ? "on" : "" });
-      const where = result.discovered
-        ? ` Connected. The bridge found the WebDAV folder at ${result.server}.`
-        : " Connected.";
-      toast(`${result.method || alias}${where}`, "info");
-      if (result.folder_ready === false) {
-        toast("Connected, but the upload folder could not be created yet; it is created at the first upload.", "bad");
-      }
+      submit.textContent = "Checking the server through rclone…";
+      const result = await postForm("/config/rclone/webdav", { alias, label, url, username, password, root });
+      toast(`${result.method || alias} connected${result.identity ? ` · ${result.identity}` : ""}.`, "info");
       closeDialog("add-dialog");
       await loadConfig();
       restore();
       return;
     }
     if (provider === "onedrive") {
-      const clientId = ($("add-onedrive-client-id") && $("add-onedrive-client-id").value.trim()) || "";
-      if (!clientId && !(state.providers.find((entry) => entry.id === "onedrive") || {}).client_id) {
-        addError("Paste the free Azure app ID first; the \"Where do I get this?\" steps in the form take about two minutes.");
+      submit.textContent = "Starting sign-in…";
+      try {
+        const flow = await postForm("/config/rclone/authorize/start", { service: "onedrive" });
+        renderRcloneAuthorize(flow, "onedrive", alias, label, "");
+      } catch (error) {
+        addError(error.message);
         restore();
-        return;
       }
-      submit.textContent = "Starting…";
-      const flow = await postForm("/config/accounts/onedrive/start", { alias, label, client_id: clientId });
-      if (flow.client_id_saved === false) {
-        toast("Signed in, but the app ID could not be saved on this computer; you may be asked for it again next time.", "bad");
-      }
-      renderDeviceFlow(flow, alias);
-      restore();
       return;
     }
     if (provider === "rclone") {
@@ -2008,7 +2052,7 @@ async function submitProviderForm() {
       let remote = (field && field.value.trim()) || "";
       const root = ($("add-rclone-root") && $("add-rclone-root").value.trim()) || "";
       if (!remote) {
-        addError("Choose an rclone remote first, or run `rclone config` in a terminal to create one.");
+        addError("Choose an rclone remote, or use one of the four cards to create one.");
         restore();
         return;
       }
@@ -2016,31 +2060,20 @@ async function submitProviderForm() {
       submit.textContent = "Checking rclone…";
       const result = await postForm("/config/accounts/rclone", { alias, label, remote, root });
       toast(`${result.method || alias} connected on ${result.remote}.`, "info");
-      if (result.folder_ready === false) {
-        toast("Connected, but the upload folder could not be created yet; it is created at the first upload.", "bad");
-      }
       closeDialog("add-dialog");
       await loadConfig();
       restore();
       return;
     }
     if (provider === "drive") {
-      const clientId = ($("add-client-id") && $("add-client-id").value.trim()) || "";
-      const clientSecret = ($("add-client-secret") && $("add-client-secret").value) || "";
-      submit.textContent = "Starting…";
+      submit.textContent = "Starting sign-in…";
       try {
-        const flow = await postForm("/config/accounts/drive/start", { alias, label, client_id: clientId, client_secret: clientSecret });
-        renderDriveFlow(flow, alias);
+        const flow = await postForm("/config/rclone/authorize/start", { service: "drive" });
+        renderRcloneAuthorize(flow, "drive", alias, label, "");
       } catch (error) {
-        if (error.status === 400 && /client/i.test(error.message)) {
-          const fields = $("drive-client-fields");
-          if (fields) fields.hidden = false;
-          addError("Paste your Google client ID and secret once, then try again.");
-        } else {
-          addError(error.message);
-        }
+        addError(error.message);
+        restore();
       }
-      restore();
       return;
     }
   } catch (error) {
@@ -2517,8 +2550,7 @@ function renderWizard() {
     $("wizard-kicker").textContent = "Step 2 of 2";
     $("wizard-title").textContent = "Which cloud service?";
     $("wizard-subtitle").textContent = "Click one and the sign-in opens. You can add the others later.";
-    const ids = ((state.config && state.config.providers) || []).map((p) => p.id);
-    const providers = ids.length ? ids : ["mega", "drive", "onedrive", "webdav", "rclone"];
+    const providers = providerIdsForUi();
     body.innerHTML = `<div class="wiz-providers">${providers.map((id) => {
       const descriptor = providerDescriptor(id);
       const available = !(descriptor.live && descriptor.live.available === false);

@@ -119,6 +119,33 @@ def list_remotes(*, refresh: bool = False) -> list[str]:
     return list(remotes)
 
 
+_dump_cache: Optional[tuple[float, dict]] = None
+_dump_lock = threading.Lock()
+
+
+def config_dump(*, refresh: bool = False) -> dict:
+    """rclone's config as {remote: {key: value}} (cached briefly).
+
+    Used for non-secret status only: never log or return token values.
+    """
+    global _dump_cache
+    now = time.monotonic()
+    with _dump_lock:
+        if not refresh and _dump_cache is not None and now - _dump_cache[0] < _REMOTES_TTL_S:
+            return dict(_dump_cache[1])
+    if binary() is None:
+        return {}
+    try:
+        result = _run(["config", "dump"], timeout=15.0)
+        data = json.loads(result.stdout or "{}")
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return {}
+    dump = data if isinstance(data, dict) else {}
+    with _dump_lock:
+        _dump_cache = (now, dump)
+    return dict(dump)
+
+
 def _instance(name: str = DEFAULT_NAME) -> Optional[accounts.Instance]:
     return accounts.load_instance("rclone", name)
 
@@ -146,8 +173,17 @@ def creds_source(name: str = DEFAULT_NAME) -> Optional[str]:
 
 
 def account_identity(instance: accounts.Instance) -> str:
-    """The non-secret identity shown for one account: its rclone remote."""
-    return str(instance.extra.get("remote") or "").strip()
+    """The non-secret identity shown for one account: what the remote is."""
+    remote = str(instance.extra.get("remote") or "").strip()
+    if not remote:
+        return ""
+    try:
+        from .. import rclone_auth
+
+        summary = rclone_auth.remote_summary(remote)
+    except Exception:
+        summary = ""
+    return summary or remote
 
 
 def account_insecure(*_args, **_kwargs) -> bool:  # symmetry with the HTTP providers

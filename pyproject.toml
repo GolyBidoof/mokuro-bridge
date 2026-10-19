@@ -43,29 +43,11 @@ dependencies = [
 # pulls in PyTorch (several GB), and the bridge runs fine without it, reporting
 # mokuro_installed:false. Mirrors requirements-ocr.txt.
 ocr = ["mokuro>=0.2.0"]
-# Upload providers, each installing only its own SDK. Mirrors requirements-drive.txt.
-drive = [
-  "google-api-python-client>=2.100.0",
-  "google-auth-oauthlib>=1.0.0",
-  "google-auth>=2.0.0",
-  "requests>=2.20.0",
-]
-# Mirrors requirements-onedrive.txt.
-onedrive = [
-  "msal>=1.24.0",
-  "requests>=2.31",
-]
-# Mirrors requirements-webdav.txt: the provider speaks HTTP directly, so
-# `requests` is the whole install.
-webdav = [
-  "requests>=2.31",
-]
-# Every upload provider, still no PyTorch. This is the extra most people want.
+# Cloud destinations run through the rclone binary, which brings its own
+# Microsoft and Google app registrations. There is no per-provider Python SDK
+# to install, so `requests` (used by the local WebDAV gateway checks) is the
+# whole extra. Mirrors requirements-cloud.txt if one is added later.
 cloud = [
-  "google-api-python-client>=2.100.0",
-  "google-auth-oauthlib>=1.0.0",
-  "google-auth>=2.0.0",
-  "msal>=1.24.0",
   "requests>=2.31",
 ]
 # Mirrors requirements-dev.txt. tomli is the 3.10 stand-in for stdlib tomllib:

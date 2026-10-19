@@ -59,9 +59,6 @@ def test_the_base_dependencies_match_requirements_txt(pyproject):
     "extra,requirements_file",
     [
         ("ocr", "requirements-ocr.txt"),
-        ("drive", "requirements-drive.txt"),
-        ("onedrive", "requirements-onedrive.txt"),
-        ("webdav", "requirements-webdav.txt"),
         ("dev", "requirements-dev.txt"),
     ],
 )
@@ -76,16 +73,12 @@ def _names(requirements: list[str]) -> set[str]:
     return {re.split(r"[<>=!~;\[]", dep, maxsplit=1)[0].strip().lower() for dep in requirements}
 
 
-def test_the_cloud_extra_covers_every_upload_provider_without_torch(pyproject):
+def test_the_cloud_extra_needs_no_provider_sdk(pyproject):
+    """rclone is the transport: no Google, Microsoft or WebDAV client library."""
     extras = pyproject["project"]["optional-dependencies"]
-    assert _names(extras["cloud"]) == (
-        _names(extras["drive"]) | _names(extras["onedrive"]) | _names(extras["webdav"])
-    )
-    # requests is listed in both provider files at different floors (>=2.20.0 for
-    # Drive, >=2.31 for Graph); the combined extra must carry the stricter one,
-    # not quietly the older.
+    assert _names(extras["cloud"]) == {"requests"}
     assert "requests>=2.31" in extras["cloud"]
-    # The whole point of the base install is that it does not drag in PyTorch.
+    assert "drive" not in extras and "onedrive" not in extras and "webdav" not in extras
     assert not any(dep.startswith("mokuro") for dep in extras["cloud"])
     assert not any(dep.startswith("torch") for dep in extras["cloud"])
 

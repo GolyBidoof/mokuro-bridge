@@ -1,7 +1,0 @@
-# Optional WebDAV upload provider.
-# A WebDAV account is a server URL plus Basic-auth credentials, so the only
-# install is the HTTP client; no WebDAV SDK is involved.
-#   pip install -r requirements-webdav.txt
-# Then configure one account: mokuro-bridge --setup-upload webdav
-# or add it in the dashboard at http://127.0.0.1:62642/.
-requests>=2.31

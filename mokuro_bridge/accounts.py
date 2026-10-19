@@ -132,7 +132,9 @@ def alias_to_name(provider: str, alias: str) -> str:
     # historical "default" storage paths so legacy credentials keep working.
     return DEFAULT_NAME if value == provider else value
 
-def validate_alias(provider: str, alias: str, *, name: Optional[str] = None) -> str:
+def validate_alias(
+    provider: str, alias: str, *, name: Optional[str] = None, allow_reserved: bool = False
+) -> str:
     """Normalise and validate one alias; returns the lowercase form.
 
     ``name`` is the storage name the alias will belong to (None for a brand-new
@@ -151,7 +153,7 @@ def validate_alias(provider: str, alias: str, *, name: Optional[str] = None) -> 
         raise ValueError(
             "'local' is reserved for the local output folder and cannot be an account alias"
         )
-    if value in PROVIDERS and value != provider:
+    if not allow_reserved and value in PROVIDERS and value != provider:
         raise ValueError(f"alias {value!r} is reserved for the {value} provider")
     if value == provider and name not in (None, DEFAULT_NAME):
         raise ValueError(
@@ -436,6 +438,7 @@ def save_instance(
     root: Optional[str] = None,
     extra: Optional[dict] = None,
     alias: Optional[str] = None,
+    allow_reserved: bool = False,
 ) -> Instance:
     """Create or update one account's metadata; returns the stored instance.
 
@@ -450,7 +453,7 @@ def save_instance(
     if root is not None:
         _check_root(root)
     if alias is not None:
-        alias = validate_alias(provider, alias, name=name)
+        alias = validate_alias(provider, alias, name=name, allow_reserved=allow_reserved)
     with _save_lock:
         previous = load_instance(provider, name)
         # Only an alias that is actually on disk survives; previous.alias is

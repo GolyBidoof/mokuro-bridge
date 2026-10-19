@@ -31,7 +31,7 @@ from typing import Optional
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from . import APP_NAME, __version__, accounts, settings
+from . import APP_NAME, __version__, accounts, rclone_auth, settings
 from . import providers
 from .config import (
     ACCOUNTS_DIR,
@@ -343,8 +343,17 @@ def _provider_rows() -> list[dict]:
             "missing": [],
             "alias_suggestion": accounts.suggest_alias(provider_id),
         }
+        rclone_ready = rclone_provider.binary() is not None
+        if provider_id in ("mega", "drive", "onedrive", "webdav") and rclone_ready:
+            # rclone performs these sign-ins now. The native SDK checks below
+            # only matter for legacy accounts, so the cards stay usable.
+            entry["available"] = True
+            entry["missing"] = []
+            entry["rclone_backed"] = True
+            entry["service"] = provider_id
+            entry["default_root"] = rclone_auth.default_root()
         if provider_id == "mega":
-            if shutil.which("megatools") is None:
+            if not rclone_ready and shutil.which("megatools") is None:
                 entry["available"] = False
                 entry["missing"].append("megatools")
         elif provider_id == "drive":
@@ -356,8 +365,10 @@ def _provider_rows() -> list[dict]:
                 )
                 if not _module_available(module)
             ]
+            if rclone_ready:
+                missing = []
             entry["missing"] = missing
-            entry["available"] = not missing
+            entry["available"] = rclone_ready or not missing
             entry["client_preset"] = bool(
                 drive_provider._drive_client_id_from_env()
                 or os.environ.get("DRIVE_CLIENT_SECRET", "").strip()
@@ -372,8 +383,10 @@ def _provider_rows() -> list[dict]:
                 for package, module in (("msal", "msal"), ("requests", "requests"))
                 if not _module_available(module)
             ]
+            if rclone_ready:
+                missing = []
             entry["missing"] = missing
-            entry["available"] = not missing
+            entry["available"] = rclone_ready or not missing
             entry["client_id"] = onedrive_provider.client_id()
             entry["client_id_source"] = onedrive_provider.client_id_source()
             entry["client_preset"] = bool(entry["client_id"])
@@ -381,15 +394,24 @@ def _provider_rows() -> list[dict]:
         elif provider_id == "webdav":
             # Any WebDAV server is acceptable, so the only install check is the
             # HTTP client; the server URL is asked for per account.
-            missing = [] if _module_available("requests") else ["requests"]
+            missing = [] if (_module_available("requests") or rclone_ready) else ["requests"]
             entry["missing"] = missing
             entry["available"] = not missing
         elif provider_id == "rclone":
-            # rclone owns the sign-in, so the only requirement is the binary.
+            # rclone owns the sign-in, and the page drives it: one shortcut per
+            # service, so no terminal `rclone config` step is required.
             installed = rclone_provider.binary() is not None
             entry["missing"] = [] if installed else ["rclone"]
             entry["available"] = installed
             entry["remotes"] = rclone_provider.list_remotes() if installed else []
+            entry["browser_setup"] = "shortcuts"
+            entry["services"] = rclone_auth.services()
+            entry["default_root"] = rclone_auth.default_root()
+            entry["recommended"] = True
+        # Legacy native accounts stay manageable, but a new setup never needs
+        # the old SDKs: the cards above are rclone-backed.
+        if provider_id in ("mega", "drive", "onedrive", "webdav"):
+            entry["legacy_native"] = not rclone_ready
         rows.append(entry)
     return rows
 
@@ -502,6 +524,9 @@ def _method_rows() -> list[dict]:
                 "needs_reauth": needs_reauth,
                 "state": state,
                 "tracked": instance is not None,
+                # rclone-backed accounts carry the service they configure
+                # ("mega", "drive", ...) so the matching card keeps its count.
+                "service": (instance.extra.get("kind") if instance is not None else "") or provider_id,
                 "extra": extra,
             }
         )
@@ -1583,3 +1608,185 @@ async def install_bunko_engine(request: Request, totp: str = Form("")) -> JSONRe
     code = (totp or "").strip() or None
     _start_engine_job("bunko", _run_bunko_install_job, method, code)
     return JSONResponse({"ok": True, "state": "running"}, status_code=202)
+
+
+# --- rclone shortcuts: configure MEGA, Drive, OneDrive and WebDAV from here --
+
+_RCLONE_SERVICE_ALIASES = ("mega", "drive", "onedrive", "webdav")
+
+
+def _rclone_account_target(alias: str) -> tuple[str, str]:
+    """(storage name, alias) for a bridge-created rclone account.
+
+    The four service cards keep the names users already know. Those names are
+    also the legacy native provider ids, so they are allowed only while no
+    native account of that provider is configured.
+    """
+    try:
+        return _account_target("rclone", alias)
+    except (accounts.AliasCollision, ValueError):
+        candidate = str(alias or "").strip().lower()
+        if candidate not in _RCLONE_SERVICE_ALIASES:
+            raise
+        in_use = any(
+            row["id"] == candidate and row["state"] != "not_configured"
+            for row in _method_rows()
+        )
+        if in_use:
+            raise
+        return candidate, candidate
+
+
+def _rclone_save_account(remote: str, alias: str, label: str, root: str, extra: dict) -> accounts.Instance:
+    """Record one bridge account for a remote the page just created."""
+    try:
+        name, clean_alias = _rclone_account_target(alias)
+    except accounts.AliasCollision as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    service = str(extra.pop("kind", "") or "")
+    merged = {
+        "remote": remote if remote.endswith(":") else f"{remote}:",
+        # "kind" is what the page groups the account under, so the four cards
+        # keep their own counts after the rclone migration.
+        "kind": service,
+        "provider_kind": service,
+    }
+    merged.update(extra)
+    instance = accounts.save_instance(
+        "rclone",
+        name,
+        label=(label.strip() or None),
+        root=(root.strip() or rclone_auth.default_root()),
+        alias=clean_alias,
+        extra=merged,
+    )
+    _promote_default_if_local(instance.id)
+    # Start the shared gateway now so the first upload does not pay for it.
+    try:
+        from . import rclone_gateway
+
+        rclone_gateway.ensure(instance.name)
+    except Exception:
+        pass
+    return instance
+
+
+@router.get("/config/rclone/services")
+async def rclone_services() -> JSONResponse:
+    return JSONResponse(
+        {
+            "available": rclone_auth.binary() is not None,
+            "services": rclone_auth.services(),
+            "default_root": rclone_auth.default_root(),
+        }
+    )
+
+
+@router.post("/config/rclone/mega")
+async def rclone_add_mega(
+    request: Request,
+    alias: str = Form(""),
+    label: str = Form(""),
+    email: str = Form(""),
+    password: str = Form(""),
+    totp: str = Form(""),
+    root: str = Form(""),
+) -> JSONResponse:
+    """Create a MEGA remote through rclone, then record the destination."""
+    _require_local_origin(request)
+    try:
+        remote, extra = await asyncio.to_thread(
+            rclone_auth.create_mega, alias or "mega", email, password, totp
+        )
+    except rclone_auth.RcloneAuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    extra["kind"] = "mega"
+    instance = await asyncio.to_thread(_rclone_save_account, remote, alias, label, root, extra)
+    return JSONResponse(
+        {
+            "ok": True,
+            "method": instance.id,
+            "remote": instance.extra.get("remote"),
+            "identity": rclone_auth.remote_summary(str(instance.extra.get("remote") or "")),
+        }
+    )
+
+
+@router.post("/config/rclone/webdav")
+async def rclone_add_webdav(
+    request: Request,
+    alias: str = Form(""),
+    label: str = Form(""),
+    url: str = Form(""),
+    username: str = Form(""),
+    password: str = Form(""),
+    root: str = Form(""),
+) -> JSONResponse:
+    """Create a WebDAV remote through rclone, then record the destination."""
+    _require_local_origin(request)
+    try:
+        remote, extra = await asyncio.to_thread(
+            rclone_auth.create_webdav, alias or "webdav", url, username, password
+        )
+    except rclone_auth.RcloneAuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    extra["kind"] = "webdav"
+    instance = await asyncio.to_thread(_rclone_save_account, remote, alias, label, root, extra)
+    return JSONResponse(
+        {
+            "ok": True,
+            "method": instance.id,
+            "remote": instance.extra.get("remote"),
+            "identity": rclone_auth.remote_summary(str(instance.extra.get("remote") or "")),
+        }
+    )
+
+
+@router.post("/config/rclone/authorize/start")
+async def rclone_authorize_start(request: Request, service: str = Form("")) -> JSONResponse:
+    """Open the consent tab for Drive or OneDrive through rclone."""
+    _require_local_origin(request)
+    kind = str(service or "").strip().lower()
+    try:
+        flow = await asyncio.to_thread(rclone_auth.start_authorize, kind)
+    except rclone_auth.RcloneAuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return JSONResponse({"ok": True, **flow})
+
+
+@router.get("/config/rclone/authorize/status")
+async def rclone_authorize_status(flow_id: str = "") -> JSONResponse:
+    try:
+        return JSONResponse(await asyncio.to_thread(rclone_auth.authorize_status, flow_id))
+    except rclone_auth.RcloneAuthError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.post("/config/rclone/authorize/finish")
+async def rclone_authorize_finish(
+    request: Request,
+    flow_id: str = Form(""),
+    alias: str = Form(""),
+    label: str = Form(""),
+    root: str = Form(""),
+) -> JSONResponse:
+    """Turn a finished consent flow into a destination."""
+    _require_local_origin(request)
+    try:
+        remote, extra = await asyncio.to_thread(
+            rclone_auth.finish_authorize, flow_id, alias or ""
+        )
+    except rclone_auth.RcloneAuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    extra["kind"] = "drive" if alias.startswith("drive") else "onedrive"
+    instance = await asyncio.to_thread(_rclone_save_account, remote, alias, label, root, extra)
+    return JSONResponse(
+        {
+            "ok": True,
+            "method": instance.id,
+            "remote": instance.extra.get("remote"),
+            "identity": rclone_auth.remote_summary(str(instance.extra.get("remote") or "")),
+        }
+    )
