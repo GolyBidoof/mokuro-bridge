@@ -222,6 +222,8 @@
   .ver strong { font-size: 11.5px; font-weight: 600; }
   .ver-note { color: var(--muted); font-size: 11px; }
   .ver .link { font-size: 10.5px; }
+  .ver-link { margin-left: auto; color: var(--muted); font-size: 12px; line-height: 1; text-decoration: none; }
+  .ver-link:hover { color: var(--accent); }
   .dot { width: 7px; height: 7px; border-radius: 999px; display: inline-block; flex: 0 0 auto; transform: translateY(-1px); }
   .dot[data-state="ok"] { background: var(--accent); }
   .dot[data-state="warn"] { background: #e5b567; }
@@ -458,9 +460,9 @@
         <div class="stat stat-status">
           <dt>Setup status</dt>
           <dd class="versions-strip" aria-label="Installed components">
-            <div class="ver"><i class="dot" id="dot-bridge" data-state="unknown"></i><span class="ver-name">bridge</span><strong id="ver-bridge">—</strong><span class="ver-note" id="ver-bridge-state"></span></div>
-            <div class="ver"><i class="dot" id="dot-mokuro" data-state="unknown"></i><span class="ver-name">mokuro</span><strong id="ver-mokuro">—</strong><span class="ver-note" id="ver-mokuro-note"></span></div>
-            <div class="ver"><i class="dot" id="dot-bunko" data-state="unknown"></i><span class="ver-name">mokuro-bunko</span><strong id="ver-bunko">—</strong><span class="ver-note" id="ver-bunko-note"></span></div>
+            <div class="ver"><i class="dot" id="dot-bridge" data-state="unknown"></i><span class="ver-name">bridge</span><strong id="ver-bridge">—</strong><span class="ver-note" id="ver-bridge-state"></span><a class="ver-link" href="https://github.com/GolyBidoof/mokuro-bridge" target="_blank" rel="noopener" title="mokuro-bridge on GitHub" aria-label="mokuro-bridge on GitHub">↗</a></div>
+            <div class="ver"><i class="dot" id="dot-mokuro" data-state="unknown"></i><span class="ver-name">mokuro</span><strong id="ver-mokuro">—</strong><span class="ver-note" id="ver-mokuro-note"></span><a class="ver-link" href="https://github.com/GolyBidoof/mokuro" target="_blank" rel="noopener" title="mokuro on GitHub" aria-label="mokuro on GitHub">↗</a></div>
+            <div class="ver"><i class="dot" id="dot-bunko" data-state="unknown"></i><span class="ver-name">mokuro-bunko</span><strong id="ver-bunko">—</strong><span class="ver-note" id="ver-bunko-note"></span><a class="ver-link" href="https://github.com/Gnathonic/mokuro-bunko" target="_blank" rel="noopener" title="mokuro-bunko on GitHub" aria-label="mokuro-bunko on GitHub">↗</a></div>
           </dd>
         </div>
       </dl>
@@ -1279,13 +1281,7 @@ function renderVersions() {
     else bunko.textContent = String(bunkoInfo.version || "").slice(0, 8) || "installed";
   }
   const bunkoNote = $("ver-bunko-note");
-  if (bunkoNote) {
-    bunkoNote.textContent = !bunkoInstalled
-      ? ""
-      : bunkoInfo.update_available
-        ? "update available"
-        : (bunkoInfo.sync && bunkoInfo.sync.configured_method ? `library on ${bunkoInfo.sync.configured_method}` : "installed");
-  }
+  if (bunkoNote) bunkoNote.textContent = bunkoInfo && bunkoInfo.update_available ? "update available" : "";
   if (!bunkoInstalled) {
     markAction("ver-bunko", () => installEngine("bunko", {}), "Install mokuro-bunko");
   } else if (bunkoInfo.update_available) {
