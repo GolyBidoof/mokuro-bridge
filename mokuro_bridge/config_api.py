@@ -1958,6 +1958,73 @@ async def rclone_add_webdav(
     )
 
 
+_LOCAL_USAGE_TTL_S = 300.0
+_local_usage_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _local_usage(path: str, *, refresh: bool = False) -> dict:
+    """Disk space and folder size for a local destination (cached briefly)."""
+    target = Path(path).expanduser()
+    if not target.exists() or not target.is_dir():
+        return {"available": False, "error": "the local folder does not exist yet"}
+    now = time.monotonic()
+    key = str(target)
+    cached = _local_usage_cache.get(key)
+    if cached is not None and not refresh and now - cached[0] < _LOCAL_USAGE_TTL_S:
+        return dict(cached[1])
+    disk = shutil.disk_usage(str(target))
+    bytes_total = 0
+    count = 0
+    errors = 0
+    for root, _dirs, files in os.walk(target):
+        for name in files:
+            try:
+                stat_result = os.stat(os.path.join(root, name), follow_symlinks=False)
+            except OSError:
+                errors += 1
+                continue
+            bytes_total += stat_result.st_size
+            count += 1
+    data = {
+        "available": True,
+        "about": {"total": disk.total, "used": disk.used, "free": disk.free},
+        "about_error": "",
+        "folder": {"bytes": bytes_total, "count": count, "errors": errors},
+        "folder_error": "",
+        "checked_at": time.time(),
+    }
+    _local_usage_cache[key] = (now, data)
+    return dict(data)
+
+
+@router.get("/config/usage")
+async def read_usage(method: str = "", refresh: str = "") -> JSONResponse:
+    """Space details for any destination: local disk or an rclone remote."""
+    if not method or method == "local":
+        path = str(OUTPUT_DIR)
+        try:
+            config = _build_upload_methods()
+            local = config.get("local")
+            if local is not None and getattr(local, "root", ""):
+                path = str(local.root)
+        except Exception:
+            pass
+        data = await asyncio.to_thread(
+            _local_usage, path, refresh=refresh in ("1", "true", "yes")
+        )
+        return JSONResponse(data)
+    try:
+        provider, name = accounts.parse_method_id(method)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if provider != "rclone":
+        raise HTTPException(status_code=400, detail="space details are only available for local and rclone destinations")
+    data = await asyncio.to_thread(
+        rclone_provider.usage, name, refresh=refresh in ("1", "true", "yes")
+    )
+    return JSONResponse(data)
+
+
 @router.get("/config/rclone/usage")
 async def rclone_usage(method: str = "", refresh: str = "") -> JSONResponse:
     """Quota and upload-folder size for one rclone destination (cached)."""

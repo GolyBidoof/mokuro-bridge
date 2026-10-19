@@ -216,13 +216,16 @@
   .rclone-service span { color: var(--muted); font-size: 12px; }
   .rclone-auth { margin-top: 10px; }
   .btn.big { padding: 11px 18px; font-size: 14px; }
-  .versions-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin-bottom: 12px; }
-  .ver { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
-  .ver-name { color: var(--muted); font-size: 12px; }
-  .ver strong { font-size: 15px; }
-  .ver-note { color: var(--muted); font-size: 12px; }
-  .ver .pill { font-size: 11px; color: var(--muted); }
-  .ver .pill a { color: var(--accent); }
+  .stat-status .versions-strip { display: flex; flex-direction: column; gap: 3px; margin: 0; }
+  .ver { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px; padding: 0; border: 0; background: none; font-size: 11.5px; line-height: 1.45; }
+  .ver-name { color: var(--muted); font-size: 11px; }
+  .ver strong { font-size: 11.5px; font-weight: 600; }
+  .ver-note { color: var(--muted); font-size: 11px; }
+  .ver .link { font-size: 10.5px; }
+  .dot { width: 7px; height: 7px; border-radius: 999px; display: inline-block; flex: 0 0 auto; transform: translateY(-1px); }
+  .dot[data-state="ok"] { background: var(--accent); }
+  .dot[data-state="warn"] { background: #e5b567; }
+  .dot[data-state="off"] { background: var(--muted); opacity: .5; }
   .gate-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin: 0 0 14px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
   .gate-banner strong { color: var(--text); }
   .dest-usage { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; margin-top: 8px; color: var(--muted); font-size: 12px; }
@@ -450,10 +453,13 @@
           <dd id="stat-target">—</dd>
           <dd class="stat-sub" id="stat-target-sub">default destination</dd>
         </div>
-        <div class="stat">
-          <dt>Reading engine</dt>
-          <dd id="stat-engine">—</dd>
-          <dd class="stat-sub" id="stat-engine-sub">checking</dd>
+        <div class="stat stat-status">
+          <dt>Setup status</dt>
+          <dd class="versions-strip" aria-label="Installed components">
+            <div class="ver"><i class="dot" id="dot-bridge" data-state="ok"></i><span class="ver-name">bridge</span><strong id="ver-bridge">—</strong><span class="ver-note" id="ver-bridge-state">checking…</span><button class="link" type="button" id="check-update">Check now</button></div>
+            <div class="ver"><i class="dot" id="dot-mokuro" data-state="off"></i><span class="ver-name">mokuro</span><strong id="ver-mokuro">—</strong><span class="ver-note" id="ver-mokuro-note"></span></div>
+            <div class="ver"><i class="dot" id="dot-bunko" data-state="off"></i><span class="ver-name">mokuro-bunko</span><strong id="ver-bunko">—</strong><span class="ver-note" id="ver-bunko-note"></span></div>
+          </dd>
         </div>
       </dl>
       <div class="accel" id="accel" data-on="false">
@@ -490,11 +496,6 @@
           <h2 id="engines-heading">Reading engine</h2>
           <p class="lede">Optional. The bridge works without one, but reading pages needs mokuro. The faster GolyBidoof build can be installed here; no terminal needed.</p>
         </div>
-      </div>
-      <div class="versions-strip" aria-label="Installed versions">
-        <div class="ver"><span class="ver-name">mokuro-bridge</span><strong id="ver-bridge">—</strong><span class="pill" id="ver-bridge-state">checking…</span><button class="link" type="button" id="check-update">Check now</button></div>
-        <div class="ver"><span class="ver-name">mokuro</span><strong id="ver-mokuro">—</strong><span class="ver-note" id="ver-mokuro-note"></span></div>
-        <div class="ver"><span class="ver-name">mokuro-bunko</span><strong id="ver-bunko">—</strong><span class="ver-note" id="ver-bunko-note"></span></div>
       </div>
       <div class="prefs-panel engine-panel">
         <div class="engine-row">
@@ -1061,8 +1062,10 @@ function renderLive() {
   }
 
   const engine = engineParts(h);
-  $("stat-engine").textContent = engine.version;
-  $("stat-engine-sub").textContent = engine.flavour;
+  const engineCell = $("stat-engine");
+  if (engineCell) engineCell.textContent = engine.version;
+  const engineSub = $("stat-engine-sub");
+  if (engineSub) engineSub.textContent = engine.flavour;
   const engineHelp = $("engine-help");
   if (engineHelp) engineHelp.hidden = engine.flavour !== "upstream build" && engine.flavour !== "not installed";
   const bunko = bunkoInfo(h);
@@ -1211,6 +1214,8 @@ function renderVersions() {
   const h = state.health || {};
   const bridge = $("ver-bridge");
   if (bridge) bridge.textContent = h.version ? `v${h.version}` : "unknown";
+  const dotBridge = $("dot-bridge");
+  if (dotBridge) dotBridge.dataset.state = h.update_available ? "warn" : (h.update_error ? "warn" : "ok");
   const bridgeState = $("ver-bridge-state");
   if (bridgeState) {
     if (h.update_error) {
@@ -1225,6 +1230,8 @@ function renderVersions() {
     }
   }
   const mokuro = $("ver-mokuro");
+  const dotMokuro = $("dot-mokuro");
+  if (dotMokuro) dotMokuro.dataset.state = h.mokuro_installed !== false ? "ok" : "off";
   if (mokuro) {
     const installed = h.mokuro_installed !== false;
     mokuro.textContent = installed && h.mokuro_version ? `v${h.mokuro_version}` : "not installed";
@@ -1236,6 +1243,8 @@ function renderVersions() {
   const bunko = $("ver-bunko");
   const bunkoNote = $("ver-bunko-note");
   const info = state.engines && state.engines.bunko;
+  const dotBunko = $("dot-bunko");
+  if (dotBunko) dotBunko.dataset.state = info && info.installed ? "ok" : "off";
   if (bunko) {
     if (!info) {
       bunko.textContent = "—";
@@ -1333,7 +1342,7 @@ function renderDestinations() {
       <div class="dest-folder"><span class="k">Folder</span><code title="${esc(folderLine)}">${esc(folderLine || "not chosen yet")}</code>${!isLocal && PROVIDER_LINKS[provider] ? `<a class="folder-open" href="${esc(PROVIDER_LINKS[provider].web)}" target="_blank" rel="noopener" title="${esc(PROVIDER_LINKS[provider].webLabel)}" aria-label="${esc(PROVIDER_LINKS[provider].webLabel)}">${icon("external")}</a>` : ""}</div>
       ${st !== "connected" ? `<p class="dest-note">${esc(STATE_NOTE[st] || "")}</p>` : ""}
       ${uploadLocked ? `<p class="dest-note">Install mokuro-bunko to resume uploads.</p>` : ""}
-      ${st === "connected" && m.provider === "rclone" ? `<div class="dest-usage" data-usage="${esc(alias)}"><span class="usage-text">Checking space…</span></div>` : ""}
+      ${st === "connected" ? `<div class="dest-usage" data-usage="${esc(alias)}"><span class="usage-text">Checking space…</span></div>` : ""}
       <div class="dest-actions">${primary}${defaultAction}</div>
       <div class="dest-links">${links.join("<span aria-hidden=\"true\">·</span>")}</div>
     </article>`;
@@ -1403,7 +1412,7 @@ async function loadUsage(alias, refresh) {
   if (host.dataset.loading === "1" && !refresh) return;
   host.dataset.loading = "1";
   try {
-    const data = await api(`/config/rclone/usage?method=${encodeURIComponent(alias)}${refresh ? "&refresh=1" : ""}`);
+    const data = await api(`/config/usage?method=${encodeURIComponent(alias)}${refresh ? "&refresh=1" : ""}`);
     renderUsage(host, data);
   } catch (error) {
     renderUsage(host, { available: false, error: "Space details are not available." });
