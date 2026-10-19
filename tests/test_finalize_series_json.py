@@ -392,3 +392,44 @@ def test_a_corrupt_existing_manifest_is_revived_not_replaced(bridge):
         "Other Volume",
         "Sample Series 2",
     ]
+
+
+def test_a_bunko_destination_skips_the_series_json_write(remote_bridge, monkeypatch):
+    """The destination compiles the manifest, so finalize uploads only the volume."""
+    monkeypatch.setattr(api, "metadata_is_external", lambda method: True)
+
+    stream = _capture_and_finalize_remote(remote_bridge, title="Sample Series 1", pages=2)
+    frames = _frames(stream)
+
+    assert frames[-1]["status"] == "success", stream
+    assert remote_bridge.uploads == [
+        ("Sample Series 1.webp", "/library/Sample Series", "fail"),
+        ("Sample Series 1.mokuro", "/library/Sample Series", "fail"),
+        ("Sample Series 1.cbz", "/library/Sample Series", "fail"),
+    ]
+    assert series_json.SERIES_FILE_NAME not in remote_bridge.store
+    external = [
+        frame
+        for frame in frames
+        if frame.get("stage") == "series_json" and frame.get("external")
+    ]
+    assert external, stream
+    assert external[0]["ok"] is True
+    assert external[0]["managed_by"] == "mokuro-bunko"
+
+
+def test_a_destination_that_does_not_own_the_manifest_still_gets_it(
+    remote_bridge, monkeypatch
+):
+    monkeypatch.setattr(api, "metadata_is_external", lambda method: False)
+
+    stream = _capture_and_finalize_remote(remote_bridge, title="Sample Series 1", pages=2)
+
+    assert _frames(stream)[-1]["status"] == "success", stream
+    assert [name for name, _dir, _overwrite in remote_bridge.uploads] == [
+        "Sample Series 1.webp",
+        "Sample Series 1.cbz",
+        "Sample Series 1.mokuro",
+        series_json.SERIES_FILE_NAME,
+    ]
+    assert series_json.SERIES_FILE_NAME in remote_bridge.store

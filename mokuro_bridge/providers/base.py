@@ -99,6 +99,11 @@ class Provider:
         (name, root, label).
     account:
         The presentation view for one account.
+    metadata_owner:
+        Optional check for a destination that compiles ``series.json`` itself
+        (mokuro-bunko). It receives the account name and returns True when that
+        destination owns the manifest, so the caller skips its own read, merge
+        and upload. ``None`` means the registry's generic marker probe decides.
     """
 
     id: str
@@ -111,6 +116,7 @@ class Provider:
     list_folders: Callable[[str, str], list[dict]]
     run_setup: Callable[..., None]
     account: Callable[[accounts.Instance], ProviderAccount]
+    metadata_owner: Optional[Callable[[str], bool]] = None
 
     def root(self, name: str = accounts.DEFAULT_NAME) -> str:
         """Remote root for one account of this provider.
