@@ -21,13 +21,71 @@ def isolated(tmp_path, monkeypatch):
     yield
 
 
-def test_the_page_offers_only_the_three_things_worth_changing():
+def test_the_page_offers_the_settings_worth_changing():
     assert [spec["env"] for spec in settings.SPECS] == [
         "MOKURO_BRIDGE_FETCH_PORTS",
+        "MOKURO_BRIDGE_FETCH_CONCURRENCY",
+        "MOKURO_BRIDGE_UPDATE_CHECK",
+        "OCR_BATCH_SIZE",
         "MOKURO_BRIDGE_OUTPUT_DIR",
         "MOKURO_BRIDGE_INGEST_ROOTS",
     ]
-    assert all(spec["label"] and spec["help"] for spec in settings.SPECS)
+    assert all(spec["label"] and spec["help"] and spec.get("group") for spec in settings.SPECS)
+
+
+def test_the_page_shows_short_named_groups_in_reading_order():
+    groups = []
+    for spec in settings.SPECS:
+        if spec["group"] not in groups:
+            groups.append(spec["group"])
+    assert groups == ["Downloading", "Updates", "Reading pages", "Advanced"]
+    assert [row["group"] for row in settings.snapshot()] == [
+        "Downloading",
+        "Downloading",
+        "Updates",
+        "Reading pages",
+        "Advanced",
+        "Advanced",
+    ]
+
+
+def test_a_switch_is_stored_as_true_or_false():
+    saved, problems = settings.update({"MOKURO_BRIDGE_UPDATE_CHECK": "off"})
+    assert problems == []
+    assert saved == {"MOKURO_BRIDGE_UPDATE_CHECK": "false"}
+    assert settings.stored("MOKURO_BRIDGE_UPDATE_CHECK") == "false"
+    row = next(r for r in settings.snapshot() if r["env"] == "MOKURO_BRIDGE_UPDATE_CHECK")
+    assert row["display"] == "Off"
+    assert row["restart"] is False, "turning update checks off must not need a restart"
+
+
+@pytest.mark.parametrize("value, expected", [("on", "true"), (True, "true"), (1, "true"), ("0", "false"), (False, "false")])
+def test_switch_values_are_normalised(value, expected):
+    saved, problems = settings.update({"MOKURO_BRIDGE_UPDATE_CHECK": value})
+    assert problems == []
+    assert saved["MOKURO_BRIDGE_UPDATE_CHECK"] == expected
+
+
+def test_a_switch_that_is_not_on_or_off_is_rejected():
+    saved, problems = settings.update({"MOKURO_BRIDGE_UPDATE_CHECK": "maybe"})
+    assert saved == {} and problems
+    assert "on or off" in problems[0]
+    assert not settings.SETTINGS_FILE.exists()
+
+
+def test_update_checks_follow_the_page(monkeypatch):
+    from mokuro_bridge import update
+
+    settings.write({"MOKURO_BRIDGE_UPDATE_CHECK": "false"})
+    assert update.checks_enabled() is False
+    monkeypatch.setenv("MOKURO_BRIDGE_UPDATE_CHECK", "1")
+    assert update.checks_enabled() is True, "the environment still wins"
+
+
+def test_the_download_and_ocr_rows_are_live_once_the_file_is_written():
+    settings.write({"MOKURO_BRIDGE_FETCH_CONCURRENCY": 8, "OCR_BATCH_SIZE": 16})
+    assert config._knob("MOKURO_BRIDGE_FETCH_CONCURRENCY", 0) == "8"
+    assert config._knob("OCR_BATCH_SIZE", 32) == "16"
 
 
 def test_env_only_settings_still_apply_but_are_not_on_the_page(monkeypatch):
@@ -35,6 +93,8 @@ def test_env_only_settings_still_apply_but_are_not_on_the_page(monkeypatch):
     assert config._knob("OCR_CHUNK_SIZE", 8) == "32"
     assert "OCR_CHUNK_SIZE" in settings._ENV_ONLY
     assert all(spec["env"] != "OCR_CHUNK_SIZE" for spec in settings.SPECS)
+    # Fetch concurrency moved onto the page, so it must not still be env-only.
+    assert "MOKURO_BRIDGE_FETCH_CONCURRENCY" not in settings._ENV_ONLY
 
 
 def test_defaults_come_from_the_specs():

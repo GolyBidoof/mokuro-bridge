@@ -34,6 +34,7 @@ import threading
 import time
 from typing import Any, Optional
 
+from . import settings
 from . import APP_NAME, __version__
 from . import log
 
@@ -100,10 +101,9 @@ def is_newer(candidate: str, current: str) -> bool:
 
 
 def _env_flag(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in _TRUTHY
+    """Environment first, then the settings file the dashboard writes, then default."""
+    raw = settings.value(name, "true" if default else "false")
+    return str(raw).strip().lower() in _TRUTHY
 
 
 def _env_float(name: str, default: float, *, minimum: float = 0.1) -> float:

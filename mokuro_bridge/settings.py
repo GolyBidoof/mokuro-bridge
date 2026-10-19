@@ -32,13 +32,42 @@ SPECS: tuple[dict, ...] = (
         "help": "Opens extra local ports so the page downloader can fetch more "
         "pages at once. 0 turns the extra speed off.",
         "type": "int", "min": 0, "max": 256, "default": 48, "restart": True,
+        "group": "Downloading",
+    },
+    {
+        "env": "MOKURO_BRIDGE_FETCH_CONCURRENCY",
+        "label": "Pages fetched at the same time",
+        "help": "How many pages the accelerator requests at once. 0 means no "
+        "cap; lower it if the store's CDN starts refusing or throttling a large "
+        "burst.",
+        "type": "int", "min": 0, "max": 64, "default": 0, "restart": True,
+        "group": "Downloading",
+    },
+    {
+        "env": "MOKURO_BRIDGE_UPDATE_CHECK",
+        "label": "Check for updates",
+        "help": "Asks GitHub whether a newer release exists and shows it in the "
+        "footer. Nothing is downloaded or installed. Turn it off on an offline "
+        "machine; this takes effect immediately.",
+        "type": "bool", "default": True, "restart": False,
+        "group": "Updates",
+    },
+    {
+        "env": "OCR_BATCH_SIZE",
+        "label": "Pages the OCR engine reads at once",
+        "help": "Bigger batches keep a fast machine busier and a small one "
+        "slower: lower it when memory is tight. It applies after a restart.",
+        "type": "int", "min": 1, "max": 256, "default": 32, "restart": True,
+        "group": "Reading pages",
     },
     {
         "env": "MOKURO_BRIDGE_OUTPUT_DIR",
         "label": "Where finished volumes are saved on this computer",
         "help": "Each series gets its own folder here. Leave it empty to use the "
-        "default folder next to the install.",
+        "default folder next to the install. Only used when no client names a "
+        "folder, and each destination card's Change folder wins over it.",
         "type": "path", "default": "", "restart": True,
+        "group": "Advanced",
     },
     {
         "env": "MOKURO_BRIDGE_INGEST_ROOTS",
@@ -46,6 +75,7 @@ SPECS: tuple[dict, ...] = (
         "help": "Only needed if a library lives outside your home folder, for "
         "example on another drive. Separate several with commas.",
         "type": "csv", "default": "", "restart": True,
+        "group": "Advanced",
     },
 )
 
@@ -53,7 +83,6 @@ SPECS: tuple[dict, ...] = (
 # minimum-page guard are set from the environment (see .env.example) rather
 # than offered to someone configuring their uploads for the first time.
 _ENV_ONLY = (
-    "MOKURO_BRIDGE_FETCH_CONCURRENCY",
     "OCR_CHUNK_SIZE",
     "OCR_IDLE_FLUSH_S",
     "MIN_PAGES_FOR_MEGA",
@@ -200,6 +229,23 @@ def _csv_value(raw: Any) -> str:
     return ",".join(kept)
 
 
+def _bool_value(raw: Any) -> str:
+    """Normalise a switch to ``"true"`` or ``"false"``.
+
+    A checkbox sends "true"/"false"; a hand-edited file may hold a boolean, 1/0
+    or on/off, and all of those must keep working. Anything else is rejected
+    rather than silently read as off.
+    """
+    if isinstance(raw, bool):
+        return "true" if raw else "false"
+    text = str(raw).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return "true"
+    if text in ("0", "false", "no", "off"):
+        return "false"
+    raise ValueError("must be on or off")
+
+
 def _coerce(spec: dict, raw: Any) -> Any:
     kind = spec["type"]
     if kind in ("int", "float"):
@@ -214,6 +260,8 @@ def _coerce(spec: dict, raw: Any) -> Any:
         return _output_dir_value(raw)
     if kind == "csv":
         return _csv_value(raw)
+    if kind == "bool":
+        return _bool_value(raw)
     return str(raw).strip()
 
 
@@ -292,6 +340,7 @@ def snapshot() -> list[dict]:
                 "label": spec["label"],
                 "help": spec["help"],
                 "type": spec["type"],
+                "group": spec.get("group", "Preferences"),
                 "value": current,
                 "display": _display(spec, current),
                 "default": spec["default"],
@@ -311,6 +360,8 @@ def snapshot() -> list[dict]:
 
 
 def _display(spec: dict, current: Any) -> str:
+    if spec["type"] == "bool":
+        return "On" if str(current).strip().lower() in ("1", "true", "yes", "on") else "Off"
     if spec["type"] == "csv":
         return ", ".join(str(current).split(",")) if current else "(none)"
     if spec["type"] in ("int", "float"):

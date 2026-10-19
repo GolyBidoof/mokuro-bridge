@@ -261,6 +261,12 @@
   .prov[data-kind="pinned"]::before { background: var(--warn); }
   .pref-control { display: flex; flex-direction: column; gap: 6px; }
   .pref-control .row { display: flex; gap: 7px; }
+  .pref-group + .pref-group { margin-top: 6px; }
+  .pref-group > h3 { font-size: 11.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--faint); margin: 18px 0 0; }
+  .pref-group:first-child > h3 { margin-top: 2px; }
+  .pref-switch { display: flex; align-items: center; gap: 9px; min-height: 34px; }
+  .pref-switch input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; margin: 0; accent-color: var(--accent); }
+  .pref-switch span { font-size: 13.5px; color: var(--muted); }
   .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
   .field > label { font-size: 12.5px; font-weight: 600; }
   input[type="text"], input[type="number"], input[type="email"], input[type="password"], input[type="url"], select { width: 100%; font: inherit; font-size: 13.5px; color: var(--ink); background: var(--code-bg); border: 1px solid var(--line-strong); border-radius: 8px; padding: 7px 9px; min-height: 34px; }
@@ -1542,22 +1548,44 @@ async function setDefault(alias) {
 /* ------------------------------------------------------------------ *
  *  Rendering: preferences
  * ------------------------------------------------------------------ */
+function truthySetting(value) {
+  return ["1", "true", "yes", "on"].includes(String(value ?? "").trim().toLowerCase());
+}
+
+function settingText(row) {
+  if (row.type === "bool") return truthySetting(row.value) ? "On" : "Off";
+  return String(row.value ?? "");
+}
+
 function statusChipFor(row) {
   const pinned = row.env_set === true || row.pinned === true || row.source === "environment";
   if (pinned) return { kind: "pinned", text: `Pinned by ${row.env || "the environment"}` };
   if (row.source === "settings file") return { kind: "set", text: "Set here" };
-  if (!row.value) return { kind: "", text: "Using the default" };
-  return { kind: "", text: `Using the default (${row.value})` };
+  const text = row.type === "bool" ? settingText(row) : row.value;
+  if (!text) return { kind: "", text: "Using the default" };
+  return { kind: "", text: `Using the default (${text})` };
 }
 
 function fieldFor(row) {
+  const pinned = row.env_set === true || row.pinned === true || row.source === "environment";
+  if (row.type === "bool") {
+    const on = truthySetting(row.value);
+    return `<div class="pref-control">
+      <div class="pref-switch">
+        <input id="set-${esc(row.env)}" data-env="${esc(row.env)}" type="checkbox"
+               ${on ? "checked" : ""} ${pinned ? "disabled" : ""}
+               aria-describedby="help-${esc(row.env)}">
+        <span>${on ? "On" : "Off"}</span>
+      </div>
+      <span class="field-error" id="err-${esc(row.env)}" role="alert"></span>
+    </div>`;
+  }
   const numeric = row.type === "int" || row.type === "float";
   const attrs = numeric
     ? `type="number" step="${row.type === "int" ? "1" : "any"}"` +
       (row.min === null || row.min === undefined ? "" : ` min="${esc(row.min)}"`) +
       (row.max === null || row.max === undefined ? "" : ` max="${esc(row.max)}"`)
     : `type="text"`;
-  const pinned = row.env_set === true || row.pinned === true || row.source === "environment";
   return `<div class="pref-control">
     <div class="row">
       <input id="set-${esc(row.env)}" data-env="${esc(row.env)}" ${attrs}
@@ -1572,12 +1600,9 @@ function fieldFor(row) {
   </div>`;
 }
 
-function renderSettings() {
-  if (!state.config) return;
-  state.settings = state.config.settings || [];
-  $("settings").innerHTML = state.settings.map((row) => {
-    const status = statusChipFor(row);
-    return `<div class="pref" data-pref="${esc(row.env)}">
+function prefRow(row) {
+  const status = statusChipFor(row);
+  return `<div class="pref" data-pref="${esc(row.env)}">
       <div>
         <div class="pref-label" id="label-${esc(row.env)}">${esc(row.label)}</div>
         <p class="pref-help" id="help-${esc(row.env)}">${esc(row.help)}</p>
@@ -1585,14 +1610,37 @@ function renderSettings() {
       </div>
       ${fieldFor(row)}
     </div>`;
-  }).join("");
+}
+
+function renderSettings() {
+  if (!state.config) return;
+  state.settings = state.config.settings || [];
+  const groups = [];
+  state.settings.forEach((row) => {
+    const name = row.group || "Preferences";
+    let group = groups.find((entry) => entry.name === name);
+    if (!group) { group = { name, rows: [] }; groups.push(group); }
+    group.rows.push(row);
+  });
+  $("settings").innerHTML = groups.map((group) =>
+    `<div class="pref-group" data-group="${esc(group.name)}">
+      <h3>${esc(group.name)}</h3>
+      ${group.rows.map(prefRow).join("")}
+    </div>`
+  ).join("");
   $("settings").querySelectorAll("input[data-env]").forEach((input) => {
-    input.addEventListener("input", () => {
+    const touched = () => {
       state.dirty = true;
-      validateField(input);
+      if (input.type === "checkbox") {
+        const caption = input.parentElement && input.parentElement.querySelector("span");
+        if (caption) caption.textContent = input.checked ? "On" : "Off";
+      } else {
+        validateField(input);
+      }
       updateSaveRow();
-    });
-    input.addEventListener("change", () => { validateField(input); updateSaveRow(); });
+    };
+    input.addEventListener("input", touched);
+    input.addEventListener("change", touched);
   });
   $("settings").querySelectorAll("[data-pickpath]").forEach((button) => {
     button.onclick = () => openFolderPicker("local", "output", button.dataset.pickpath);
@@ -1602,6 +1650,7 @@ function renderSettings() {
 }
 
 function validateField(input) {
+  if (input.type === "checkbox") return true;
   const row = state.settings.find((r) => r.env === input.dataset.env);
   const err = document.getElementById(`err-${input.dataset.env}`);
   if (!row || !err) return true;
@@ -1652,6 +1701,10 @@ async function saveSettings() {
   state.settings.forEach((row) => {
     const input = document.getElementById(`set-${row.env}`);
     if (!input || input.disabled) return;
+    if (input.type === "checkbox") {
+      payload[row.env] = input.checked ? "true" : "false";
+      return;
+    }
     if (!validateField(input)) return;
     payload[row.env] = input.value;
   });

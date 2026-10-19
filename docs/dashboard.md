@@ -25,7 +25,7 @@ Dark mode follows reader.mokuro.app: the `#030712` canvas, `#1f2937` header and 
 | Notices | A banner when the bridge is not answering, when a newer version exists (with a release link and the `mokuro-bridge --update` command), and when a destination needs signing in again (with a Reconnect button) |
 | Destinations | Only real accounts and the local destination are shown. A connected account is a card with its alias, provider brand glyph (a Google Drive triangle, M/O/W monograms for MEGA, OneDrive and WebDAV, or a folder glyph for local), note, email when the bridge knows it, folder, state chip and default mark, with Change folder, Make default, Details, Rename, Remove and Copy id. An account whose sign-in has expired is the same card with the state `Sign-in expired` and Reconnect as its main action. Implicit unconfigured provider slots are not rendered |
 | Add a destination | The primary button in the Destinations section header, the single entry point to the provider picker |
-| Preferences | The three settings, with their source and a Save changes button |
+| Preferences | The settings grouped as Downloading, Updates, Reading pages and Advanced, each with its source and a Save changes button |
 | Footer | Version, a link to reader.mokuro.app, update state (`Checking for updates…`, `Up to date`, `Update checks are off` or `Could not check for updates`), and a Setup guide link that reopens the first-run guide. Developer details holds the raw `/health` and `/config` links, the terminal command, the settings file path, the engine, a `Faster engine` line with `mokuro-bridge --install-mokuro` when the loaded engine is the upstream build or missing, an optional `Library index` line for mokuro-bunko, and the fetch-proxy state |
 
 On a first run, when no remote account has been added, the Destinations section also shows the three onboarding steps: add a destination, pick a folder, then use its alias from scripts. The steps carry no button; the header's Add destination is the only entry point.
@@ -92,15 +92,20 @@ Accounts created before aliases existed derive one on read without their files b
 
 ### Settings storage and precedence
 
-The page shows three settings, because they are the three a person configuring uploads actually decides:
+The page groups the settings it offers by what a person is actually doing:
 
-| Setting | What it changes | Validation |
-| --- | --- | --- |
-| Faster downloads in the browser | How many extra local ports the page downloader may fetch through | Whole number from 0 to 256 |
-| Where finished volumes are saved on this computer | The fallback folder local copies are written to, with series folders inside it | Absolute path to an existing folder, or to a new folder whose parent exists and is writable |
-| Other folders the bridge may read | Extra read roots, for a library that lives outside your home folder | Comma-separated absolute paths |
+| Group | Setting | What it changes | Validation | Applies |
+| --- | --- | --- | --- | --- |
+| Downloading | Faster downloads in the browser | How many extra local ports the page downloader may fetch through | Whole number from 0 to 256 | After a restart |
+| Downloading | Pages fetched at the same time | How many upstream requests the accelerator makes at once; 0 means no cap | Whole number from 0 to 64 | After a restart |
+| Updates | Check for updates | Whether the bridge asks GitHub whether a newer release exists; nothing is downloaded or installed | On or off | Immediately |
+| Reading pages | Pages the OCR engine reads at once | The OCR batch size: bigger batches keep a fast machine busier, smaller ones suit tight memory | Whole number from 1 to 256 | After a restart |
+| Advanced | Where finished volumes are saved on this computer | The fallback folder local copies are written to, with series folders inside it | Absolute path to an existing folder, or to a new folder whose parent exists and is writable | After a restart |
+| Advanced | Other folders the bridge may read | Extra read roots, for a library that lives outside your home folder | Comma-separated absolute paths | After a restart |
 
-The output-dir preference is the fallback used when no folder has been chosen for the local destination. Choosing a folder on the local destination card sets a remembered folder that applies immediately to the next finalize and takes precedence over this fallback. The other two settings are read when the process starts, so a change applies after the bridge restarts; the page shows the restart command after saving, with a copy button.
+The output-dir preference is the fallback used when no folder has been chosen for the local destination. Choosing a folder on the local destination card sets a remembered folder that applies immediately to the next finalize and takes precedence over this fallback. Every row except the update check is read when the process starts, so a change applies after the bridge restarts and the page shows the restart command after saving, with a copy button. The update check is read per request, so switching it off takes effect at once and the footer stops claiming a check is pending.
+
+The groups keep the everyday switches (download speed, updates) above the set-once paths. The rest of the environment variables stay in `.env.example`: they are either security-sensitive (the bind address, CORS origins, the proxy's allowed hosts) or operational detail that a page should not be able to change under a running service.
 
 The page writes to `~/.config/mokuro-bridge/settings.json` (override with `MOKURO_BRIDGE_SETTINGS_FILE`). Every reader asks in this order:
 
