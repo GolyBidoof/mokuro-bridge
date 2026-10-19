@@ -1662,15 +1662,46 @@ def _run_bunko_install_job(method: Optional[str], totp: Optional[str]) -> None:
         )
 
 
+_BUNKO_RESTART_LOCK = threading.Lock()
+_BUNKO_RESTART_TS = {"at": 0.0}
+
+
+def _ensure_bunko_running() -> None:
+    """Bring an installed-but-stopped Bunko back up, at most every 15 seconds."""
+    from . import bunko_agent
+
+    now = time.time()
+    with _BUNKO_RESTART_LOCK:
+        if now - _BUNKO_RESTART_TS["at"] < 15.0:
+            return
+        _BUNKO_RESTART_TS["at"] = now
+
+    def run() -> None:
+        try:
+            bunko_agent.ensure_running(log=lambda message: None)
+        except Exception:
+            pass
+
+    threading.Thread(target=run, name="bunko-restart", daemon=True).start()
+
+
 @router.get("/config/engines")
 async def read_engines() -> JSONResponse:
     # Installed engines change at runtime, and a cached "not installed" answer
     # left the dashboard red until a hard reload.
+    mokuro_status = await asyncio.to_thread(_mokuro_engine_status)
+    bunko_status = await asyncio.to_thread(_bunko_engine_status)
+    if (
+        bunko_status.get("installed")
+        and not (bunko_status.get("sync") or {}).get("running")
+        and _ENGINE_JOBS["bunko"]["state"] == "idle"
+    ):
+        _ensure_bunko_running()
     return JSONResponse(
         headers={"Cache-Control": "no-store, max-age=0"},
         content={
-            "mokuro": await asyncio.to_thread(_mokuro_engine_status),
-            "bunko": await asyncio.to_thread(_bunko_engine_status),
+            "mokuro": mokuro_status,
+            "bunko": bunko_status,
             "jobs": {
                 "mokuro": _engine_job_json("mokuro"),
                 "bunko": _engine_job_json("bunko"),
