@@ -234,6 +234,12 @@
   .gate-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin: 0 0 14px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
   .gate-banner strong { color: var(--text); }
   .dest-usage { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+  .usage-bar { flex: 0 0 100%; display: flex; width: 100%; height: 7px; border-radius: 999px; overflow: hidden; background: var(--line); }
+  .usage-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; }
+  .usage-seg { display: block; height: 100%; }
+  .usage-folder { background: #3fb950; }
+  .usage-other { background: color-mix(in srgb, var(--muted) 55%, var(--line)); }
+  .usage-free { background: color-mix(in srgb, var(--accent) 35%, var(--panel)); }
   .dest-usage strong { color: var(--text); font-weight: 600; }
   .dest-usage .usage-text.muted { opacity: 0.85; }
   .pref { display: grid; grid-template-columns: minmax(0, 1fr) minmax(210px, 320px); gap: 14px 22px; padding: 15px 0; border-bottom: 1px solid var(--line); }
@@ -1423,21 +1429,32 @@ function renderUsage(host, data) {
     host.innerHTML = `<span class="usage-text muted">${esc((data && data.error) || "Space details are not available.")}</span>`;
     return;
   }
-  const parts = [];
+  let bar = "";
+  const text = [];
   const about = data.about;
-  if (about && (about.total || about.used || about.free)) {
-    parts.push(`<span class="usage-text"><strong>${formatBytes(about.used)}</strong> used · ${formatBytes(about.free)} free of ${formatBytes(about.total)}</span>`);
-  } else {
-    parts.push(`<span class="usage-text muted">This service does not report free space</span>`);
-  }
   const folder = data.folder;
-  if (folder && Number.isFinite(Number(folder.bytes))) {
-    parts.push(`<span class="usage-text">Folder <strong>${formatBytes(folder.bytes)}</strong>${Number.isFinite(Number(folder.count)) ? ` in ${folder.count} files` : ""}</span>`);
-  } else if (data.folder_error) {
-    parts.push(`<span class="usage-text muted">Folder size unavailable</span>`);
+  if (about && Number(about.total) > 0) {
+    const total = Number(about.total);
+    const used = Math.max(0, Math.min(Number(about.used) || 0, total));
+    const free = Math.max(0, total - used);
+    const folderBytes = folder && Number.isFinite(Number(folder.bytes))
+      ? Math.max(0, Math.min(Number(folder.bytes), used))
+      : 0;
+    const other = Math.max(0, used - folderBytes);
+    const pct = (value) => `${(value / total * 100).toFixed(3)}%`;
+    const label = `Folder ${formatBytes(folderBytes)} · other used ${formatBytes(other)} · free ${formatBytes(free)}`;
+    bar = `<div class="usage-bar" role="img" aria-label="${esc(label)}" title="${esc(label)}"><span class="usage-seg usage-folder" style="width:${pct(folderBytes)}"></span><span class="usage-seg usage-other" style="width:${pct(other)}"></span><span class="usage-seg usage-free" style="width:${pct(free)}"></span></div>`;
+    text.push(`<span class="usage-text"><strong>${formatBytes(used)}</strong> used · ${formatBytes(free)} free of ${formatBytes(total)}</span>`);
+  } else {
+    text.push(`<span class="usage-text muted">This service does not report free space</span>`);
   }
-  parts.push(`<button class="link" type="button" data-usage-refresh>Refresh</button>`);
-  host.innerHTML = parts.join('<span aria-hidden="true"> · </span>');
+  if (folder && Number.isFinite(Number(folder.bytes))) {
+    text.push(`<span class="usage-text">Folder <strong>${formatBytes(folder.bytes)}</strong>${Number.isFinite(Number(folder.count)) ? ` in ${folder.count} files` : ""}</span>`);
+  } else if (data.folder_error) {
+    text.push(`<span class="usage-text muted">Folder size unavailable</span>`);
+  }
+  text.push(`<button class="link" type="button" data-usage-refresh>Refresh</button>`);
+  host.innerHTML = `${bar}<span class="usage-line">${text.join('<span aria-hidden="true"> · </span>')}</span>`;
   const refresh = host.querySelector("[data-usage-refresh]");
   if (refresh) refresh.onclick = () => loadUsage(host.dataset.usage, true);
 }
