@@ -219,3 +219,49 @@ def test_update_reports_an_unchanged_commit(bunko_home, monkeypatch):
     info, changed = bunko_agent.update(log=lambda _m: None)
     assert info.commit == "d" * 40
     assert changed is False
+
+
+def test_setup_refuses_local_before_installing(monkeypatch, bunko_home):
+    monkeypatch.setattr(bunko_agent, "method_provider", lambda method: None)
+    monkeypatch.setattr(
+        bunko_agent, "install",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("install must not run")),
+    )
+    with pytest.raises(bunko_agent.BunkoAgentError, match="cloud destination"):
+        bunko_agent.setup("local", log=lambda _m: None)
+
+
+def test_setup_fails_fast_when_the_destination_has_no_credentials(monkeypatch, bunko_home):
+    monkeypatch.setattr(bunko_agent, "method_provider", lambda method: "mega")
+    monkeypatch.setattr(bunko_agent, "method_root", lambda method: "/Root/mokuro-reader")
+    monkeypatch.setattr(
+        bunko_agent, "connect_payload",
+        lambda state: (_ for _ in ()).throw(bunko_agent.BunkoAgentError("MEGA credentials not configured")),
+    )
+    monkeypatch.setattr(
+        bunko_agent, "install",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("install must not run")),
+    )
+    with pytest.raises(bunko_agent.BunkoAgentError, match="credentials not configured"):
+        bunko_agent.setup("mega", log=lambda _m: None)
+    assert not bunko_agent.config_path().exists()
+
+
+def test_connect_payload_wraps_missing_mega_credentials(bunko_home, monkeypatch):
+    monkeypatch.setattr(
+        bunko_agent.providers,
+        "instance_for",
+        lambda method: SimpleNamespace(provider="mega", name="default", root_path="/Root/mokuro-reader"),
+    )
+    monkeypatch.setattr(bunko_agent, "method_provider", lambda method: "mega")
+    monkeypatch.setattr(
+        "mokuro_bridge.providers.mega._get_mega_creds",
+        lambda name: (_ for _ in ()).throw(RuntimeError("MEGA credentials not configured")),
+    )
+    state = bunko_agent.AgentState(
+        method="mega", backend="mega", folder="mokuro-reader",
+        storage=str(bunko_home / "storage"), config=str(bunko_home / "config.yaml"),
+        log=str(bunko_home / "bunko.log"), binary="", commit="",
+    )
+    with pytest.raises(bunko_agent.BunkoAgentError, match="credentials not configured"):
+        bunko_agent.connect_payload(state)

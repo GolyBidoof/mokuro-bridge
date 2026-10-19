@@ -22,7 +22,7 @@ import socket
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -531,7 +531,10 @@ def connect_payload(state: AgentState) -> dict:
     if provider == "mega":
         from .providers.mega import _get_mega_creds
 
-        email, password = _get_mega_creds(name)
+        try:
+            email, password = _get_mega_creds(name)
+        except (RuntimeError, OSError) as error:
+            raise BunkoAgentError(str(error)) from error
         totp = os.environ.get("MOKURO_BUNKO_MEGA_TOTP", "").strip()
         if not totp and sys.stdin.isatty():
             try:
@@ -699,17 +702,20 @@ def setup(
             f"'{method}' is local or unknown. Configure a MEGA, Drive, OneDrive "
             "or WebDAV account and pass its method id."
         )
-    info = install(log=log, runner=install_runner)
     home = data_home()
     home.mkdir(parents=True, exist_ok=True)
     folder = _folder_for(method)
     port = free_port()
+    # Check the destination's credentials before the multi-minute build: an
+    # unconfigured account should fail in a second, not after compiling Bunko.
     state = AgentState(
         method=method, backend=backend, folder=folder,
         storage=str(storage_dir()), config=str(config_path()), log=str(log_path()),
-        binary=info.binary, commit=info.commit, port=port,
+        binary="", commit="", port=port,
     )
     payload = connect_payload(state)
+    info = install(log=log, runner=install_runner)
+    state = replace(state, binary=info.binary, commit=info.commit)
     config = config_yaml(
         base_path=storage_dir(),
         port=port,

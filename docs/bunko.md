@@ -4,6 +4,12 @@
 
 This exists because the bridge's own manifest is a workaround. reader.mokuro.app only builds a series index for series it already knows locally, so an externally filled folder needs a `series.json` written by the uploader. Bunko owns a library and compiles that file itself, so when Bunko is present the bridge's copy is redundant and can fail for permission reasons on a Bunko-hosted library.
 
+## What it does not take over
+
+The bridge still uploads the volume files. Bunko reads them from the cloud folder after they land; it never receives them from the bridge, and the bridge does not hand its upload queue to Bunko. What moves to Bunko is the metadata: it compiles `series.json` and `catalog.json` in place, so the bridge stops doing that one read-merge-upload, and the upload order puts `.mokuro` before `.cbz` so Bunko does not queue OCR.
+
+Setup needs a configured cloud destination. With no MEGA, Drive, OneDrive or WebDAV account, `--setup-bunko` stops before it builds or starts anything and says which destination to configure first. The first-run page wizard in this repository does not install or configure Bunko on its own.
+
 ## What it needs
 
 - A cloud upload account that is already configured in the bridge: MEGA, Google Drive, OneDrive or WebDAV.
