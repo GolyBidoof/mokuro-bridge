@@ -2,6 +2,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import tempfile
 import time
 import urllib.parse
@@ -11,7 +12,14 @@ from typing import Optional
 from .. import accounts
 from ..accounts import DEFAULT_NAME
 from ..util import _chmod_fd_private
-from ..config import ONEDRIVE_CLIENT_ID, ONEDRIVE_TOKEN_FILE, _GRAPH_BASE, _ONEDRIVE_SCOPES
+from ..config import (
+    ONEDRIVE_APP_FILE,
+    ONEDRIVE_CLIENT_ID,
+    ONEDRIVE_TOKEN_FILE,
+    _GRAPH_BASE,
+    _ONEDRIVE_BUILTIN_CLIENT_ID,
+    _ONEDRIVE_SCOPES,
+)
 from .base import (
     DOWNLOAD_LIMIT_BYTES,
     LIST_LIMIT_ENTRIES,
@@ -26,6 +34,125 @@ _ONEDRIVE_IMPORT_HINT = (
     "OneDrive upload needs the msal and requests libraries. "
     "Install them with: pip install -r requirements-onedrive.txt"
 )
+
+_CLIENT_ID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _read_app_file() -> str:
+    """The dashboard-written app ID, or "" when absent/unreadable."""
+    try:
+        data = json.loads(ONEDRIVE_APP_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("client_id") or "").strip()
+
+
+def client_id() -> str:
+    """The Azure application (client) ID for the device-code sign-in.
+
+    Resolution: ONEDRIVE_CLIENT_ID in the environment, then an
+    ONEDRIVE_CLIENT_ID patched onto this module (tests and older callers), then
+    the file the dashboard writes, then a project default a maintainer chose
+    to ship. Reading it per call is what lets the page set it without a
+    restart.
+    """
+    env = os.environ.get("ONEDRIVE_CLIENT_ID", "").strip()
+    if env:
+        return env
+    if str(ONEDRIVE_CLIENT_ID or "").strip():
+        return str(ONEDRIVE_CLIENT_ID).strip()
+    from_file = _read_app_file()
+    if from_file:
+        return from_file
+    return str(_ONEDRIVE_BUILTIN_CLIENT_ID or "").strip()
+
+
+def client_id_source() -> Optional[str]:
+    """Where the app ID comes from, for /config: env, file, builtin or None."""
+    if os.environ.get("ONEDRIVE_CLIENT_ID", "").strip() or str(ONEDRIVE_CLIENT_ID or "").strip():
+        return "env"
+    if _read_app_file():
+        return "file"
+    if str(_ONEDRIVE_BUILTIN_CLIENT_ID or "").strip():
+        return "builtin"
+    return None
+
+
+def validate_client_id(value: object) -> str:
+    """Normalise and validate a pasted Azure Application (client) ID.
+
+    A GUID check catches the two usual mistakes: copying the Object ID or the
+    Directory (tenant) ID from the portal, or pasting a truncated value. The
+    error names the field to copy.
+    """
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("An Azure application (client) ID is required.")
+    if not _CLIENT_ID_RE.match(text):
+        raise ValueError(
+            "That does not look like an Azure Application (client) ID. It is a "
+            "GUID such as 00000000-0000-0000-0000-000000000000, copied from the "
+            "app registration's Overview page; the Object ID and Directory "
+            "(tenant) ID next to it are not the one to use."
+        )
+    return text
+
+
+def store_client_id(value: object) -> str:
+    """Persist the app ID for future sessions (0600, non-secret)."""
+    clean = validate_client_id(value)
+    _write_secret_atomic(
+        ONEDRIVE_APP_FILE, json.dumps({"client_id": clean}, indent=2) + "\n"
+    )
+    return clean
+
+
+_AADSTS_HELP = {
+    "AADSTS50059": (
+        "Microsoft could not match that app ID to any app registration. Copy the "
+        "Application (client) ID again from the app's Overview page (the Object "
+        "ID and Directory ID are different), and choose the account types that "
+        "include personal Microsoft accounts when you create the app."
+    ),
+    "AADSTS700016": (
+        "Microsoft does not recognize that app ID for the account you signed in "
+        "with. Copy the Application (client) ID from the app registration's "
+        "Overview page, and set the app's supported account types to allow "
+        "personal Microsoft accounts as well as work or school ones."
+    ),
+    "AADSTS65001": (
+        "The app has not been granted the Files.ReadWrite permission yet. Open "
+        "the app registration, go to API permissions, add Microsoft Graph, "
+        "Delegated permissions, Files.ReadWrite, then retry."
+    ),
+    "AADSTS70011": (
+        "Microsoft rejected the requested permission scope. Add the delegated "
+        "Microsoft Graph permission Files.ReadWrite to the app registration."
+    ),
+    "AADSTS50076": (
+        "Microsoft asked for an extra verification step for this account. Sign "
+        "in once at https://microsoft.com/devicelogin with the code the bridge "
+        "shows, or finish the multi-factor prompt in your browser."
+    ),
+}
+
+
+def explain_aadsts(message: object) -> str:
+    """Turn an AADSTS error code into the step it actually needs.
+
+    Returns "" when the message names no known code, so a caller can fall back
+    to the raw (already redacted) provider text.
+    """
+    text = str(message or "")
+    for code, help_text in _AADSTS_HELP.items():
+        if code in text:
+            return f"{help_text} ({code})"
+    return ""
+
 
 def _write_secret_atomic(path: Path, data: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -67,7 +194,7 @@ def _onedrive_configured(name: str = DEFAULT_NAME) -> bool:
     """Whether one OneDrive account is usable right now."""
     return (
         importlib.util.find_spec("msal") is not None
-        and bool(ONEDRIVE_CLIENT_ID)
+        and bool(client_id())
         and _onedrive_token_path(name).is_file()
     )
 
@@ -104,7 +231,7 @@ def _onedrive_msal_app(name: str = DEFAULT_NAME):
         raise RuntimeError(_ONEDRIVE_IMPORT_HINT) from exc
     cache = _load_token_cache(name)
     app = PublicClientApplication(
-        client_id=ONEDRIVE_CLIENT_ID,
+        client_id=client_id(),
         authority="https://login.microsoftonline.com/common",
         token_cache=cache,
     )
@@ -137,7 +264,7 @@ def _onedrive_token(name: str = DEFAULT_NAME) -> str:
         f"{_onedrive_setup_hint(name)}` to sign in (device-code flow)."
     )
 
-def start_device_flow(name: str = DEFAULT_NAME):
+def start_device_flow(name: str = DEFAULT_NAME, app_client_id: Optional[str] = None):
     """Begin a device-code sign-in for one account.
 
     Returns ``(app, cache, flow)``; the caller shows ``flow['user_code']`` and
@@ -149,14 +276,17 @@ def start_device_flow(name: str = DEFAULT_NAME):
         from msal import PublicClientApplication
     except ImportError as exc:
         raise RuntimeError(_ONEDRIVE_IMPORT_HINT) from exc
-    if not ONEDRIVE_CLIENT_ID:
+    app_client_id = str(app_client_id or "").strip() or client_id()
+    if not app_client_id:
         raise ValueError(
-            "OneDrive sign-in needs an Azure application (client) ID in "
-            "ONEDRIVE_CLIENT_ID"
+            "OneDrive sign-in needs an Azure application (client) ID once. "
+            "Open https://portal.azure.com, create an app registration, enable "
+            "public client flows, add the delegated Microsoft Graph permission "
+            "Files.ReadWrite, then paste the Application (client) ID here."
         )
     cache = _load_token_cache(name)
     app = PublicClientApplication(
-        client_id=ONEDRIVE_CLIENT_ID,
+        client_id=app_client_id,
         authority="https://login.microsoftonline.com/common",
         token_cache=cache,
     )
@@ -268,39 +398,61 @@ def _run_setup_onedrive(
         if answer not in ("y", "yes"):
             print("Keeping existing sign-in.")
             return
-    client_id = ONEDRIVE_CLIENT_ID or input("Azure app client ID: ").strip()
-    if not client_id:
+    app_client_id = client_id()
+    if app_client_id:
+        source = client_id_source()
+        print(f"Using the Azure app ID from {source or 'the configured value'}.")
+    else:
         print(
-            "No client ID given. In the Azure portal:\n"
-            "  1. Create an app registration\n"
-            "  2. Add the 'Mobile and desktop applications' platform and "
-            "enable public client flows\n"
-            "  3. Add the delegated Microsoft Graph permission "
-            "'Files.ReadWrite'\n"
-            "  4. Copy the Application (client) ID into "
-            "ONEDRIVE_CLIENT_ID (env) or enter it above."
+            "OneDrive needs a free Azure app registration once. In the Azure portal:\n"
+            "  1. Open https://portal.azure.com and go to App registrations, then\n"
+            "     New registration.\n"
+            "  2. Choose the account types that include personal Microsoft\n"
+            "     accounts (the bridge signs in through the 'common' authority).\n"
+            "  3. Open Authentication and set Allow public client flows to Yes.\n"
+            "  4. Open API permissions, add Microsoft Graph, Delegated\n"
+            "     permissions, Files.ReadWrite.\n"
+            "  5. Copy the Application (client) ID from the Overview page (not\n"
+            "     the Object ID or the Directory ID) and paste it below.\n"
+            "No redirect URI or client secret is needed for the device-code flow."
         )
+    for attempt in range(1, 3):
+        if not app_client_id:
+            entered = input("Azure Application (client) ID: ").strip()
+            try:
+                app_client_id = validate_client_id(entered)
+            except ValueError as error:
+                print(f"error: {error}")
+                continue
+        break
+    if not app_client_id:
+        print("No app ID given; nothing was stored.")
         return
 
     cache = _load_token_cache(name)
     app = PublicClientApplication(
-        client_id=client_id,
+        client_id=app_client_id,
         authority="https://login.microsoftonline.com/common",
         token_cache=cache,
     )
     flow = app.initiate_device_flow(scopes=_ONEDRIVE_SCOPES)
     if "user_code" not in flow:
-        print(f"error: could not start device flow: {flow.get('error_description', flow)}")
+        detail = str(flow.get("error_description", flow))
+        print(f"error: could not start device flow: {explain_aadsts(detail) or detail}")
         return
     print(flow.get("message", ""))
     print("Waiting for you to sign in…")
     result = app.acquire_token_by_device_flow(flow)
     if "access_token" not in result:
-        print(
-            "error: sign-in failed: "
-            f"{result.get('error')}: {result.get('error_description', '')}"
-        )
+        detail = f"{result.get('error')}: {result.get('error_description', '')}"
+        print(f"error: sign-in failed: {explain_aadsts(detail) or detail}")
         return
+    if not os.environ.get("ONEDRIVE_CLIENT_ID", "").strip():
+        try:
+            store_client_id(app_client_id)
+            print(f"App ID kept in {ONEDRIVE_APP_FILE} for the dashboard (0600).")
+        except (ValueError, OSError) as error:
+            print(f"note: could not keep the app ID for later: {error}")
     _save_token_cache(cache, name)
     print(f"OneDrive token stored in {token_path} (permissions 0600).")
     stored = accounts.save_instance(

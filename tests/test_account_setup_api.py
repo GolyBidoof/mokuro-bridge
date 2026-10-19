@@ -51,7 +51,9 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(mega_provider, "WORK_DIR", work)
     monkeypatch.setattr(drive_provider, "DRIVE_CREDS_FILE", tmp_path / "drive_credentials.json")
     monkeypatch.setattr(onedrive_provider, "ONEDRIVE_TOKEN_FILE", tmp_path / "onedrive_token.json")
+    monkeypatch.setattr(onedrive_provider, "ONEDRIVE_APP_FILE", tmp_path / "onedrive_app.json")
     monkeypatch.setattr(onedrive_provider, "ONEDRIVE_CLIENT_ID", "test-client-id")
+    monkeypatch.delenv("ONEDRIVE_CLIENT_ID", raising=False)
 
     # Optional libraries are absent in the test environment; the page-visible
     # capability flags are what the routes consult.
@@ -221,7 +223,7 @@ def _install_device_flow(monkeypatch, result=None, on_acquire=None):
     monkeypatch.setattr(
         onedrive_provider,
         "start_device_flow",
-        lambda name: (app, object(), dict(DEVICE_FLOW)),
+        lambda name, app_client_id=None: (app, object(), dict(DEVICE_FLOW)),
     )
     return app
 
@@ -272,7 +274,7 @@ def test_onedrive_failure_is_reported_as_an_error_status(client, monkeypatch):
     assert "SECRET" not in status["detail"]
 
 def test_onedrive_start_without_a_client_id_is_friendly(client, monkeypatch):
-    def missing(name):
+    def missing(name, app_client_id=None):
         raise ValueError(
             "OneDrive sign-in needs an Azure application (client) ID in ONEDRIVE_CLIENT_ID"
         )
@@ -283,6 +285,76 @@ def test_onedrive_start_without_a_client_id_is_friendly(client, monkeypatch):
     )
     assert response.status_code == 400
     assert "ONEDRIVE_CLIENT_ID" in response.json()["detail"]
+
+GUID = "11111111-2222-3333-4444-555555555555"
+OTHER_GUID = "99999999-8888-7777-6666-555555555555"
+
+
+def test_onedrive_stays_available_when_only_the_app_id_is_missing(client, monkeypatch, tmp_path):
+    """A missing app ID is a setting the page can collect, not a broken install."""
+    monkeypatch.setattr(onedrive_provider, "ONEDRIVE_CLIENT_ID", "")
+    monkeypatch.setattr(onedrive_provider, "ONEDRIVE_APP_FILE", tmp_path / "app.json")
+    row = next(p for p in client.get("/config").json()["providers"] if p["id"] == "onedrive")
+    assert row["available"] is True
+    assert row["needs_client_id"] is True
+    assert row["client_id"] == ""
+    assert row["missing"] == []
+
+
+def test_the_page_can_save_the_app_id_and_start_the_sign_in(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(onedrive_provider, "ONEDRIVE_CLIENT_ID", "")
+    monkeypatch.setattr(onedrive_provider, "ONEDRIVE_APP_FILE", tmp_path / "app.json")
+    _install_device_flow(monkeypatch)
+    response = client.post(
+        "/config/accounts/onedrive/start",
+        data={"alias": "onedrive-uni", "client_id": GUID},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["client_id"] == GUID
+    assert body["client_id_source"] == "file"
+    stored = json.loads((tmp_path / "app.json").read_text(encoding="utf-8"))
+    assert stored["client_id"] == GUID
+    assert oct((tmp_path / "app.json").stat().st_mode & 0o777) == "0o600"
+    # The next session finds it without an environment variable.
+    row = next(p for p in client.get("/config").json()["providers"] if p["id"] == "onedrive")
+    assert row["client_preset"] is True and row["needs_client_id"] is False
+
+
+def test_a_malformed_app_id_is_explained(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(onedrive_provider, "ONEDRIVE_CLIENT_ID", "")
+    monkeypatch.setattr(onedrive_provider, "ONEDRIVE_APP_FILE", tmp_path / "app.json")
+    response = client.post(
+        "/config/accounts/onedrive/start",
+        data={"alias": "onedrive-uni", "client_id": "not-a-guid"},
+    )
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "Application (client) ID" in detail
+    assert "Object ID" in detail
+    assert not (tmp_path / "app.json").exists()
+
+
+def test_an_app_id_pinned_by_the_environment_is_not_overridden(client, monkeypatch):
+    monkeypatch.setenv("ONEDRIVE_CLIENT_ID", GUID)
+    response = client.post(
+        "/config/accounts/onedrive/start",
+        data={"alias": "onedrive-uni", "client_id": OTHER_GUID},
+    )
+    assert response.status_code == 400
+    assert "environment" in response.json()["detail"]
+
+
+def test_without_an_app_id_the_page_is_told_exactly_what_to_do(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(onedrive_provider, "ONEDRIVE_CLIENT_ID", "")
+    monkeypatch.setattr(onedrive_provider, "ONEDRIVE_APP_FILE", tmp_path / "app.json")
+    response = client.post("/config/accounts/onedrive/start", data={"alias": "onedrive-uni"})
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "App registrations" in detail
+    assert "Files.ReadWrite" in detail
+    assert "portal.azure.com" in detail
+
 
 def test_unknown_flow_id_reports_an_error_status(client):
     body = client.get("/config/accounts/onedrive/status", params={"flow_id": "nope"}).json()

@@ -353,16 +353,20 @@ def _provider_rows() -> list[dict]:
                 or _drive_secret_file_configured()
             )
         elif provider_id == "onedrive":
+            # Only a real install problem disables the provider. A missing app
+            # ID is something the form can collect, so it must not gray the
+            # card out and leave the user with no path forward.
             missing = [
                 package
                 for package, module in (("msal", "msal"), ("requests", "requests"))
                 if not _module_available(module)
             ]
-            if not onedrive_provider.ONEDRIVE_CLIENT_ID:
-                missing.append("ONEDRIVE_CLIENT_ID")
             entry["missing"] = missing
             entry["available"] = not missing
-            entry["client_preset"] = bool(onedrive_provider.ONEDRIVE_CLIENT_ID)
+            entry["client_id"] = onedrive_provider.client_id()
+            entry["client_id_source"] = onedrive_provider.client_id_source()
+            entry["client_preset"] = bool(entry["client_id"])
+            entry["needs_client_id"] = not entry["client_preset"]
         elif provider_id == "webdav":
             # Any WebDAV server is acceptable, so the only install check is the
             # HTTP client; the server URL is asked for per account.
@@ -870,9 +874,17 @@ def _run_onedrive_flow(
 
 @router.post("/config/accounts/onedrive/start")
 async def start_onedrive_account(
-    request: Request, alias: str = Form(""), label: str = Form("")
+    request: Request,
+    alias: str = Form(""),
+    label: str = Form(""),
+    client_id: str = Form(""),
 ) -> JSONResponse:
-    """Begin a device-code sign-in for one OneDrive account."""
+    """Begin a device-code sign-in for one OneDrive account.
+
+    The one-time Azure app ID can be posted with the sign-in, so the page can
+    collect it instead of asking the user to edit an environment variable and
+    restart the service. It is stored in ONEDRIVE_APP_FILE (0600).
+    """
     _require_local_origin(request)
     if not _module_available("msal"):
         raise HTTPException(status_code=400, detail=_MSAL_HINT)
@@ -882,14 +894,52 @@ async def start_onedrive_account(
         raise HTTPException(status_code=400, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    posted = str(client_id or "").strip()
+    pinned = os.environ.get("ONEDRIVE_CLIENT_ID", "").strip()
+    if posted and pinned and posted != pinned:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "ONEDRIVE_CLIENT_ID is set in the bridge's environment, so an app "
+                "ID entered here would be ignored; unset it in the service "
+                "environment to manage the app ID from this page"
+            ),
+        )
+    if posted:
+        try:
+            posted = onedrive_provider.validate_client_id(posted)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+    if not (posted or onedrive_provider.client_id()):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "OneDrive needs a free Azure application (client) ID once. Open "
+                "https://portal.azure.com, go to App registrations and create one "
+                "that allows personal Microsoft accounts; set Allow public client "
+                "flows to Yes, add the delegated Microsoft Graph permission "
+                "Files.ReadWrite, then paste the Application (client) ID here. "
+                "No redirect URI or secret is needed."
+            ),
+        )
     try:
         app, cache, flow = await asyncio.to_thread(
-            onedrive_provider.start_device_flow, name
+            onedrive_provider.start_device_flow, name, posted or None
         )
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        detail = onedrive_provider.explain_aadsts(error) or str(error)
+        raise HTTPException(status_code=400, detail=detail) from error
     except RuntimeError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    # Microsoft accepted the app, so it is safe to keep it for later. A failed
+    # write only means the user gets asked again next time.
+    client_id_saved = False
+    if posted and not pinned:
+        try:
+            await asyncio.to_thread(onedrive_provider.store_client_id, posted)
+            client_id_saved = True
+        except (ValueError, OSError):
+            client_id_saved = False
     flow_id = _new_flow("onedrive", name=name, alias=clean_alias, label=label)
     threading.Thread(
         target=_run_onedrive_flow,
@@ -915,6 +965,9 @@ async def start_onedrive_account(
             ),
             "expires_in": expires_in,
             "interval_s": max(1, interval_s),
+            "client_id": posted or onedrive_provider.client_id(),
+            "client_id_source": onedrive_provider.client_id_source(),
+            "client_id_saved": client_id_saved,
         }
     )
 

@@ -34,7 +34,7 @@ The bridge owns one half of the capture pipeline and only that half: it never to
 
 The bridge serves its own configuration dashboard at the address it prints at startup, `http://127.0.0.1:62642/`. It is one self-contained page, styled after reader.mokuro.app, with an Auto/Light/Dark switch that follows the operating system by default and is remembered in the browser. It shows the live status, the pages waiting to be read, the volumes reading now, the destination it files to, a live browser acceleration row with the open fetch-proxy ports, and one card per upload account with its alias, provider, note, folder and state; an Open reader link sits in the header.
 
-Accounts are added and managed in the page: MEGA with an email and password, Google Drive through Google's sign-in, OneDrive through Microsoft's device-code flow, WebDAV with a server URL and Basic credentials, with reconnect, rename, remove, set default and folder browsing on each account card. Each account gets a memorable alias such as `mega`, `mega-2` or `drive-next`; a dokuha script selects one with `upload_method=mega-work`. Historical ids (`mega:work`, `drive:main`) keep resolving, so old scripts do not break. Three preferences cover the browser downloader's extra ports, the fallback local output folder and extra read roots; everything else stays in `.env.example`. See [docs/dashboard.md](docs/dashboard.md).
+Accounts are added and managed in the page: MEGA with an email and password, Google Drive through Google's sign-in, OneDrive through Microsoft's device-code flow after a free one-time app ID entered in the page, WebDAV with a server URL and Basic credentials, with reconnect, rename, remove, set default and folder browsing on each account card. Each account gets a memorable alias such as `mega`, `mega-2` or `drive-next`; a dokuha script selects one with `upload_method=mega-work`. Historical ids (`mega:work`, `drive:main`) keep resolving, so old scripts do not break. Three preferences cover the browser downloader's extra ports, the fallback local output folder and extra read roots; everything else stays in `.env.example`. See [docs/dashboard.md](docs/dashboard.md).
 
 For a service running in the background, `mokuro-bridge --status` draws the same picture in a terminal: destinations with the default starred, the OCR queue, the pipeline and worker, the proxy ports, a live upload progress bar when one is active, and `?` for help. Keys are `r` refresh, `c` dashboard address, `?` help, `q` quit. Piped output is one full-height frame with no escape sequences, so `mokuro-bridge --status | head -30` is a snapshot you can paste into an issue.
 
@@ -88,7 +88,7 @@ The fork is the faster engine, and `mokuro-bridge --install-mokuro` replaces whi
 
 ## Quick start
 
-Start the bridge, open `http://127.0.0.1:62642/`, and press Add destination. The page walks through the provider sign-in and folder choice, and prints the alias a script should pass. On macOS, `./install-launchd.sh` installs a launchd agent that starts the bridge at login.
+Start the bridge and open `http://127.0.0.1:62642/`; on an interactive first run the bridge opens that page for you. The setup guide is click-only and walks through the destination choice, the provider sign-in and the folder, then prints the alias a script should pass. `--no-browser` (or `MOKURO_BRIDGE_OPEN_BROWSER=0`) starts without opening a tab, and on macOS `./install-launchd.sh` installs a launchd agent that starts the bridge at login.
 
 If you prefer the terminal, the same accounts can be added there:
 

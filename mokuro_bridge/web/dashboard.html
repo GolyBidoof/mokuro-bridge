@@ -651,7 +651,7 @@ const PROVIDER_META = {
   },
   onedrive: {
     label: "OneDrive", kind: "device_code",
-    blurb: "A short Microsoft code, entered once in your browser.",
+    blurb: "A short Microsoft code, entered once in your browser. Needs a free Azure app ID once.",
     empty: "The Microsoft sign-in library is not installed.",
   },
   webdav: {
@@ -1152,11 +1152,9 @@ function renderDestinations() {
   $("destinations").innerHTML = html;
 
   const configuredRemote = methods.filter((m) => providerOf(m) !== "local" && stateOf(m) !== "not_configured");
-  $("onboard").innerHTML = configuredRemote.length === 0 ? `<div class="onboard">
-    <div><span class="step-n">01</span><h3>Add a destination</h3><p>Connect MEGA, Google Drive, OneDrive or WebDAV. Everything is done right here; no terminal needed.</p></div>
-    <div><span class="step-n">02</span><h3>Pick a folder</h3><p>Browse the provider's real folders and choose where volumes should be filed.</p></div>
-    <div><span class="step-n">03</span><h3>Use it from scripts</h3><p>Each destination gets a short name like <code>mega-work</code>. Point dokuha at it with <code>upload_method=mega-work</code>.</p></div>
-  </div>` : "";
+  $("onboard").innerHTML = configuredRemote.length === 0
+    ? `<p class="hint" style="margin-top:12px">No cloud destination yet. Use <strong>Add destination</strong> above, or keep saving finished volumes on this computer.</p>`
+    : "";
 
   $("destinations").querySelectorAll("[data-choose]").forEach((b) => b.onclick = () => openFolderFor(b.dataset.choose));
   $("destinations").querySelectorAll("[data-default]").forEach((b) => b.onclick = () => setDefault(b.dataset.default));
@@ -1576,6 +1574,7 @@ function renderProviderPicker() {
     const connected = (state.config.methods || []).filter((m) => providerOf(m) === id && stateOf(m) === "connected").length;
     let sub = info.meta.blurb;
     if (unavailable) sub = (info.live && info.live.setup_hint) || info.meta.empty;
+    else if (info.live && info.live.needs_client_id) sub = `One-time Azure app ID, then a short code · ${info.meta.blurb}`;
     else if (connected) sub = `${connected} connected · ${info.meta.blurb}`;
     else if (info.count) sub = `${info.count} set up, not connected · ${info.meta.blurb}`;
     return `<button class="provider-choice" type="button" data-provider="${id}" ${unavailable ? "disabled" : ""}>
@@ -1599,8 +1598,8 @@ function unavailableNotes() {
     if (info.available) return;
     const link = PROVIDER_LINKS[id];
     const missing = (info.missing || []).join(", ");
-    const lead = missing.includes("ONEDRIVE_CLIENT_ID")
-      ? "OneDrive needs an app registration: register one, set <code>ONEDRIVE_CLIENT_ID</code> for the bridge, then reload this page."
+    const lead = id === "onedrive"
+      ? `Install the Microsoft sign-in library with <code>pip install -r requirements-onedrive.txt</code> (missing: ${esc(missing || "msal")}). After that, the page can collect the one-time app ID itself.`
       : `This computer is missing ${esc(missing || "a dependency")}.`;
     notes.push(`<p class="hint" style="margin-top:8px"><strong>${esc((PROVIDER_META[id] || {}).label || id)}:</strong> ${lead} ${link && link.setup ? `<a class="inline-link" href="${esc(link.setup)}" target="_blank" rel="noopener">${esc(link.setupLabel)} ${icon("external")}</a>` : ""}</p>`);
   });
@@ -1629,6 +1628,9 @@ function openProviderForm(provider, mode, account) {
   const alias = account ? aliasOf(account) : nextAlias(provider);
   const label = account ? (account.label || "") : "";
   const submitLabel = mode === "reconnect" ? "Reconnect" : `Connect ${meta.label}`;
+  const onedriveRow = (state.providers || []).find((entry) => entry.id === "onedrive") || {};
+  const onedriveClient = onedriveRow.client_id || "";
+  const onedrivePinned = onedriveRow.client_id_source === "env";
   const davUrl = (account && account.extra && account.extra.url) || "";
   const davUser = (account && account.extra && (account.extra.username || account.extra.email)) || "";
   const davRoot = (account && account.root) || "mokuro-reader";
@@ -1636,7 +1638,7 @@ function openProviderForm(provider, mode, account) {
   const notes = {
     mega: "MEGA needs your account email and password once. They are kept in this computer's keychain, never in a file the page can read.",
     drive: "You will sign in to Google in a new tab. This page waits here until it is done.",
-    onedrive: "This page shows a short code. Enter it once on Microsoft's site, then come back; it finishes by itself.",
+    onedrive: "This page shows a short code. Enter it once on Microsoft's site, then come back; it finishes by itself. The app ID is the free one-time step that lets this bridge ask Microsoft to sign you in.",
     webdav: "The server's own username and password. They are checked once against the server, then kept in this computer's credential store.",
   };
   form.innerHTML = `<div class="form-grid">
@@ -1704,6 +1706,24 @@ function openProviderForm(provider, mode, account) {
         <label class="check-row"><input id="add-dav-insecure" type="checkbox" ${davInsecure ? "checked" : ""}><span>Accept a self-signed certificate <span class="hint">Only for your own NAS or home server. It turns off certificate checking for this account.</span></span></label>
       </div>
     </details>` : ""}
+    ${provider === "onedrive" ? `<div class="field">
+      <label for="add-onedrive-client-id">Azure app ID <span class="hint">(one-time)</span></label>
+      <input id="add-onedrive-client-id" type="text" autocomplete="off" spellcheck="false" value="${esc(onedriveClient)}" ${onedrivePinned ? "disabled" : ""} placeholder="00000000-0000-0000-0000-000000000000">
+      <span class="hint">${onedrivePinned
+        ? "Pinned by <code>ONEDRIVE_CLIENT_ID</code> in the bridge's environment. Unset it there to manage the app ID from this page."
+        : "Paste the <em>Application (client) ID</em> from the app registration. It is saved on this computer and shared by every OneDrive account."}</span>
+      <details class="dav-help" ${onedriveClient ? "" : "open"}><summary>Where do I get this?</summary>
+        <div class="dav-help-body">
+          <p>This is free and takes about two minutes. The bridge cannot ship its own app ID for a self-hosted install, so this is the one step that cannot be skipped.</p>
+          <p><strong>1.</strong> Open the <a class="inline-link" href="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noopener">Azure app registrations ${"\u2197"}</a> and choose <em>New registration</em>.</p>
+          <p><strong>2.</strong> Name it anything, and under supported account types choose the option that includes <em>personal Microsoft accounts</em> (the bridge signs in through the <code>common</code> authority).</p>
+          <p><strong>3.</strong> Open <em>Authentication</em> and set <em>Allow public client flows</em> to <strong>Yes</strong>. No redirect URI is needed for the device-code flow.</p>
+          <p><strong>4.</strong> Open <em>API permissions</em>, add <em>Microsoft Graph</em>, then <em>Delegated permissions</em>, then <code>Files.ReadWrite</code>.</p>
+          <p><strong>5.</strong> Copy the <em>Application (client) ID</em> from the app's Overview page. The Object ID and Directory (tenant) ID on the same page are not the one to use.</p>
+          <p>Using the same app ID as <a class="inline-link" href="https://github.com/Gnathonic/mokuro-reader" target="_blank" rel="noopener">mokuro-reader</a> is fine if you already made one for it; paste it here. It needs no secret.</p>
+        </div>
+      </details>
+    </div>` : ""}
     ${provider === "drive" ? `<div class="field" id="drive-client-fields" ${info.live && info.live.client_preset ? "hidden" : ""}>
       <label for="add-client-id">Google client ID</label>
       <input id="add-client-id" type="text" autocomplete="off" spellcheck="false" placeholder="…apps.googleusercontent.com">
@@ -1859,8 +1879,17 @@ async function submitProviderForm() {
       return;
     }
     if (provider === "onedrive") {
+      const clientId = ($("add-onedrive-client-id") && $("add-onedrive-client-id").value.trim()) || "";
+      if (!clientId && !(state.providers.find((entry) => entry.id === "onedrive") || {}).client_id) {
+        addError("Paste the free Azure app ID first; the \"Where do I get this?\" steps in the form take about two minutes.");
+        restore();
+        return;
+      }
       submit.textContent = "Starting…";
-      const flow = await postForm("/config/accounts/onedrive/start", { alias, label });
+      const flow = await postForm("/config/accounts/onedrive/start", { alias, label, client_id: clientId });
+      if (flow.client_id_saved === false) {
+        toast("Signed in, but the app ID could not be saved on this computer; you may be asked for it again next time.", "bad");
+      }
       renderDeviceFlow(flow, alias);
       restore();
       return;

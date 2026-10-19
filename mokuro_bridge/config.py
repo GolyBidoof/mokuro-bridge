@@ -117,6 +117,19 @@ ONEDRIVE_CLIENT_ID = os.environ.get("ONEDRIVE_CLIENT_ID", "").strip()
 ONEDRIVE_TOKEN_FILE = _env_path(
     "ONEDRIVE_TOKEN_FILE", Path.home() / ".config" / "mokuro-bridge" / "onedrive_token.json"
 )
+# The Azure application (client) ID the device-code sign-in uses. One app per
+# deployment is enough, exactly as upstream mokuro-reader asks for its
+# VITE_ONEDRIVE_CLIENT_ID. This file is written by the dashboard, so a user
+# never has to edit an environment variable and restart the service; the
+# environment still wins when it is set.
+ONEDRIVE_APP_FILE = _env_path(
+    "ONEDRIVE_APP_FILE", Path.home() / ".config" / "mokuro-bridge" / "onedrive_app.json"
+)
+# A maintainer may register one app for this project and ship its public
+# client ID here, which makes OneDrive a one-click destination for every user
+# of that build. Left empty in the repository so a fork never silently borrows
+# another project's app registration (and its consent prompt).
+_ONEDRIVE_BUILTIN_CLIENT_ID = ""
 _ONEDRIVE_SCOPES = ["https://graph.microsoft.com/Files.ReadWrite"]
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
