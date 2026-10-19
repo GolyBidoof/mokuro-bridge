@@ -2712,6 +2712,10 @@ function renderEngines() {
   if (mokuro.installed) {
     detail.textContent = `Installed${mokuro.version ? " (mokuro " + mokuro.version + ")" : ""} · ${mokuro.detail || mokuro.flavour}.`;
     stateLine.textContent = "Ready";
+    if (mokuroJob.state === "running") {
+      detail.textContent = "Installing mokuro. This can take a few minutes; progress appears below.";
+      stateLine.textContent = "Installing…";
+    }
     if (mokuroJob.state === "done") {
       detail.textContent += " Loaded automatically; new volumes use it right away.";
       stateLine.textContent = "Ready";
@@ -2726,6 +2730,10 @@ function renderEngines() {
   } else {
     detail.textContent = "Not installed. Reading pages needs mokuro; packaging and filing still work.";
     stateLine.textContent = "Not installed";
+    if (mokuroJob.state === "running") {
+      detail.textContent = "Installing mokuro. This can take a few minutes; progress appears below.";
+      stateLine.textContent = "Installing…";
+    }
     button.hidden = false;
     button.disabled = mokuroJob.state === "running";
     button.innerHTML = mokuroJob.state === "running"
@@ -2752,6 +2760,10 @@ function renderEngines() {
       ? "Installed and following the default destination."
       : (ready ? "Not installed. Uploads and the library index need mokuro-bunko." : "Add a cloud destination first; mokuro-bunko reads the folder the bridge uploads to.");
     $("engine-bunko-state").textContent = bunko.installed ? "Ready" : "Not installed";
+    if (bunkoJob.state === "running") {
+      $("engine-bunko-detail").textContent = "Installing mokuro-bunko. The first install compiles from source and can take a few minutes; progress appears below.";
+      $("engine-bunko-state").textContent = "Installing…";
+    }
     const canInstall = bunko.can_install !== false;
     const prereqOk = !bunko.prerequisites || Object.values(bunko.prerequisites).every(Boolean);
     bunkoButton.disabled = bunko.installed || bunkoJob.state === "running" || !ready || !prereqOk;

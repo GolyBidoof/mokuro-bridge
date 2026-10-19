@@ -1618,6 +1618,14 @@ def _run_mokuro_install_job() -> None:
     import contextlib
     import io
 
+    def stream(message: str) -> None:
+        line = str(message).rstrip()
+        if not line:
+            return
+        with _ENGINE_LOCK:
+            current = _ENGINE_JOBS["mokuro"].get("output", "")
+            _ENGINE_JOBS["mokuro"]["output"] = (current + "\n" + line)[-6000:]
+
     buffer = io.StringIO()
     code = 1
     try:
@@ -1628,38 +1636,52 @@ def _run_mokuro_install_job() -> None:
     except Exception as error:
         buffer.write(f"{type(error).__name__}: {error}\n")
         code = 1
-    output = buffer.getvalue()
-    with _ENGINE_LOCK:
-        _ENGINE_JOBS["mokuro"].update(
-            state="done" if code == 0 else "error",
-            code=code,
-            output=output[-6000:],
-            finished=time.time(),
-        )
+    finally:
+        tail = buffer.getvalue().strip()
+        if tail:
+            stream(tail)
+        with _ENGINE_LOCK:
+            _ENGINE_JOBS["mokuro"].update(
+                state="done" if code == 0 else "error",
+                code=code,
+                finished=time.time(),
+            )
 
 
 def _run_bunko_install_job(method: Optional[str], totp: Optional[str]) -> None:
     import contextlib
     import io
 
+    def stream(message: str) -> None:
+        line = str(message).rstrip()
+        if not line:
+            return
+        with _ENGINE_LOCK:
+            current = _ENGINE_JOBS["bunko"].get("output", "")
+            _ENGINE_JOBS["bunko"]["output"] = (current + "\n" + line)[-6000:]
+
     buffer = io.StringIO()
     code = 1
+    stream("installing mokuro-bunko (a first install compiles from source, which takes a few minutes)")
     try:
         from . import bunko_agent
 
         with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-            bunko_agent.setup(method, log=buffer.write, totp=totp)
+            bunko_agent.setup(method, log=stream, totp=totp)
         code = 0
     except Exception as error:
-        buffer.write(f"{type(error).__name__}: {error}\n")
+        stream(f"{type(error).__name__}: {error}")
         code = 1
-    with _ENGINE_LOCK:
-        _ENGINE_JOBS["bunko"].update(
-            state="done" if code == 0 else "error",
-            code=code,
-            output=buffer.getvalue()[-6000:],
-            finished=time.time(),
-        )
+    finally:
+        tail = buffer.getvalue().strip()
+        if tail:
+            stream(tail)
+        with _ENGINE_LOCK:
+            _ENGINE_JOBS["bunko"].update(
+                state="done" if code == 0 else "error",
+                code=code,
+                finished=time.time(),
+            )
 
 
 _BUNKO_RESTART_LOCK = threading.Lock()
