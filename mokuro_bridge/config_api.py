@@ -742,13 +742,17 @@ async def add_webdav_account(
     username: str = Form(""),
     password: str = Form(""),
     root: str = Form(""),
+    insecure: str = Form(""),
 ) -> JSONResponse:
     """Verify and store one WebDAV account (server URL + Basic credentials).
 
     The server is contacted once before anything is written, so a typo in the
-    URL or the password is a 400 carrying the server's own answer, not an
-    account that silently fails every later upload. Re-submitting an existing
-    alias re-credentials it in place, which is the page's Reconnect button.
+    URL or the password is a 400 carrying a plain-language explanation, not an
+    account that silently fails every later upload. ``discover`` fallbacks are
+    tried, so pasting the server's web address (rather than its WebDAV path)
+    still works, and the answer reports the address that actually answered.
+    Re-submitting an existing alias re-credentials it in place, which is the
+    page's Reconnect button.
     """
     _require_local_origin(request)
     if not _module_available("requests"):
@@ -759,9 +763,10 @@ async def add_webdav_account(
         raise HTTPException(status_code=400, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    url_value = str(url or "").strip()
+    url_value = webdav_provider.normalise_server_address(str(url or "").strip())
     username_value = str(username or "").strip()
     password_value = str(password or "")
+    insecure = str(insecure or "").strip().lower() in ("1", "true", "yes", "on")
     # Reconnecting an existing account may leave a field empty: fall back to
     # what is stored, so "fix the URL" does not force retyping the password.
     if accounts.load_instance("webdav", name) is not None:
@@ -775,8 +780,13 @@ async def add_webdav_account(
             status_code=400, detail="a WebDAV username and password are required"
         )
     try:
-        ok, verify_error = await asyncio.to_thread(
-            webdav_provider.verify_webdav_creds, url_value, username_value, password_value
+        ok, verify_error, resolved = await asyncio.to_thread(
+            webdav_provider.verify_webdav_creds,
+            url_value,
+            username_value,
+            password_value,
+            insecure,
+            True,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -785,32 +795,48 @@ async def add_webdav_account(
         raise HTTPException(
             status_code=400,
             detail=(
-                "WebDAV connection failed - nothing was stored"
-                + (f": {detail}" if detail else "")
+                "WebDAV connection failed - nothing was stored."
+                + (f" {detail}" if detail else "")
             ),
         )
     try:
         instance = await asyncio.to_thread(
             webdav_provider.store_webdav_account,
             name,
-            url_value,
+            resolved or url_value,
             username_value,
             password_value,
             alias=clean_alias,
             label=(label.strip() or None),
             root=(root.strip() or None),
+            insecure=insecure,
         )
     except accounts.AliasCollision as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     except (ValueError, OSError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    # Create the upload folder now, so the page's Change folder shows a real
+    # folder and a bad root path surfaces while the user is still on the form.
+    folder_ready = True
+    try:
+        await asyncio.to_thread(webdav_provider.ensure_account_root, name)
+    except Exception:
+        folder_ready = False
+    server = webdav_provider.base_url(instance.name)
+    try:
+        entered = webdav_provider.clean_base_url(url_value)
+    except ValueError:
+        entered = ""
     return JSONResponse(
         {
             "ok": True,
             "method": instance.id,
             "root": instance.root_path,
-            "server": webdav_provider.base_url(instance.name),
+            "server": server,
             "username": webdav_provider.username(instance.name),
+            "discovered": bool(entered and server.rstrip("/") != entered.rstrip("/")),
+            "insecure": insecure,
+            "folder_ready": folder_ready,
         }
     )
 

@@ -538,6 +538,16 @@ def main() -> None:
         default=int(os.environ.get("MOKURO_BRIDGE_PORT") or "62642"),
     )
     parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open the setup page in a browser on a first run.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print paths, engine and proxy details at startup.",
+    )
+    parser.add_argument(
         "--check-update",
         action="store_true",
         help="Check GitHub for a newer release, print how to install it and "
@@ -657,24 +667,42 @@ def main() -> None:
     from . import fetchproxy
 
     configured = [m.id for m in _UPLOAD_METHODS.values() if m.configured]
+    remote_configured = [m.id for m in _UPLOAD_METHODS.values() if m.configured and m.id != "local"]
     upload_line = f"{_default_upload_method()} (default)"
     if configured:
         upload_line += ", " + ", ".join(c for c in configured if c != _default_upload_method())
+    verbose = args.verbose or os.environ.get("MOKURO_BRIDGE_VERBOSE", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    display_host = "127.0.0.1" if args.host in ("0.0.0.0", "::", "") else args.host
+    page_url = f"http://{display_host}:{args.port}/"
     print("=" * 60)
-    print(f"  {APP_NAME} v{__version__} on http://{args.host}:{args.port}")
-    print(f"  work dir:   {WORK_DIR}")
-    print(f"  output dir: {OUTPUT_DIR}")
-    print(f"  upload:     {upload_line}")
-    if _MOKURO_REPO is not None:
-        print(f"  mokuro:     {_MOKURO_REPO} (fork API: {_fork_supported()})")
-    elif _mokuro_pkg is not None:
-        print(f"  mokuro:     {getattr(_mokuro_pkg, '__file__', '?')} (fork API: {_fork_supported()})")
-    else:
-        print("  mokuro:     NOT INSTALLED — run: pip install mokuro")
-    if update.checks_enabled():
-        print("  updates:    checked in the background (see /health)")
-    else:
-        print("  updates:    disabled (MOKURO_BRIDGE_UPDATE_CHECK=0)")
+    print(f"  {APP_NAME} {__version__} is running")
+    print("=" * 60)
+    print()
+    print("  Open this page to set things up and watch the bridge:")
+    print(f"    {page_url}")
+    print()
+    if not remote_configured:
+        print("  First time? The page walks you through connecting a destination.")
+        print()
+    print("  Keep this window open while you use the bridge.")
+    print("  Press Ctrl-C to stop.")
+    if verbose:
+        print()
+        print(f"  work dir:   {WORK_DIR}")
+        print(f"  output dir: {OUTPUT_DIR}")
+        print(f"  upload:     {upload_line}")
+        if _MOKURO_REPO is not None:
+            print(f"  mokuro:     {_MOKURO_REPO} (fork API: {_fork_supported()})")
+        elif _mokuro_pkg is not None:
+            print(f"  mokuro:     {getattr(_mokuro_pkg, '__file__', '?')} (fork API: {_fork_supported()})")
+        else:
+            print("  mokuro:     NOT INSTALLED — run: pip install mokuro")
+        if update.checks_enabled():
+            print("  updates:    checked in the background (see /health)")
+        else:
+            print("  updates:    disabled (MOKURO_BRIDGE_UPDATE_CHECK=0)")
 
     reload_on = os.environ.get("UVICORN_RELOAD", "0").lower() in ("1", "true", "yes")
 
@@ -689,7 +717,7 @@ def main() -> None:
         requested = [args.port + i for i in range(1, fetchproxy.FETCH_PORTS + 1)]
         proxy_sockets, proxy_ports = fetchproxy.bind_sockets(args.host, requested)
         fetchproxy.ACTIVE_PORTS = proxy_ports
-    if proxy_ports:
+    if verbose and proxy_ports:
         print(
             f"  fetch proxy: {len(proxy_ports)} extra port(s) "
             f"{proxy_ports[0]}-{proxy_ports[-1]}  →  "
@@ -702,10 +730,8 @@ def main() -> None:
                else ", ".join(fetchproxy.UPSTREAM_PATTERNS))
         )
         print(f"  fd limit:   {_fd_limit} (raised for the proxy)")
-    elif fetchproxy.FETCH_PORTS > 0 and reload_on:
+    elif verbose and fetchproxy.FETCH_PORTS > 0 and reload_on:
         print("  fetch proxy: off (UVICORN_RELOAD=1 is incompatible with extra ports)")
-    print("=" * 60)
-    print(f"  dashboard:  http://{args.host}:{args.port}/      (configuration and health)")
 
     # One line when the engine is the slower upstream build or one this cannot
     # name, naming the single command that switches to the faster fork. It
@@ -719,6 +745,23 @@ def main() -> None:
     if update.checks_enabled():
         update.enable_auto_checks()
         update.maybe_refresh_async()
+
+    opening_disabled = args.no_browser or os.environ.get(
+        "MOKURO_BRIDGE_OPEN_BROWSER", ""
+    ).strip().lower() in ("0", "false", "no", "off")
+    if (
+        not remote_configured
+        and not opening_disabled
+        and sys.stdout.isatty()
+        and sys.stdin.isatty()
+    ):
+        import threading
+        import webbrowser
+
+        setup_url = page_url + "?wizard=1"
+        print("  Opening the setup guide in your browser…")
+        print()
+        threading.Timer(1.2, lambda: webbrowser.open(setup_url)).start()
 
     if not proxy_sockets:
         uvicorn.run(

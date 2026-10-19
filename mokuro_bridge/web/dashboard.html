@@ -111,7 +111,7 @@
   .summary-text { color: var(--muted); font-size: 14px; }
   .summary-note { color: var(--faint); font-size: 12.5px; margin-top: 9px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .summary-note code { color: var(--muted); }
-  .summary-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; border-top: 1px solid var(--line); padding-top: 14px; }
+  .summary-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; border-top: 1px solid var(--line); padding-top: 14px; }
   .stat { padding: 2px 10px 2px 0; min-width: 0; }
   .stat dt { font-size: 11.5px; color: var(--faint); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
   .stat dd { font-size: 19px; font-weight: 600; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 3px; }
@@ -151,7 +151,7 @@
   .dest-id { min-width: 0; flex: 1; }
   .dest-id h3 { font-family: var(--mono); font-size: 14.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dest-id .who { color: var(--muted); font-size: 12.5px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dest-id .email-line { font-size: 11.5px; color: var(--faint); }
+  .dest-id .email-line { font-size: 11.5px; color: var(--faint); white-space: normal; overflow-wrap: anywhere; }
   .state-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 550; padding: 3px 8px; border-radius: 999px; white-space: nowrap; flex: none; border: 1px solid var(--line); color: var(--muted); background: var(--panel-2); }
   .state-chip::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--faint); }
   .state-chip[data-state="connected"] { color: var(--good); background: var(--good-soft); border-color: color-mix(in srgb, var(--good) 45%, var(--line)); }
@@ -174,22 +174,6 @@
   .link { border: 0; background: transparent; color: var(--faint); cursor: pointer; font-size: 12.5px; padding: 1px 0; }
   .link:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
   .link.danger:hover { color: var(--bad); }
-  .dest.add { align-items: stretch; justify-content: center; border-style: dashed; border-color: var(--line-strong); background: transparent; box-shadow: none; cursor: pointer; }
-  .dest.add:hover { border-color: var(--accent); background: var(--accent-soft); }
-  .dest.add .inner { display: flex; gap: 11px; align-items: center; }
-  .dest.add .plus { width: 34px; height: 34px; border-radius: 8px; display: grid; place-items: center; border: 1px solid var(--line); background: var(--panel); color: var(--accent); flex: none; }
-  .dest.add h3 { font-size: 14px; font-weight: 600; }
-  .dest.add p { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
-
-  .auth-list { display: flex; flex-direction: column; gap: 10px; max-width: 640px; margin-top: 14px; }
-  .auth-heading { font-size: 14px; font-weight: 600; color: var(--muted); margin-bottom: 2px; }
-  .auth-card { display: flex; align-items: center; gap: 14px; padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--radius); background: transparent; }
-  .auth-card:hover { background: var(--panel); }
-  .auth-body { flex: 1; min-width: 0; }
-  .auth-body h3 { font-size: 15.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .auth-body p { font-size: 12.5px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .auth-body .auth-links { display: flex; gap: 9px; margin-top: 5px; }
-  .auth-actions { display: flex; align-items: center; gap: 8px; flex: none; }
   .onboard { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 12px; padding: 14px 16px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--panel); }
   .onboard h3 { font-size: 13.5px; font-weight: 600; }
   .onboard p { color: var(--muted); font-size: 12.5px; margin-top: 3px; }
@@ -210,7 +194,18 @@
   .pref-control .row { display: flex; gap: 7px; }
   .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
   .field > label { font-size: 12.5px; font-weight: 600; }
-  input[type="text"], input[type="number"], input[type="email"], input[type="password"] { width: 100%; font: inherit; font-size: 13.5px; color: var(--ink); background: var(--code-bg); border: 1px solid var(--line-strong); border-radius: 8px; padding: 7px 9px; min-height: 34px; }
+  input[type="text"], input[type="number"], input[type="email"], input[type="password"], input[type="url"], select { width: 100%; font: inherit; font-size: 13.5px; color: var(--ink); background: var(--code-bg); border: 1px solid var(--line-strong); border-radius: 8px; padding: 7px 9px; min-height: 34px; }
+  select { cursor: pointer; }
+  html[data-theme="light"] select { background: #ffffff; }
+  .check-row { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: var(--ink); }
+  .check-row input[type="checkbox"] { width: auto; min-height: auto; margin: 2px 0 0; accent-color: var(--accent); }
+  details.dav-help, details.dav-advanced { margin-top: 2px; }
+  details.dav-help summary, details.dav-advanced summary { cursor: pointer; color: var(--muted); font-size: 12.5px; width: max-content; }
+  details.dav-help summary:hover, details.dav-advanced summary:hover { color: var(--ink); }
+  .dav-help-body { margin-top: 8px; padding: 11px 13px; background: var(--panel-2, var(--code-bg)); border: 1px solid var(--line); border-radius: 8px; font-size: 12.5px; color: var(--muted); line-height: 1.55; display: grid; gap: 7px; }
+  .dav-help-body strong { color: var(--ink); }
+  details.dav-advanced[open] { margin-top: 10px; }
+  details.dav-advanced .dav-advanced-body { margin-top: 10px; display: grid; gap: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
   html[data-theme="light"] input:not(:disabled) { background: #ffffff; }
   input:hover:not(:disabled) { border-color: var(--line-strong); }
   input:disabled { opacity: 0.6; cursor: not-allowed; }
@@ -253,6 +248,27 @@
   .provider-choice .badge { font-size: 11px; color: var(--warn); }
   .provider-choice .provider-tile { width: 30px; height: 30px; }
 
+  .wiz-kicker { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); font-weight: 600; margin-bottom: 4px; }
+  .wiz-lede { font-size: 14.5px; color: var(--muted); margin-bottom: 15px; line-height: 1.55; }
+  .wiz-list { list-style: none; margin: 0 0 15px; padding: 0; display: grid; gap: 13px; }
+  .wiz-list li { display: flex; gap: 11px; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+  .wiz-list strong { display: block; color: var(--ink); font-size: 14px; margin-bottom: 1px; }
+  .wiz-ico { width: 22px; height: 22px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; font-size: 11px; font-weight: 700; flex: none; }
+  .wiz-choices, .wiz-providers { display: grid; gap: 10px; }
+  .wiz-choice { display: flex; gap: 13px; text-align: left; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--ink); cursor: pointer; }
+  .wiz-choice:hover { background: var(--panel); border-color: var(--line-strong); }
+  .wiz-choice-ico { font-size: 21px; width: 28px; text-align: center; flex: none; }
+  .wiz-choice strong { display: block; font-size: 15px; }
+  .wiz-choice em { display: block; font-style: normal; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .wiz-provider { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--ink); cursor: pointer; text-align: left; }
+  .wiz-provider:hover:not(:disabled) { background: var(--panel); border-color: var(--line-strong); }
+  .wiz-provider:disabled { opacity: 0.55; cursor: not-allowed; }
+  .wiz-provider-body { flex: 1; min-width: 0; }
+  .wiz-provider-body strong { display: block; font-size: 14.5px; }
+  .wiz-provider-body em { display: block; font-style: normal; font-size: 12.5px; color: var(--muted); margin-top: 1px; }
+  .wiz-dots { display: inline-flex; gap: 5px; }
+  .wiz-dots span { width: 6px; height: 6px; border-radius: 50%; background: var(--line-strong); }
+  .wiz-dots span[data-on="true"] { background: var(--accent); }
   .detail-list { display: grid; gap: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
   .detail-row { display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: 12px; padding: 9px 12px; border-bottom: 1px solid var(--line); font-size: 13.5px; }
   .detail-row:last-child { border-bottom: 0; }
@@ -263,6 +279,9 @@
   .form-grid.two { grid-template-columns: 1fr 1fr; }
   .form-actions { display: flex; align-items: center; gap: 8px; margin-top: 2px; flex-wrap: wrap; }
   .form-actions .spacer { flex: 1; }
+  /* The account forms can outgrow the dialog body now that they carry help
+     text; keep Connect/Reconnect pinned so it is never below the fold. */
+  #add-form .form-actions { position: sticky; bottom: -15px; margin: 14px -18px -15px; padding: 11px 18px; background: var(--panel); border-top: 1px solid var(--line); }
   .form-error { display: none; margin-top: 12px; padding: 9px 11px; border-radius: 7px; background: var(--bad-soft); border: 1px solid var(--bad); color: var(--bad); font-size: 13px; line-height: 1.45; }
   .form-error.show { display: block; }
   .flow-panel { display: grid; gap: 12px; }
@@ -292,6 +311,7 @@
   .toast.info { border-left-color: var(--accent); }
 
   @media (max-width: 820px) {
+    .summary-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .onboard { grid-template-columns: 1fr; }
     .pref { grid-template-columns: 1fr; }
     .provider-picker { grid-template-columns: 1fr; }
@@ -302,13 +322,12 @@
     .topbar-inner {
       padding: 10px 14px; display: grid; row-gap: 8px;
       grid-template-columns: minmax(0, 1fr) auto;
-      grid-template-areas: "brand add" "status theme";
+      grid-template-areas: "brand status" "theme theme";
     }
     .brand { grid-area: brand; }
     .topbar-right { display: contents; }
     #status-chip { grid-area: status; justify-self: start; }
     .theme-switch { grid-area: theme; justify-self: end; }
-    #add-top { grid-area: add; justify-self: end; }
     .topbar-link { display: none; }
     .section-head { align-items: flex-start; flex-direction: column; gap: 8px; }
     .dest-grid { grid-template-columns: 1fr; }
@@ -351,7 +370,6 @@
           <button type="button" role="radio" data-theme-choice="light" aria-checked="false">Light</button>
           <button type="button" role="radio" data-theme-choice="dark" aria-checked="false">Dark</button>
         </div>
-        <button class="btn primary" id="add-top" type="button">Add destination</button>
       </div>
     </div>
   </header>
@@ -384,6 +402,11 @@
           <dd id="stat-target">—</dd>
           <dd class="stat-sub" id="stat-target-sub">default destination</dd>
         </div>
+        <div class="stat">
+          <dt>Reading engine</dt>
+          <dd id="stat-engine">—</dd>
+          <dd class="stat-sub" id="stat-engine-sub">checking</dd>
+        </div>
       </dl>
       <div class="accel" id="accel" data-on="false">
         <span class="accel-dot" aria-hidden="true"></span>
@@ -405,10 +428,9 @@
           <p class="lede">Finished volumes go to the one marked <strong>Default</strong>, unless a dokuha script names another.</p>
         </div>
         <div class="spacer"></div>
-        <button class="btn" id="add-inline" type="button">Add destination</button>
+        <button class="btn primary" id="add-destination" type="button">Add destination</button>
       </div>
       <div class="dest-grid" id="destinations" aria-live="polite"></div>
-      <div id="auth-destinations"></div>
       <div id="onboard"></div>
     </section>
 
@@ -435,6 +457,8 @@
         <span>Built for <a href="https://reader.mokuro.app/" target="_blank" rel="noopener">reader.mokuro.app</a></span>
         <span class="sep" aria-hidden="true">/</span>
         <span id="foot-update">Checking for updates…</span>
+        <span class="sep" aria-hidden="true">/</span>
+        <button class="link" type="button" id="open-wizard">Setup guide</button>
       </div>
       <details class="dev">
         <summary>Developer details</summary>
@@ -443,6 +467,8 @@
           <div class="dev-line"><span class="k">Terminal view</span><span><code>mokuro-bridge --status</code></span></div>
           <div class="dev-line"><span class="k">Settings file</span><span><code id="settings-file">…</code></span></div>
           <div class="dev-line"><span class="k">Engine</span><span id="engine-info">…</span></div>
+          <div class="dev-line" id="engine-help" hidden><span class="k">Faster engine</span><span>Install the GolyBidoof build with <code>mokuro-bridge --install-mokuro</code></span></div>
+          <div class="dev-line" id="bunko-info" hidden><span class="k">Library index</span><span id="bunko-text">…</span></div>
           <div class="dev-line"><span class="k">Fetch proxy</span><span id="proxy-info">…</span></div>
         </div>
       </details>
@@ -451,6 +477,27 @@
 </div>
 
 <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<dialog id="wizard" aria-labelledby="wizard-title">
+  <div class="dlg-head">
+    <div class="titles">
+      <p class="wiz-kicker" id="wizard-kicker">Getting started</p>
+      <h2 id="wizard-title">Welcome to mokuro-bridge</h2>
+      <p id="wizard-subtitle">Three steps, all by clicking.</p>
+    </div>
+    <button class="icon-btn dlg-close" type="button" data-close="wizard" aria-label="Close setup guide">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="dlg-body" id="wizard-body"></div>
+  <div class="dlg-foot">
+    <span class="wiz-dots" id="wizard-dots" aria-hidden="true"></span>
+    <div class="spacer"></div>
+    <button class="btn ghost" type="button" id="wizard-skip">Skip for now</button>
+    <button class="btn" type="button" id="wizard-back" hidden>Back</button>
+    <button class="btn primary" type="button" id="wizard-next">Get started</button>
+  </div>
+</dialog>
 
 <dialog id="add-dialog" aria-labelledby="add-title">
   <div class="dlg-head">
@@ -609,10 +656,79 @@ const PROVIDER_META = {
   },
   webdav: {
     label: "WebDAV", kind: "form",
-    blurb: "Any WebDAV server: Nextcloud, ownCloud, Synology, a NAS or a folder over HTTPS.",
+    blurb: "Nextcloud, ownCloud, Synology, Box, pCloud, HiDrive or any other WebDAV server.",
     empty: "The requests library is not installed.",
   },
   local: { label: "This computer", kind: null, blurb: "", empty: "" },
+};
+
+/* What a first-time WebDAV user has in front of them. Each entry says where the
+ * address lives and whether the server wants an app password; the fixed-URL
+ * hosts are filled in so those users only type a username and password. */
+const WEBDAV_PRESETS = {
+  nextcloud: {
+    label: "Nextcloud",
+    url: "",
+    placeholder: "https://cloud.example.com",
+    hint: "Open Nextcloud, click Files, and copy the address from your browser. The bridge finds the WebDAV path from it.",
+    auth: "Nextcloud usually wants an app password: Settings \u2192 Security \u2192 App passwords.",
+    link: "https://docs.nextcloud.com/server/latest/user_manual/en/files/access_webdav.html",
+    linkLabel: "Nextcloud: connect with WebDAV",
+  },
+  owncloud: {
+    label: "ownCloud",
+    url: "",
+    placeholder: "https://cloud.example.com",
+    hint: "Open ownCloud, click Files, and copy the address from your browser. The bridge finds the WebDAV path from it.",
+    auth: "ownCloud may need an app password (Settings \u2192 Security).",
+    link: "https://doc.owncloud.com/server/latest/user_manual/en/files/access_webdav.html",
+    linkLabel: "ownCloud: connect with WebDAV",
+  },
+  synology: {
+    label: "Synology NAS",
+    url: "",
+    placeholder: "https://your-nas:5006",
+    hint: "In DSM, install and open WebDAV Server and enable HTTPS. The address is https://your-nas:5006 (plain HTTP is port 5005).",
+    auth: "Use a DSM account; Synology also lets you create an app password for WebDAV.",
+    link: "https://kb.synology.com/en-global/DSM/tutorial/How_to_access_files_on_Synology_NAS_with_WebDAV",
+    linkLabel: "Synology: enable WebDAV",
+  },
+  box: {
+    label: "Box",
+    url: "https://webdav.box.com/dav",
+    placeholder: "https://webdav.box.com/dav",
+    hint: "Box always uses this address; you only need an app password.",
+    auth: "Box needs an app password: Account Settings \u2192 Create app password.",
+    link: "https://support.box.com/hc/en-us/articles/360043696414",
+    linkLabel: "Box: create an app password",
+  },
+  pcloud: {
+    label: "pCloud",
+    url: "https://webdav.pcloud.com",
+    placeholder: "https://webdav.pcloud.com",
+    hint: "pCloud always uses this address.",
+    auth: "Use your pCloud email and password; accounts with two-factor sign-in need an app password.",
+    link: "",
+    linkLabel: "",
+  },
+  hidrive: {
+    label: "Strato HiDrive",
+    url: "https://webdav.hidrive.strato.com",
+    placeholder: "https://webdav.hidrive.strato.com",
+    hint: "HiDrive always uses this address.",
+    auth: "Use your HiDrive user name and password.",
+    link: "",
+    linkLabel: "",
+  },
+  other: {
+    label: "Another WebDAV server",
+    url: "",
+    placeholder: "https://your-server/dav/",
+    hint: "Your server's settings or documentation will name a WebDAV address; it often ends in /dav/, /webdav/ or /remote.php/dav/files/<you>/.",
+    auth: "Some servers need an app password instead of your login password.",
+    link: "",
+    linkLabel: "",
+  },
 };
 
 const state = {
@@ -839,6 +955,17 @@ function renderLive() {
     $("stat-target-sub").textContent = "local output only";
   }
 
+  const engine = engineParts(h);
+  $("stat-engine").textContent = engine.version;
+  $("stat-engine-sub").textContent = engine.flavour;
+  const engineHelp = $("engine-help");
+  if (engineHelp) engineHelp.hidden = engine.flavour !== "upstream build" && engine.flavour !== "not installed";
+  const bunko = bunkoInfo(h);
+  const bunkoLine = $("bunko-info");
+  if (bunkoLine) {
+    bunkoLine.hidden = !bunko;
+    if (bunko) $("bunko-text").textContent = `mokuro-bunko ${bunko.version || bunko.commit || "connected"}`;
+  }
   if (state.config) {
     $("work-dir").textContent = state.config.work_dir || "your work folder";
     $("version-note").textContent = "v" + (h.version || state.config.version || "");
@@ -872,10 +999,33 @@ function renderLive() {
   renderNotices();
 }
 
+function engineParts(h) {
+  if (h.mokuro_installed === false) return { version: "not installed", flavour: "not installed" };
+  const version = h.mokuro_version ? `mokuro ${h.mokuro_version}` : "mokuro";
+  if (h.mokuro_custom_fork || h.mokuro_fork_api) return { version, flavour: "GolyBidoof fork" };
+  return { version, flavour: "upstream build" };
+}
+
 function engineText(h) {
-  if (h.mokuro_installed === false) return "mokuro is not installed";
-  const flavor = h.mokuro_fork_api ? "fast OCR engine" : (h.mokuro_flavor || "mokuro");
-  return h.mokuro_version ? `${flavor} · mokuro ${h.mokuro_version}` : flavor;
+  const parts = engineParts(h);
+  return parts.flavour === "not installed" ? "mokuro is not installed" : `${parts.version} · ${parts.flavour}`;
+}
+
+/* mokuro-bunko is optional and lands behind the bridge: read whichever of the
+   documented shapes is present instead of assuming one. */
+function bunkoInfo(h) {
+  const health = h || {};
+  const config = state.config || {};
+  const raw = health.bunko && typeof health.bunko === "object" ? health.bunko : null;
+  const rawConfig = config.bunko && typeof config.bunko === "object" ? config.bunko : null;
+  const candidates = [
+    health.bunko_version, raw && raw.version, raw && raw.commit,
+    config.bunko_version, rawConfig && rawConfig.version, rawConfig && rawConfig.commit,
+  ];
+  const version = candidates.find((v) => typeof v === "string" && v.trim());
+  const present = !!(raw || rawConfig || health.bunko_version || config.bunko_version);
+  if (!present && !version) return null;
+  return { version: version || "" };
 }
 
 function proxyText(h) {
@@ -935,12 +1085,30 @@ function providerIcon(provider) {
   return `<span class="provider-glyph" aria-hidden="true">${glyph}</span>`;
 }
 
+function providerDescriptor(provider, method) {
+  const live = (state.providers || []).find((p) => p.id === provider) || null;
+  const mine = PROVIDER_META[provider] || {};
+  const label = (method && method.provider_label) || (live && live.label) || mine.label || provider;
+  const browser = live ? live.browser_setup : (mine.kind || null);
+  const setupHint = (live && live.setup_hint) || `mokuro-bridge --setup-upload ${provider}`;
+  return { provider, label, live, browser, setupHint };
+}
+
+function hasBrowserFlow(provider) {
+  return ["form", "device_code", "oauth"].includes(providerDescriptor(provider).browser);
+}
+
+function setupHintFor(provider) {
+  return providerDescriptor(provider).setupHint;
+}
+
 function renderDestinations() {
   const config = state.config;
   if (!config) return;
   const methods = config.methods || [];
-  const connected = methods.filter((m) => stateOf(m) === "connected");
-  const html = connected.map((m) => {
+  // Implicit "not configured" provider slots are not accounts: do not show them.
+  const shownMethods = methods.filter((m) => stateOf(m) !== "not_configured");
+  const html = shownMethods.map((m) => {
     const provider = providerOf(m);
     const alias = aliasOf(m);
     const st = stateOf(m);
@@ -981,70 +1149,21 @@ function renderDestinations() {
     </article>`;
   }).join("");
 
-  const AUTH_BLURB = {
-    mega: "20GB free · Persistent sign-in",
-    drive: "15GB free · Reconnects when the token expires",
-    onedrive: "5GB free · Personal or work account",
-    webdav: "Nextcloud, NAS or any WebDAV server",
-  };
-  const AUTH_STATE = {
-    needs_sign_in: "Sign-in expired · reconnect to keep uploading",
-    not_configured: "Not connected yet",
-  };
-  const authMethods = methods.filter((m) => stateOf(m) !== "connected");
-  const authRows = authMethods.map((m) => {
-    const provider = providerOf(m);
-    const alias = aliasOf(m);
-    const st = stateOf(m);
-    const meta = PROVIDER_META[provider] || { label: m.provider_label || provider };
-    const title = alias !== provider ? `${meta.label} · ${alias}` : meta.label;
-    const blurb = AUTH_STATE[st] || "";
-    const detail = AUTH_BLURB[provider] || "";
-    const connect = stateOf(m) === "needs_sign_in" ? "Reconnect" : "Connect";
-    const action = `<button class="btn primary" type="button" data-reconnect="${esc(alias)}">${connect}</button>`;
-    const links = [`<button class="link" type="button" data-details="${esc(alias)}">Details</button>`];
-    if (m.account && m.account !== "default") links.push(`<button class="link danger" type="button" data-remove="${esc(alias)}">Remove</button>`);
-    return `<div class="auth-card" role="group" aria-label="${esc(title)}">
-      <span class="provider-tile" data-provider="${esc(provider)}" aria-hidden="true">${providerIcon(provider)}</span>
-      <div class="auth-body">
-        <h3>${esc(title)}</h3>
-        <p>${esc([blurb, detail].filter(Boolean).join(" · "))}</p>
-        <div class="auth-links">${links.join("")}</div>
-      </div>
-      <div class="auth-actions">${action}</div>
-    </div>`;
-  }).join("");
-  $("auth-destinations").innerHTML = authRows ? `<div class="auth-list"><h3 class="auth-heading">Not connected yet</h3>${authRows}</div>` : "";
+  $("destinations").innerHTML = html;
 
-  const addCard = `<button class="dest add" type="button" data-add="1" aria-label="Add a destination">
-    <span class="inner"><span class="plus" aria-hidden="true">${icon("plus")}</span>
-    <span><h3>Add a destination</h3><p>MEGA, Google Drive, OneDrive, WebDAV, or another account of one you already use.</p></span></span>
-  </button>`;
-
-  $("destinations").innerHTML = html + addCard;
-
-  const remote = methods.filter((m) => providerOf(m) !== "local");
-  const unconfigured = remote.filter((m) => stateOf(m) !== "connected");
-  $("onboard").innerHTML = remote.length === 0 ? `<div class="onboard">
+  const configuredRemote = methods.filter((m) => providerOf(m) !== "local" && stateOf(m) !== "not_configured");
+  $("onboard").innerHTML = configuredRemote.length === 0 ? `<div class="onboard">
     <div><span class="step-n">01</span><h3>Add a destination</h3><p>Connect MEGA, Google Drive, OneDrive or WebDAV. Everything is done right here; no terminal needed.</p></div>
     <div><span class="step-n">02</span><h3>Pick a folder</h3><p>Browse the provider's real folders and choose where volumes should be filed.</p></div>
     <div><span class="step-n">03</span><h3>Use it from scripts</h3><p>Each destination gets a short name like <code>mega-work</code>. Point dokuha at it with <code>upload_method=mega-work</code>.</p></div>
   </div>` : "";
 
-  $("destinations").querySelectorAll("[data-add]").forEach((b) => b.onclick = () => openAdd());
   $("destinations").querySelectorAll("[data-choose]").forEach((b) => b.onclick = () => openFolderFor(b.dataset.choose));
   $("destinations").querySelectorAll("[data-default]").forEach((b) => b.onclick = () => setDefault(b.dataset.default));
   $("destinations").querySelectorAll("[data-rename]").forEach((b) => b.onclick = () => openRename(b.dataset.rename));
   $("destinations").querySelectorAll("[data-remove]").forEach((b) => b.onclick = () => openRemove(b.dataset.remove));
   $("destinations").querySelectorAll("[data-copy]").forEach((b) => b.onclick = () => copyText(`upload_method=${b.dataset.copy}`, "Destination id"));
-  document.querySelectorAll("#destinations [data-details], #auth-destinations [data-details]").forEach((b) => b.onclick = () => openDetails(b.dataset.details));
-  document.querySelectorAll("#auth-destinations [data-remove]").forEach((b) => b.onclick = () => openRemove(b.dataset.remove));
-  document.querySelectorAll("#auth-destinations [data-reconnect]").forEach((b) => {
-    b.onclick = () => {
-      const method = methods.find((m) => aliasOf(m) === b.dataset.reconnect);
-      if (method) openReconnect(method);
-    };
-  });
+  $("destinations").querySelectorAll("[data-details]").forEach((b) => b.onclick = () => openDetails(b.dataset.details));
   $("destinations").querySelectorAll("[data-reconnect]").forEach((b) => {
     b.onclick = () => {
       const method = methods.find((m) => aliasOf(m) === b.dataset.reconnect);
@@ -1236,6 +1355,7 @@ async function loadAll(options) {
     renderLive();
     renderDestinations();
     if (!state.dirty) renderSettings();
+    maybeOpenWizard();
   } catch (error) {
     state.reaching = false;
     if (!state.config) {
@@ -1509,6 +1629,10 @@ function openProviderForm(provider, mode, account) {
   const alias = account ? aliasOf(account) : nextAlias(provider);
   const label = account ? (account.label || "") : "";
   const submitLabel = mode === "reconnect" ? "Reconnect" : `Connect ${meta.label}`;
+  const davUrl = (account && account.extra && account.extra.url) || "";
+  const davUser = (account && account.extra && (account.extra.username || account.extra.email)) || "";
+  const davRoot = (account && account.root) || "mokuro-reader";
+  const davInsecure = !!(account && account.extra && account.extra.insecure);
   const notes = {
     mega: "MEGA needs your account email and password once. They are kept in this computer's keychain, never in a file the page can read.",
     drive: "You will sign in to Google in a new tab. This page waits here until it is done.",
@@ -1531,21 +1655,55 @@ function openProviderForm(provider, mode, account) {
       <div class="field"><label for="add-email">MEGA email</label><input id="add-email" type="email" autocomplete="username" required></div>
       <div class="field"><label for="add-password">Password</label><input id="add-password" type="password" autocomplete="current-password" required></div>
     </div>` : ""}
-    ${provider === "webdav" ? `<div class="field">
-      <label for="add-url">Server URL</label>
-      <input id="add-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://cloud.example.com/remote.php/dav/files/you/" value="${esc((account && account.extra && account.extra.url) || "")}" required>
-      <span class="hint">The WebDAV collection to upload into. The bridge creates <code>&lt;root&gt;/&lt;series&gt;/</code> inside it, and checks the URL before saving anything.</span>
+    ${provider === "webdav" ? `<div class="field" id="add-dav-preset-field" ${mode === "reconnect" ? "hidden" : ""}>
+      <label for="add-dav-preset">Which server do you use? <span class="hint">(optional)</span></label>
+      <select id="add-dav-preset">
+        <option value="">Choose one to get the right address…</option>
+        <option value="nextcloud">Nextcloud</option>
+        <option value="owncloud">ownCloud</option>
+        <option value="synology">Synology NAS</option>
+        <option value="box">Box</option>
+        <option value="pcloud">pCloud</option>
+        <option value="hidrive">Strato HiDrive</option>
+        <option value="other">Another WebDAV server</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="add-url">Server address</label>
+      <input id="add-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://cloud.example.com" value="${esc(davUrl)}">
+      <span class="hint" id="add-dav-hint">${mode === "reconnect" ? "Leave this as it is to keep the saved server." : "Paste the address your server shows for WebDAV. If you paste the address of its web page instead, the bridge finds the WebDAV folder for you."}</span>
+      <span class="hint" ${mode === "reconnect" ? "hidden" : ""}><a class="inline-link" id="add-dav-link" href="#" target="_blank" rel="noopener" hidden></a></span>
     </div>
     <div class="form-grid two">
       <div class="field">
         <label for="add-username">Username</label>
-        <input id="add-username" type="text" autocomplete="username" spellcheck="false" value="${esc((account && account.extra && (account.extra.username || account.extra.email)) || "")}" required>
+        <input id="add-username" type="text" autocomplete="username" spellcheck="false" value="${esc(davUser)}">
       </div>
       <div class="field">
         <label for="add-password">Password</label>
-        <input id="add-password" type="password" autocomplete="current-password" ${mode === "reconnect" ? "placeholder=\"Leave empty to keep the saved one\"" : "required"}>
+        <input id="add-password" type="password" autocomplete="current-password" ${mode === "reconnect" ? "placeholder=\"Leave empty to keep the saved one\"" : ""}>
       </div>
-    </div>` : ""}
+    </div>
+    <span class="hint" id="add-dav-auth-hint">${mode === "reconnect" ? "Leave a field empty to keep the saved value." : "Some servers need an app password instead of your login password."}</span>
+    <details class="dav-help"><summary>Where do I find this?</summary>
+      <div class="dav-help-body">
+        <p><strong>Nextcloud or ownCloud:</strong> log in, open Files, and copy the address from your browser, such as <code>https://cloud.example.com</code>. The bridge finds the WebDAV path for you.</p>
+        <p><strong>Synology NAS:</strong> in DSM open Package Center, install <em>WebDAV Server</em> and enable it. Use <code>https://your-nas:5006</code> with HTTPS, or <code>http://your-nas:5005</code> without.</p>
+        <p><strong>Box:</strong> <code>https://webdav.box.com/dav</code> with an app password. <strong>pCloud:</strong> <code>https://webdav.pcloud.com</code>. <strong>Strato HiDrive:</strong> <code>https://webdav.hidrive.strato.com</code>.</p>
+        <p><strong>Anything else:</strong> look for "WebDAV" in the server's settings; the address usually ends in <code>/dav/</code>, <code>/webdav/</code> or <code>/remote.php/dav/files/&lt;you&gt;/</code>.</p>
+        <p><strong>Password rejected?</strong> Many servers want an app password: Nextcloud has them in Settings, then Security; Synology in the user's settings; Box in Account Settings.</p>
+      </div>
+    </details>
+    <details class="dav-advanced"><summary>Advanced settings</summary>
+      <div class="dav-advanced-body">
+        <div class="field">
+          <label for="add-dav-root">Upload folder</label>
+          <input id="add-dav-root" type="text" autocomplete="off" spellcheck="false" value="${esc(davRoot)}">
+          <span class="hint">Created on the server, with one folder per series inside it. You can change it later with Change folder.</span>
+        </div>
+        <label class="check-row"><input id="add-dav-insecure" type="checkbox" ${davInsecure ? "checked" : ""}><span>Accept a self-signed certificate <span class="hint">Only for your own NAS or home server. It turns off certificate checking for this account.</span></span></label>
+      </div>
+    </details>` : ""}
     ${provider === "drive" ? `<div class="field" id="drive-client-fields" ${info.live && info.live.client_preset ? "hidden" : ""}>
       <label for="add-client-id">Google client ID</label>
       <input id="add-client-id" type="text" autocomplete="off" spellcheck="false" placeholder="…apps.googleusercontent.com">
@@ -1575,6 +1733,62 @@ function openProviderForm(provider, mode, account) {
     if (event.target.value !== value) event.target.value = value;
   });
   $("add-alias").focus();
+  if (provider === "webdav") wireWebdavForm(mode);
+}
+
+/* Address a beginner typed into the WebDAV form: add the scheme they left out,
+ * picking http for a machine that is obviously on their own network. */
+function normaliseDavAddress(value) {
+  const text = String(value || "").trim().replace(/\s+/g, "");
+  if (!text) return "";
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return text;
+  const host = text.split("/")[0].toLowerCase();
+  const hostname = host.split(":")[0];
+  const local = hostname === "localhost"
+    || hostname.endsWith(".local")
+    || !hostname.includes(".")
+    || /^(127\.|10\.|192\.168\.|169\.254\.)/.test(hostname)
+    || /^172\.(1[6-9]|2\d|3[01])\./.test(hostname);
+  return `${local ? "http" : "https"}://${text}`;
+}
+
+function wireWebdavForm(mode) {
+  const preset = $("add-dav-preset");
+  if (!preset) return;
+  const apply = () => {
+    const chosen = WEBDAV_PRESETS[preset.value];
+    const urlInput = $("add-url");
+    const hint = $("add-dav-hint");
+    const auth = $("add-dav-auth-hint");
+    const link = $("add-dav-link");
+    if (!chosen) {
+      urlInput.placeholder = "https://cloud.example.com";
+      hint.textContent = "Paste the address your server shows for WebDAV. If you paste the address of its web page instead, the bridge finds the WebDAV folder for you.";
+      auth.textContent = "Some servers need an app password instead of your login password.";
+      if (link) link.hidden = true;
+      return;
+    }
+    const fixedUrls = Object.values(WEBDAV_PRESETS).map((entry) => entry.url).filter(Boolean);
+    if (chosen.url) {
+      urlInput.value = chosen.url;
+    } else if (fixedUrls.includes(urlInput.value.trim())) {
+      urlInput.value = "";
+    }
+    if (chosen.placeholder) urlInput.placeholder = chosen.placeholder;
+    hint.textContent = chosen.hint;
+    auth.textContent = chosen.auth;
+    if (link) {
+      if (chosen.link) {
+        link.href = chosen.link;
+        link.textContent = `${chosen.linkLabel} ${"\u2197"}`;
+        link.hidden = false;
+      } else {
+        link.hidden = true;
+      }
+    }
+  };
+  preset.addEventListener("change", apply);
+  if (mode !== "reconnect") apply();
 }
 
 function addError(message) {
@@ -1617,17 +1831,28 @@ async function submitProviderForm() {
       return;
     }
     if (provider === "webdav") {
-      const url = $("add-url").value.trim();
+      const url = normaliseDavAddress($("add-url").value);
       const username = $("add-username").value.trim();
       const password = $("add-password").value;
-      if (!url || !username || !password) {
-        addError("Enter the WebDAV server URL, username and password.");
+      const root = ($("add-dav-root") && $("add-dav-root").value.trim()) || "";
+      const insecure = !!($("add-dav-insecure") && $("add-dav-insecure").checked);
+      if (!url) { addError("Enter the server address first, for example https://cloud.example.com."); restore(); return; }
+      if (!/^https?:\/\//i.test(url)) { addError("The server address must start with https:// (or http:// for a local server)."); restore(); return; }
+      if (!username) { addError("Enter the WebDAV username your server uses."); restore(); return; }
+      if (!password && state.add.mode !== "reconnect") {
+        addError("Enter the WebDAV password, or an app password if your server offers one.");
         restore();
         return;
       }
       submit.textContent = "Checking the server…";
-      const result = await postForm("/config/accounts/webdav", { alias, label, url, username, password });
-      toast(`${result.method || alias} connected.`, "info");
+      const result = await postForm("/config/accounts/webdav", { alias, label, url, username, password, root, insecure: insecure ? "on" : "" });
+      const where = result.discovered
+        ? ` Connected. The bridge found the WebDAV folder at ${result.server}.`
+        : " Connected.";
+      toast(`${result.method || alias}${where}`, "info");
+      if (result.folder_ready === false) {
+        toast("Connected, but the upload folder could not be created yet; it is created at the first upload.", "bad");
+      }
       closeDialog("add-dialog");
       await loadConfig();
       restore();
@@ -1786,6 +2011,7 @@ function openDetails(alias) {
   const st = stateOf(method);
   const email = (method.extra && (method.extra.email || method.extra.username)) || "";
   const server = (provider === "webdav" && method.extra && method.extra.url) || "";
+  const insecure = provider === "webdav" && !!(method.extra && method.extra.insecure);
   const account = method.account && method.account !== "default" ? method.account : "Default account";
   const folder = tidyFolder(method.root || method.current_folder) || (provider === "local" ? state.config.output_dir : "not chosen yet");
   const creds = method.creds_source ? ({
@@ -1801,10 +2027,13 @@ function openDetails(alias) {
     method.label ? ["Note", esc(method.label)] : null,
     email ? [provider === "webdav" ? "Username" : "Email", esc(email)] : null,
     server ? ["Server", `<code>${esc(server)}</code>`] : null,
+    insecure ? ["Certificate", "Not verified (self-signed, accepted when it was set up)"] : null,
     ["Folder", `<code>${esc(folder)}</code>`],
     ["Status", esc(STATE_LABEL[st] || st)],
     creds ? ["Sign-in", esc(creds)] : null,
     ["Script id", `<code>upload_method=${esc(alias)}</code>`],
+    (method.extra && (method.extra.series_owner === "mokuro-bunko" || method.extra.bunko_version))
+      ? ["Library index", `mokuro-bunko ${esc(method.extra.bunko_version || method.extra.bunko_commit || "(connected)")}`] : null,
     PROVIDER_LINKS[provider] ? ["Open", `<a href="${esc(PROVIDER_LINKS[provider].web)}" target="_blank" rel="noopener">${esc(PROVIDER_LINKS[provider].webLabel)} ${icon("external")}</a>`] : null,
   ].filter(Boolean);
   $("details-title").textContent = alias;
@@ -1885,6 +2114,7 @@ function bindDialogPlumbing() {
   });
   document.querySelectorAll("dialog").forEach((dialog) => {
     dialog.addEventListener("close", () => {
+      if (dialog.id === "wizard") markWizardSeen();
       if (dialog.id === "add-dialog") {
         stopFlowPoll();
         if (state.flow) toast("Sign-in is still waiting. Reopen it from the banner above.", "info");
@@ -1907,8 +2137,11 @@ function bindDialogPlumbing() {
     if (input && !input.disabled) input.focus();
     if (input && input.disabled) toast("This value is pinned by MOKURO_BRIDGE_FETCH_PORTS, so it is set outside this page.", "info");
   };
-  $("add-top").onclick = () => openAdd();
-  $("add-inline").onclick = () => openAdd();
+  $("add-destination").onclick = () => openAdd();
+  $("open-wizard").onclick = () => openWizard(true);
+  $("wizard-next").onclick = () => { wizard.step = 1; wizard.branch = null; renderWizard(); };
+  $("wizard-back").onclick = () => { if (wizard.step > 0) { wizard.step -= 1; wizard.branch = null; renderWizard(); } };
+  $("wizard-skip").onclick = () => { closeWizard(); toast("You can reopen the setup guide from the footer.", "info"); };
   $("folder-up").onclick = () => {
     const listing = state.browse.listing;
     if (listing && listing.parent) loadListing(listing.parent);
@@ -1930,6 +2163,147 @@ function bindDialogPlumbing() {
       document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
     }
   });
+}
+
+
+/* ------------------------------------------------------------------ *
+ *  First-run setup guide
+ * ------------------------------------------------------------------ */
+const WIZARD_KEY = "mb-wizard-seen";
+const WIZARD_PROVIDER_BLURB = {
+  mega: "Sign in with your MEGA email and password.",
+  drive: "Sign in with Google in a new tab.",
+  onedrive: "Enter a short Microsoft code once.",
+  webdav: "Your server address, username and password.",
+};
+const wizard = { step: 0, branch: null };
+let wizardChecked = false;
+
+function wizardSeen() {
+  try { return localStorage.getItem(WIZARD_KEY) === "1"; } catch (e) { return true; }
+}
+function markWizardSeen() {
+  try { localStorage.setItem(WIZARD_KEY, "1"); } catch (e) { /* private mode */ }
+}
+
+function wizardFooter() {
+  $("wizard-back").hidden = wizard.step === 0;
+  $("wizard-next").hidden = wizard.step !== 0;
+  $("wizard-next").textContent = "Get started";
+  $("wizard-skip").hidden = false;
+  $("wizard-dots").innerHTML = [0, 1, 2].map((i) => `<span data-on="${i === wizard.step}"></span>`).join("");
+}
+
+function renderWizard() {
+  const body = $("wizard-body");
+  if (wizard.step === 0) {
+    $("wizard-kicker").textContent = "Getting started";
+    $("wizard-title").textContent = "Welcome to mokuro-bridge";
+    $("wizard-subtitle").textContent = "It turns finished manga pages into files your reader understands.";
+    body.innerHTML = `<p class="wiz-lede">mokuro-bridge sits quietly on this computer and does three things for you.</p>
+      <ul class="wiz-list">
+        <li><span class="wiz-ico" aria-hidden="true">1</span><div><strong>Reads the pages</strong> Text is recognised on this computer, no account needed.</div></li>
+        <li><span class="wiz-ico" aria-hidden="true">2</span><div><strong>Packages a volume</strong> The cover, the comic archive and the text file are put together.</div></li>
+        <li><span class="wiz-ico" aria-hidden="true">3</span><div><strong>Files it away</strong> On this computer, or in cloud storage you connect.</div></li>
+      </ul>
+      <p class="hint">Nothing leaves this computer unless you connect cloud storage. You can change every choice later.</p>
+      <p class="hint" id="wizard-engine"></p>`;
+    $("wizard-engine").textContent = wizardEngineText();
+  } else if (wizard.step === 1) {
+    $("wizard-kicker").textContent = "Step 1 of 2";
+    $("wizard-title").textContent = "Where should finished volumes go?";
+    $("wizard-subtitle").textContent = "Pick one now; you can add more destinations later.";
+    body.innerHTML = `<div class="wiz-choices">
+      <button class="wiz-choice" type="button" data-branch="local">
+        <span class="wiz-choice-ico" aria-hidden="true">📁</span>
+        <span><strong>On this computer</strong><em>Simplest. Files go into a folder you can open. No account, nothing to sign in to.</em></span>
+      </button>
+      <button class="wiz-choice" type="button" data-branch="cloud">
+        <span class="wiz-choice-ico" aria-hidden="true">☁️</span>
+        <span><strong>In the cloud</strong><em>MEGA, Google Drive, OneDrive or WebDAV, so your reader can pick the volumes up from anywhere.</em></span>
+      </button>
+    </div>`;
+    body.querySelectorAll("[data-branch]").forEach((button) => {
+      button.onclick = () => {
+        wizard.branch = button.dataset.branch;
+        if (wizard.branch === "cloud") { wizard.step = 2; renderWizard(); }
+        else finishWizardLocal();
+      };
+    });
+  } else {
+    $("wizard-kicker").textContent = "Step 2 of 2";
+    $("wizard-title").textContent = "Which cloud service?";
+    $("wizard-subtitle").textContent = "Click one and the sign-in opens. You can add the others later.";
+    const ids = ((state.config && state.config.providers) || []).map((p) => p.id);
+    const providers = ids.length ? ids : ["mega", "drive", "onedrive", "webdav"];
+    body.innerHTML = `<div class="wiz-providers">${providers.map((id) => {
+      const descriptor = providerDescriptor(id);
+      const available = !(descriptor.live && descriptor.live.available === false);
+      const blurb = WIZARD_PROVIDER_BLURB[id] || "";
+      return `<button class="wiz-provider" type="button" data-wiz-provider="${esc(id)}" ${available ? "" : "disabled"}>
+        <span class="provider-tile" data-provider="${esc(id)}" aria-hidden="true">${providerIcon(id)}</span>
+        <span class="wiz-provider-body"><strong>${esc(descriptor.label)}</strong><em>${esc(available ? blurb : "Not available on this computer yet.")}</em></span>
+      </button>`;
+    }).join("")}</div>
+    <p class="hint" style="margin-top:12px">Adding an account takes about a minute. Your password is only used to sign in and is kept in this computer's keychain.</p>`;
+    body.querySelectorAll("[data-wiz-provider]").forEach((button) => {
+      button.onclick = () => chooseWizardProvider(button.dataset.wizProvider);
+    });
+  }
+  wizardFooter();
+}
+
+function wizardEngineText() {
+  const h = state.health || {};
+  if (h.mokuro_installed === false) {
+    return "mokuro is not installed yet. The page shows the install command under Developer details.";
+  }
+  const parts = engineParts(h);
+  let line = `Reading engine: ${parts.version}${parts.flavour === "GolyBidoof fork" ? " (the faster GolyBidoof build)" : ""}.`;
+  const bunko = bunkoInfo(h);
+  if (bunko) line += ` Library index: mokuro-bunko ${bunko.version || "connected"}.`;
+  return line;
+}
+
+function openWizard(force) {
+  if (!force && wizardSeen()) return;
+  wizard.step = 0;
+  wizard.branch = null;
+  if (!$("wizard").open) $("wizard").showModal();
+  renderWizard();
+}
+
+function closeWizard() {
+  markWizardSeen();
+  if ($("wizard").open) $("wizard").close();
+}
+
+function finishWizardLocal() {
+  closeWizard();
+  toast("Volumes will be saved on this computer. You can change the folder in Preferences.", "info");
+}
+
+function chooseWizardProvider(provider) {
+  closeWizard();
+  openAdd();
+  if (hasBrowserFlow(provider)) openProviderForm(provider, "add", null);
+  else toast(`${providerDescriptor(provider).label} needs a one-time setup on this computer.`, "info");
+}
+
+function maybeOpenWizard() {
+  if (wizardChecked) return;
+  wizardChecked = true;
+  let requested = false;
+  try { requested = new URLSearchParams(window.location.search).get("wizard") === "1"; } catch (e) { requested = false; }
+  if (requested) {
+    try { history.replaceState(null, "", window.location.pathname); } catch (e) { /* ignore */ }
+    openWizard(true);
+    return;
+  }
+  if (wizardSeen()) return;
+  const methods = (state.config && state.config.methods) || [];
+  const remoteConfigured = methods.some((m) => providerOf(m) !== "local" && stateOf(m) !== "not_configured");
+  if (!remoteConfigured) openWizard(false);
 }
 
 /* ------------------------------------------------------------------ *

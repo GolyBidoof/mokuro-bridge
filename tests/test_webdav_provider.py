@@ -88,13 +88,17 @@ def test_base_urls_are_normalised_to_the_collection(raw):
         "cloud.example.com/dav",
         "ftp://cloud.example.com/dav",
         "https://user:secret@cloud.example.com/dav",
-        "https://cloud.example.com/dav?token=abc",
-        "https://cloud.example.com/dav#frag",
     ],
 )
 def test_invalid_base_urls_are_rejected(raw):
     with pytest.raises(ValueError):
         webdav.clean_base_url(raw)
+
+
+def test_a_browser_query_or_fragment_is_dropped_not_refused():
+    """A URL copied from the address bar often carries ?dir=…; strip it."""
+    assert webdav.clean_base_url("https://cloud.example.com/dav?token=abc") == "https://cloud.example.com/dav"
+    assert webdav.clean_base_url("https://cloud.example.com/dav#files") == "https://cloud.example.com/dav"
 
 
 # --- credential store ------------------------------------------------------
@@ -139,18 +143,66 @@ def test_environment_seeds_the_first_account(dav, env, monkeypatch):
 
     assert webdav.configured() is True
     assert webdav.creds_source() == "env"
-    ok, error = webdav.verify_webdav_creds(base_url, "dav", "dav")
+    ok, error, resolved = webdav.verify_webdav_creds(base_url, "dav", "dav")
     assert ok and error is None
+    assert resolved == base_url.rstrip("/")
 
 
-def test_verify_reports_rejected_credentials(dav, env):
+def test_a_rejected_password_explains_app_passwords(dav, env):
     base_url, _root = dav
-    ok, error = webdav.verify_webdav_creds(base_url, "dav", "wrong-password")
+    ok, error, _resolved = webdav.verify_webdav_creds(base_url, "dav", "wrong-password")
     assert ok is False
-    assert "401" in (error or "")
+    assert "app password" in (error or "")
 
-    ok, error = webdav.verify_webdav_creds("http://127.0.0.1:9/dav/", "dav", "dav")
-    assert ok is False and error
+    ok, error, _resolved = webdav.verify_webdav_creds("http://127.0.0.1:9/dav/", "dav", "dav")
+    assert ok is False and "Could not reach" in (error or "")
+
+
+def test_discovery_finds_the_collection_from_the_server_address(dav, env):
+    """Pasting the server's own address (not its DAV path) still connects."""
+    base_url, _root = dav
+    origin = base_url.rsplit("/dav/", 1)[0] + "/"
+    ok, error, resolved = webdav.verify_webdav_creds(origin, "dav", "dav", discover=True)
+    assert ok is True, error
+    assert resolved.rstrip("/") == origin.rstrip("/")
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("cloud.example.com", "https://cloud.example.com"),
+        ("cloud.example.com/remote.php/dav/files/me", "https://cloud.example.com/remote.php/dav/files/me"),
+        ("nas:5005", "http://nas:5005"),
+        ("192.168.1.9:5006/dav", "http://192.168.1.9:5006/dav"),
+        ("localhost:8099", "http://localhost:8099"),
+        ("https://cloud.example.com", "https://cloud.example.com"),
+    ],
+)
+def test_a_missing_scheme_is_guessed(raw, expected):
+    assert webdav.normalise_server_address(raw) == expected
+
+
+def test_discovery_candidates_cover_the_well_known_layouts():
+    candidates = webdav.discovery_candidates("https://cloud.example.com/apps/files?dir=/Books", "me")
+    assert candidates[0] == "https://cloud.example.com/apps/files"
+    assert "https://cloud.example.com/remote.php/dav/files/me" in candidates
+    assert "https://cloud.example.com/remote.php/webdav" in candidates
+    assert "https://cloud.example.com/apps/files/dav" in candidates
+    # A plain server address is tried exactly as typed first (the NAS case).
+    assert webdav.discovery_candidates("http://nas:5005/", "me")[0] == "http://nas:5005"
+
+
+def test_the_certificate_checkbox_turns_verification_off():
+    assert webdav._session("dav", "dav").verify is True
+    assert webdav._session("dav", "dav", insecure=True).verify is False
+
+
+def test_stored_insecure_flag_round_trips(dav, env):
+    base_url, _root = dav
+    stored = webdav.store_webdav_account("webdav", base_url, "dav", "dav", insecure=True)
+    assert stored.extra["insecure"] is True
+    assert webdav.account_insecure("webdav") is True
+    assert webdav.PROVIDER.account(stored).extra["insecure"] is True
 
 
 # --- upload / exists / download -------------------------------------------
@@ -326,6 +378,40 @@ def test_a_bad_url_is_rejected_before_any_request(client, env):
     assert "must start with http:// or https://" in (response.json()["detail"] or "")
 
 
+def test_connecting_from_the_bare_server_address_creates_the_folder(client, dav):
+    """A beginner pastes the address of their server, not a /dav/ path."""
+    base_url, root = dav
+    origin = base_url.rsplit("/dav/", 1)[0] + "/"
+    response = client.post(
+        "/config/accounts/webdav",
+        data={"alias": "nas", "url": origin, "username": "dav", "password": "dav"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["server"].rstrip("/") == origin.rstrip("/")
+    assert body["folder_ready"] is True
+    assert (root / "mokuro-reader").is_dir(), "the upload folder is created at setup time"
+    assert body["insecure"] is False
+
+
+def test_the_self_signed_checkbox_is_stored_and_reported(client, dav):
+    base_url, _root = dav
+    response = client.post(
+        "/config/accounts/webdav",
+        data={
+            "alias": "nas",
+            "url": base_url,
+            "username": "dav",
+            "password": "dav",
+            "insecure": "on",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["insecure"] is True
+    row = next(m for m in client.get("/config").json()["methods"] if m["id"] == "nas")
+    assert row["extra"]["insecure"] is True
+
+
 def test_reconnect_keeps_the_stored_password_when_the_field_is_empty(client, dav):
     base_url, root = dav
     first = client.post(
@@ -345,3 +431,18 @@ def test_reconnect_keeps_the_stored_password_when_the_field_is_empty(client, dav
     from mokuro_bridge import providers as provider_registry
 
     assert provider_registry.upload_file("nas", source, "mokuro-reader/Series", None)[0] is True
+
+
+def test_the_dashboard_form_has_the_first_time_setup_helpers():
+    """The page, not just the API, is what a beginner meets first."""
+    page = (REPO_ROOT / "mokuro_bridge" / "web" / "dashboard.html").read_text(encoding="utf-8")
+    for marker in (
+        'id="add-dav-preset"',
+        "WEBDAV_PRESETS",
+        "Where do I find this?",
+        'id="add-dav-insecure"',
+        'id="add-dav-root"',
+        "normaliseDavAddress",
+        "Accept a self-signed certificate",
+    ):
+        assert marker in page, f"the dashboard lost the WebDAV setup helper {marker!r}"

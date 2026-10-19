@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import tempfile
 import time
 import urllib.parse
@@ -58,6 +59,22 @@ _TIMEOUT = 30
 # (connect, read): a first connect to a slow host should not hang a finalize,
 # but a multi-hundred-MB volume over a home uplink legitimately takes minutes.
 _UPLOAD_TIMEOUT = (10, 600)
+
+# Probing is interactive (the dashboard form waits on it), so it is much more
+# impatient than an upload. The discovery tries are bounded: a wrong candidate
+# answers 404 at once, and an unreachable host aborts the whole probe.
+_PROBE_TIMEOUT = (3, 8)
+
+# Where a WebDAV collection usually lives under a server address that was meant
+# for the web UI. Only tried when the address the user gave does not itself
+# answer as a WebDAV folder, and only for the well-known layouts.
+_WEBDAV_PATH_HINTS = (
+    "/remote.php/dav/files/{user}",
+    "/remote.php/webdav",
+    "/remote.php/dav",
+    "/dav",
+    "/webdav",
+)
 
 
 # --- credential store ------------------------------------------------------
@@ -131,21 +148,46 @@ def clean_base_url(value: object) -> str:
     text = str(value or "").strip()
     if not text:
         raise ValueError(
-            "a WebDAV base URL is required (for example "
-            "https://cloud.example.com/remote.php/dav/files/you/)"
+            "A WebDAV server address is required (for example "
+            "https://cloud.example.com)."
         )
     parsed = urllib.parse.urlsplit(text)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError("the WebDAV base URL must start with http:// or https:// and include a host")
+        raise ValueError("The WebDAV server address must start with http:// or https:// and include a host.")
     if parsed.username or parsed.password:
         raise ValueError(
-            "put the username and password in their own fields, not inside the URL"
+            "Put the username and password in their own fields, not inside the address."
         )
-    if parsed.query or parsed.fragment:
-        raise ValueError("the WebDAV base URL must not carry a query string or fragment")
+    # A browser URL pasted from the address bar often carries a query
+    # (?dir=…) or a fragment. Those are never part of the collection address,
+    # so drop them rather than sending a beginner back to their server.
+    parsed = parsed._replace(query="", fragment="")
     if "\x00" in parsed.path:
-        raise ValueError("the WebDAV base URL contains an invalid character")
+        raise ValueError("The WebDAV server address contains an invalid character.")
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
+
+
+def normalise_server_address(value: object) -> str:
+    """Add the scheme a beginner leaves out, picking http for a local host.
+
+    "cloud.example.com" becomes https and "nas:5005" becomes http, matching
+    what the dashboard form does before it talks to the API.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return text
+    if re.match(r"^[a-z][a-z0-9+.-]*://", text, re.IGNORECASE):
+        return text
+    host = text.split("/")[0].lower()
+    hostname = host.split(":")[0]
+    local = (
+        hostname == "localhost"
+        or hostname.endswith(".local")
+        or "." not in hostname
+        or bool(re.match(r"^(127\.|10\.|192\.168\.|169\.254\.)", hostname))
+        or bool(re.match(r"^172\.(1[6-9]|2\d|3[01])\.", hostname))
+    )
+    return f"{'http' if local else 'https'}://{text}"
 
 
 def base_url(name: str = DEFAULT_NAME) -> str:
@@ -277,6 +319,7 @@ def store_webdav_account(
     alias: Optional[str] = None,
     label: Optional[str] = None,
     root: Optional[str] = None,
+    insecure: bool = False,
 ) -> accounts.Instance:
     """Persist one WebDAV account: secret file first, then metadata.
 
@@ -302,20 +345,31 @@ def store_webdav_account(
         # working; the file stays authoritative, so a failed store is harmless.
         _keyring_set(_WEBDAV_KEYRING_USERNAME, clean_username)
         _keyring_set(_WEBDAV_KEYRING_PASSWORD, clean_password)
+    extra: dict = {"url": base, "username": clean_username}
+    if insecure:
+        # Non-secret, and deliberately visible in /config so the page can warn
+        # that this account does not verify its server's certificate.
+        extra["insecure"] = True
     return accounts.save_instance(
         "webdav",
         name,
         label=(label or None),
         root=(root or None),
         alias=alias,
-        extra={"url": base, "username": clean_username},
+        extra=extra,
     )
 
 
 # --- HTTP plumbing ---------------------------------------------------------
 
-def _session(username_value: str, password_value: str):
-    """A requests session with preemptive Basic auth and a bridge user agent."""
+def _session(username_value: str, password_value: str, insecure: bool = False):
+    """A requests session with preemptive Basic auth and a bridge user agent.
+
+    ``insecure`` turns certificate verification off for one account. It exists
+    because the most common WebDAV target is a NAS or a Nextcloud box on the
+    user's own network with a self-signed certificate, which a browser accepts
+    after one click but a plain HTTP client refuses outright.
+    """
     try:
         import requests
     except ImportError as exc:  # pragma: no cover - dependency is optional
@@ -323,11 +377,25 @@ def _session(username_value: str, password_value: str):
     session = requests.Session()
     session.auth = (username_value, password_value)
     session.headers.update({"User-Agent": "mokuro-bridge/webdav"})
+    if insecure:
+        session.verify = False
+        try:  # keep urllib3 from printing a warning per request
+            import urllib3
+
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except Exception:  # pragma: no cover - urllib3 ships with requests
+            pass
     return session
 
 
-def _credentials(name: str) -> tuple[str, str, str]:
-    """(base, username, password) for one account, or a setup error."""
+def account_insecure(name: str = DEFAULT_NAME) -> bool:
+    """Whether this account was told to accept an untrusted TLS certificate."""
+    instance = _instance(name)
+    return bool(instance is not None and instance.extra.get("insecure"))
+
+
+def _credentials(name: str) -> tuple[str, str, str, bool]:
+    """(base, username, password, insecure) for one account, or a setup error."""
     base = base_url(name)
     if not base:
         hint = "mokuro-bridge --setup-upload webdav"
@@ -341,7 +409,7 @@ def _credentials(name: str) -> tuple[str, str, str]:
         if name != DEFAULT_NAME:
             hint += f" --name {name}"
         raise RuntimeError(f"WebDAV account '{name}' has no usable credentials; run `{hint}`")
-    return base, user, secret
+    return base, user, secret, account_insecure(name)
 
 
 def _quote_segment(segment: str) -> str:
@@ -383,31 +451,178 @@ def _check_response(action: str, response, expected: tuple[int, ...]) -> None:
     raise RuntimeError(safe_provider_error(_error_text(action, response)))
 
 
-def verify_webdav_creds(url: str, username_value: str, password_value: str) -> tuple[bool, Optional[str]]:
-    """Probe one server with the given credentials. Returns (ok, error).
+def discovery_candidates(raw_url: str, username_value: str) -> list[str]:
+    """Addresses to try when the user pasted a server address, not a DAV path.
 
-    A Depth: 0 PROPFIND on the base URL is the cheapest request that proves
-    both that the URL is a WebDAV collection and that the credentials work.
+    The first entry is always exactly what was typed. The rest are the
+    well-known layouts (Nextcloud/ownCloud ``remote.php/dav/files/<user>``,
+    then ``/dav`` and ``/webdav`` under the pasted address). Ordered so a
+    Nextcloud server URL resolves to the per-user collection, while a plain
+    server address that already is the collection (the usual NAS case) wins
+    on the first try.
+    """
+    base = clean_base_url(raw_url)
+    parsed = urllib.parse.urlsplit(base)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    path = parsed.path.rstrip("/")
+    candidates = [base]
+
+    def add(value: str) -> None:
+        candidate = str(value or "").rstrip("/")
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    if path:
+        # A pasted web-UI path ("/apps/files", "/login") usually means the
+        # server root, so try that before adding more to the path.
+        add(origin)
+    user = urllib.parse.quote(str(username_value or "").strip(), safe="")
+    if user and "/remote.php/dav" not in path:
+        add(f"{origin}/remote.php/dav/files/{user}")
+    if "/remote.php/dav" not in path:
+        add(f"{origin}/remote.php/webdav")
+    if path:
+        add(f"{base}/dav")
+        add(f"{base}/webdav")
+    add(f"{origin}/dav")
+    add(f"{origin}/webdav")
+    return candidates[:8]
+
+
+def _probe_once(session, url: str) -> tuple[Optional[int], str, dict, Optional[str]]:
+    """One Depth: 0 PROPFIND. Returns (status, body, headers, transport_error)."""
+    try:
+        response = session.request(
+            "PROPFIND",
+            str(url).rstrip("/") + "/",
+            headers={"Depth": "0"},
+            timeout=_PROBE_TIMEOUT,
+            allow_redirects=True,
+        )
+    except Exception as error:  # requests raises a family of transport errors
+        return None, "", {}, str(error)
+    headers = {str(k).lower(): str(v) for k, v in dict(getattr(response, "headers", {}) or {}).items()}
+    return response.status_code, str(getattr(response, "text", "") or ""), headers, None
+
+
+def _is_dav_answer(status: Optional[int], text: str) -> bool:
+    """Whether a probe response proves a WebDAV collection.
+
+    A real PROPFIND answers 207 with a multistatus body. A few servers answer
+    200 instead; a 200 that is an HTML login page must not count, or the form
+    would accept the address of a web UI as a working destination.
+    """
+    if status == 207:
+        return True
+    return status == 200 and "multistatus" in str(text or "").lower()
+
+
+def _looks_like_html(text: str, headers: dict) -> bool:
+    kind = str(headers.get("content-type", "")).lower()
+    return "text/html" in kind or str(text or "").lstrip().lower().startswith("<!doctype html")
+
+
+def _certificate_error(error: str) -> bool:
+    lowered = str(error or "").lower()
+    return "certificate" in lowered or "ssl" in lowered and "verify" in lowered
+
+
+def _friendly_connection_error(error: str, url: str, insecure: bool) -> str:
+    host = urllib.parse.urlsplit(url).netloc or url
+    if _certificate_error(error) and not insecure:
+        return (
+            "The server's certificate could not be verified. If this is your own "
+            "NAS or home server with a self-signed certificate, tick "
+            "\"Accept a self-signed certificate\" and try again."
+        )
+    if _certificate_error(error) and insecure:
+        return f"The server rejected its own certificate even without verification: {error}"
+    return (
+        f"Could not reach {host}. Check the address, the port and that the server "
+        f"is running. ({error})"
+    )
+
+
+_AUTH_HELP = (
+    "The server rejected that username and password. Many WebDAV servers need an "
+    "app password instead of your login password: in Nextcloud open Settings, then "
+    "Security, then App passwords; on a Synology NAS create one in the user's "
+    "settings. Some servers also expect the username with their domain prefix."
+)
+
+
+def _friendly_not_dav_error(status: Optional[int], text: str, headers: dict, url: str) -> str:
+    host = urllib.parse.urlsplit(url).netloc or url
+    if status is None:
+        return "That address did not answer. Check the address and that the server is running."
+    if status in (301, 302, 303, 307, 308) or _looks_like_html(text, headers):
+        return (
+            f"{host} answered with a web page, not a WebDAV folder. Use the WebDAV "
+            "address from your server's settings, not the page you browse: for "
+            f"Nextcloud it is https://{host}/remote.php/dav/files/<username>/, and "
+            "most other servers use a path ending in /dav/ or /webdav/."
+        )
+    if status == 404:
+        return (
+            f"No WebDAV folder was found at that address on {host} (HTTP 404). "
+            "Copy the WebDAV address from your server's settings; for Nextcloud it "
+            f"is https://{host}/remote.php/dav/files/<username>/."
+        )
+    if status == 405:
+        return (
+            f"{host} is a normal web server, not a WebDAV folder (HTTP 405). Look "
+            "for WebDAV in your server's settings and copy that address."
+        )
+    return f"{host} answered HTTP {status}, which is not a WebDAV collection."
+
+
+def verify_webdav_creds(
+    url: str,
+    username_value: str,
+    password_value: str,
+    insecure: bool = False,
+    discover: bool = False,
+) -> tuple[bool, Optional[str], str]:
+    """Probe a server with the given credentials. Returns (ok, error, resolved_url).
+
+    A Depth: 0 PROPFIND is the cheapest request that proves both that the
+    address is a WebDAV collection and that the credentials work. With
+    ``discover`` the probe also tries the well-known WebDAV paths under the
+    pasted address, so "https://cloud.example.com" typed into the form resolves
+    to the Nextcloud collection the user meant. Error text is written for
+    someone who has never configured WebDAV before.
     """
     try:
-        base = clean_base_url(url)
-        session = _session(str(username_value or ""), str(password_value or ""))
-        response = session.request(
-            "PROPFIND", base + "/", headers={"Depth": "0"}, timeout=_TIMEOUT, allow_redirects=True
+        clean = clean_base_url(url)
+        candidates = discovery_candidates(clean, username_value) if discover else [clean]
+        session = _session(
+            str(username_value or ""), str(password_value or ""), bool(insecure)
         )
     except ValueError as error:
-        return False, str(error)
-    except RuntimeError as error:
-        return False, str(error)
-    except Exception as error:  # requests raises a family of connection errors
-        return False, safe_provider_error(f"could not reach {url}: {error}")
-    if response.status_code in (200, 207):
-        return True, None
-    if response.status_code in (401, 403):
-        return False, "the server rejected those credentials (HTTP 401/403)"
-    if response.status_code == 405:
-        return False, "that URL answered but does not accept WebDAV requests (HTTP 405)"
-    return False, safe_provider_error(_error_text("PROPFIND", response))
+        return False, str(error), ""
+    except RuntimeError as error:  # requests missing
+        return False, str(error), ""
+
+    first_problem: tuple[Optional[int], str, dict] = (None, "", {})
+    for index, candidate in enumerate(candidates):
+        status, text, headers, transport_error = _probe_once(session, candidate)
+        if _is_dav_answer(status, text):
+            return True, None, candidate
+        if transport_error is not None:
+            # The host itself is unreachable or its certificate is refused;
+            # other paths on the same host cannot do better.
+            if index == 0 or _certificate_error(transport_error):
+                return False, _friendly_connection_error(transport_error, candidate, bool(insecure)), clean
+            continue
+        if index == 0:
+            if status in (401, 403):
+                # The address is a WebDAV endpoint but the credentials are not
+                # accepted; trying other paths with the same credentials would
+                # only produce the same answer.
+                return False, _AUTH_HELP, clean
+            first_problem = (status, text, headers)
+    status, text, headers = first_problem
+    return False, safe_provider_error(_friendly_not_dav_error(status, text, headers, clean)), clean
 
 
 def _ensure_remote_dir(session, base: str, remote_dir: str) -> str:
@@ -441,6 +656,24 @@ def _probe_file(session, url: str) -> bool:
     if response.status_code in (401, 403):
         raise _auth_error("PROPFIND", response)
     raise RuntimeError(safe_provider_error(_error_text("PROPFIND", response)))
+
+
+def ensure_account_root(name: str = DEFAULT_NAME) -> bool:
+    """Create the account's default folder chain (idempotent).
+
+    Called once after setup so the dashboard's Change folder immediately shows
+    a real folder instead of an empty listing, and so a bad root path is found
+    while the user is still on the form rather than at the first finalize.
+    """
+    with provider_account_lock("webdav", name):
+        base, user, secret, insecure = _credentials(name)
+        instance = _instance(name)
+        root = instance.root_path if instance is not None else ""
+        if not root:
+            return False
+        session = _session(user, secret, insecure)
+        _ensure_remote_dir(session, base, root)
+        return True
 
 
 class _CountingBody:
@@ -497,8 +730,8 @@ def _webdav_upload(
     """
     try:
         with provider_account_lock("webdav", name):
-            base, user, secret = _credentials(name)
-            session = _session(user, secret)
+            base, user, secret, insecure = _credentials(name)
+            session = _session(user, secret, insecure)
             total = local_path.stat().st_size
             _ensure_remote_dir(session, base, remote_dir)
             file_url = _join_url(base, str(remote_dir or "").strip("/"), local_path.name)
@@ -548,16 +781,16 @@ def _webdav_upload(
 def _webdav_remote_exists(name: str, remote_dir: str, filename: str) -> bool:
     """Whether one file exists, without creating any folder on the way."""
     with provider_account_lock("webdav", name):
-        base, user, secret = _credentials(name)
-        session = _session(user, secret)
+        base, user, secret, insecure = _credentials(name)
+        session = _session(user, secret, insecure)
         return _probe_file(session, _join_url(base, str(remote_dir or "").strip("/"), filename))
 
 
 def _webdav_download(name: str, remote_dir: str, filename: str) -> Optional[bytes]:
     """Read one small sidecar back (only series.json is ever downloaded)."""
     with provider_account_lock("webdav", name):
-        base, user, secret = _credentials(name)
-        session = _session(user, secret)
+        base, user, secret, insecure = _credentials(name)
+        session = _session(user, secret, insecure)
         url = _join_url(base, str(remote_dir or "").strip("/"), filename)
         response = session.get(url, timeout=_TIMEOUT, stream=True)
         if response.status_code == 404:
@@ -649,8 +882,8 @@ def _parse_multistatus(xml_bytes: bytes, request_url: str, remote_dir: str) -> l
 def _webdav_list_folders(name: str, remote_dir: str) -> list[dict]:
     """List one collection read-only. A missing collection is an empty listing."""
     with provider_account_lock("webdav", name):
-        base, user, secret = _credentials(name)
-        session = _session(user, secret)
+        base, user, secret, insecure = _credentials(name)
+        session = _session(user, secret, insecure)
         target = _collection_url(base, str(remote_dir or "").strip("/"))
         response = session.request("PROPFIND", target, headers={"Depth": "1"}, timeout=_TIMEOUT)
         if response.status_code == 404:
@@ -665,19 +898,28 @@ def _webdav_list_folders(name: str, remote_dir: str) -> list[dict]:
 def _webdav_account_view(instance: accounts.Instance) -> ProviderAccount:
     """Labels and health fields for one WebDAV account."""
     server = safe_provider_url(base_url(instance.name)) or "no server set"
+    extra: dict = {
+        "root": instance.root_path,
+        "url": server,
+        "username": account_identity(instance),
+    }
+    if instance.extra.get("insecure"):
+        extra["insecure"] = True
     return ProviderAccount(
         label=instance.display_name_for("WebDAV"),
-        extra={
-            "root": instance.root_path,
-            "url": server,
-            "username": account_identity(instance),
-        },
+        extra=extra,
         current_folder=f"{instance.root_path} on {server}",
     )
 
 
 def _run_setup_webdav(name: Optional[str] = None, root: str = "", label: str = "") -> None:
-    """Interactive wizard: ask for the server URL and credentials, then verify."""
+    """Interactive wizard for one WebDAV account.
+
+    Written for someone who has never configured WebDAV: the prompt shows the
+    address each common server exposes, a failed check is explained in plain
+    words and retried instead of aborting, and a self-signed certificate is a
+    yes/no question rather than an SSL traceback.
+    """
     from ..util import _ensure_python_deps
 
     if not _ensure_python_deps(["requests"], "requirements-webdav.txt"):
@@ -688,47 +930,87 @@ def _run_setup_webdav(name: Optional[str] = None, root: str = "", label: str = "
         )
         return
 
+    import getpass
+
     name = accounts.ask_account_name(name, "webdav")
     existing = _instance(name)
     print("WebDAV upload setup for mokuro-bridge")
     print("-" * 40)
     print(f"Account: {accounts.method_id('webdav', name)}")
-    print(
-        "The base URL is the WebDAV collection the bridge uploads into, for "
-        "example https://cloud.example.com/remote.php/dav/files/you/"
-    )
+    print("Find the WebDAV address in your server's settings. Common ones:")
+    print("  Nextcloud   https://cloud.example.com   (the bridge finds remote.php/dav/files/<you>/)")
+    print("  ownCloud    https://cloud.example.com")
+    print("  Synology    https://your-nas:5006        (WebDAV Server package; plain HTTP is 5005)")
+    print("  Other       https://your-server/dav/ or https://your-server/webdav/")
+    print("Some servers need an app password instead of your login password.")
 
     current_url = base_url(name)
-    answer = input(f"Base URL [{current_url}]: ").strip() if current_url else input("Base URL: ").strip()
-    value = answer or current_url
+    current_user = username(name)
+    insecure = account_insecure(name)
+    value = current_url
+    user = current_user
+    secret = password(name)
+    resolved = ""
+    for attempt in range(1, 4):
+        if attempt > 1:
+            print()
+        answer = (
+            input(f"Server address [{current_url}]: ").strip()
+            if current_url
+            else input("Server address: ").strip()
+        )
+        value = normalise_server_address(answer or current_url)
+        if not str(value or "").strip():
+            print("No server address given.")
+            continue
+        answer = (
+            input(f"Username [{current_user}]: ").strip()
+            if current_user
+            else input("Username: ").strip()
+        )
+        user = answer or current_user
+        if not user:
+            print("No username given.")
+            continue
+        entered = getpass.getpass("Password (empty = keep current): ")
+        secret = entered or password(name)
+        if not secret:
+            print("No password given.")
+            continue
+
+        ok, error, resolved = verify_webdav_creds(
+            value, user, secret, insecure=insecure, discover=True
+        )
+        if ok:
+            break
+        print(f"error: {error}")
+        if _certificate_error(str(error or "")) and not insecure:
+            answer = input("Accept this server's certificate? [y/N] ").strip().lower()
+            if answer in ("y", "yes"):
+                insecure = True
+                ok, error, resolved = verify_webdav_creds(
+                    value, user, secret, insecure=True, discover=True
+                )
+                if ok:
+                    break
+                print(f"error: {error}")
+        if attempt == 3:
+            print("Nothing was stored. Run this again when you have the WebDAV address.")
+            return
+
     try:
-        clean_base_url(value)
+        entered_url = clean_base_url(value)
     except ValueError as error:
         print(f"error: {error}")
         return
-
-    current_user = username(name)
-    answer = input(f"Username [{current_user}]: ").strip() if current_user else input("Username: ").strip()
-    user = answer or current_user
-    if not user:
-        print("No username given — aborting.")
-        return
-
-    import getpass
-
-    entered = getpass.getpass("Password (empty = keep current): ")
-    secret = entered or password(name)
-    if not secret:
-        print("No password given — aborting.")
-        return
-
-    ok, error = verify_webdav_creds(value, user, secret)
-    if not ok:
-        print(f"warning: the server did not confirm those credentials: {error}")
-        answer = input("Store them anyway? [y/N] ").strip().lower()
-        if answer not in ("y", "yes"):
+    if resolved and resolved.rstrip("/") != entered_url.rstrip("/"):
+        print(f"The WebDAV folder is at: {resolved}")
+        answer = input("Use that address? [Y/n] ").strip().lower()
+        if answer in ("n", "no"):
             print("Nothing was stored.")
             return
+        value = resolved
+
     stored = store_webdav_account(
         name,
         value,
@@ -737,10 +1019,17 @@ def _run_setup_webdav(name: Optional[str] = None, root: str = "", label: str = "
         alias=accounts.alias_for_storage("webdav", name),
         label=(label or None),
         root=(root or None),
+        insecure=insecure,
     )
+    try:
+        ensure_account_root(name)
+    except Exception as error:  # the folder is created on first upload anyway
+        print(f"note: could not create the upload folder yet: {error}")
     print(f"Credentials stored in {_creds_path(name)} (permissions 0600).")
-    print(f"Remote root: {stored.root_path} (created under the base URL on first upload)")
+    print(f"Remote folder: {stored.root_path} on {base_url(name)}")
     print(f"Account ready: {stored.id}")
+    if insecure:
+        print("This account does not verify its server's certificate (self-signed).")
     if existing is None or not existing.tracked:
         print(
             "Tip: the same account can be added from the dashboard at "
