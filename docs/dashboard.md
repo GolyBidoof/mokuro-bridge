@@ -12,21 +12,27 @@ http://127.0.0.1:62642/
 
 It is one self-contained page: inline CSS and JavaScript, inline SVG icons, no external assets, no CDN, no font download. It works offline and screenshots cleanly. The page is read from disk on every request (`Cache-Control: no-store`), so an edit to `mokuro_bridge/web/dashboard.html` shows up on reload without restarting a service that may be mid-upload.
 
-The palette follows reader.mokuro.app: a near-black canvas, gray-800 panels and a coral primary. A theme switch in the header offers Auto, Light and Dark; Auto is the default and follows the operating system, and the choice is remembered in `localStorage` under `mb-theme`. The chosen theme is applied before first paint, so reloading does not flash the wrong colours. The layout is responsive down to phone widths, and `prefers-reduced-motion` turns transitions off.
+Dark mode follows reader.mokuro.app: the `#030712` canvas, `#1f2937` header and panels, `#374151` borders, the `#ef562f` coral primary, white labels on coral buttons and Verdana throughout. The one deliberate divergence is the light theme: where the reader offers white or sepia, this page uses a warm-paper palette (`#f7f4ef` canvas, white panels) with a deeper coral (`#c2410c`) so links and buttons stay legible. A theme switch in the header offers Auto, Light and Dark; Auto is the default and follows the operating system, and the choice is remembered in `localStorage` under `mb-theme`. The chosen theme is applied before first paint, so reloading does not flash the wrong colours. The layout is responsive down to phone widths, and `prefers-reduced-motion` turns transitions off.
 
 ### What the page shows
 
 | Area | Content |
 | --- | --- |
+| Header | Brand, an `Open reader` link to reader.mokuro.app (hidden on narrow screens, where the footer's reader link remains), the status chip, the Auto/Light/Dark switch and Add destination |
 | Status chip | `Connecting…`, `Not connected`, `Ready`, or the stage the bridge is in right now (`uploading`, `ocr`, `packaging`), from the same activity record `/health` reports |
 | Hero and stats | One sentence about what the bridge is doing, then pages waiting to be read, volumes reading now, and the default destination it files to |
+| Browser acceleration | Live `fetchProxyPorts`: the open port count and its first and last port, plus six extra browser lanes per port, or `off` when no ports are open. `Adjust` scrolls to and focuses `Faster downloads in the browser`, or explains that an environment variable pins it; `How this works` opens [browser-acceleration.md](browser-acceleration.md) |
 | Notices | A banner when the bridge is not answering, when a newer version exists (with a release link and the `mokuro-bridge --update` command), and when a destination needs signing in again (with a Reconnect button) |
-| Destinations | One card per account with its alias, provider, note, email when the bridge knows it, folder, state chip (`Connected`, `Sign-in expired`, `Not connected`) and the default mark. Actions are Change folder, Connect or Reconnect, Make default, Details, Rename, Remove and Copy id |
+| Destinations | Connected accounts are cards with their alias, provider brand glyph (a Google Drive triangle, M/O/W monograms for MEGA, OneDrive and WebDAV, or a folder glyph for local), note, email when the bridge knows it, folder, state chip and default mark, with Change folder, Make default, Details, Rename, Remove and Copy id. Accounts that are not connected render as single-column reader-style rows under `Not connected yet`, with the provider glyph and name, a one-line value, Connect or Reconnect, and Details |
 | Add a destination | A card at the end of the grid, plus header and section buttons, that opens the provider picker |
 | Preferences | The three settings, with their source and a Save changes button |
 | Footer | Version, a link to reader.mokuro.app, update state (`Checking for updates…`, `Up to date`, `Update checks are off` or `Could not check for updates`), and a Developer details section with raw `/health` and `/config` links, the terminal command, the settings file path, the engine and the fetch-proxy state |
 
 On a first run, with no remote destination configured, the page also shows a three-step onboarding row: add a destination, pick a folder, then use its alias from scripts.
+
+### Browser acceleration row
+
+The status card has a `Browser acceleration` row that reads the live `fetchProxyPorts` list from `/health`. With ports open it shows the count, the first and last port, and the number of extra browser lanes at six per port; when the count is zero it says `off` and notes that the browser downloader uses its usual connections. `Adjust` scrolls to and focuses `Faster downloads in the browser` in Preferences, or explains that the row is pinned by an environment variable, and `How this works` opens [browser-acceleration.md](browser-acceleration.md). That page covers the per-origin connection limit, why the port is part of the origin, the browser's own global connection ceiling and when to change the port count.
 
 ### Account details
 
@@ -126,4 +132,5 @@ It reads `--status-url` (default `http://127.0.0.1:62642`, or `MOKURO_BRIDGE_HOS
 - [endpoints.md](endpoints.md) documents the routes behind the page, including their error codes.
 - [destinations.md](destinations.md) covers the destination model the page edits.
 - [troubleshooting.md](troubleshooting.md) covers a page that will not load, sign-ins that need reconnecting and settings that need a restart.
+- [browser-acceleration.md](browser-acceleration.md) explains the fetch-proxy ports behind the Browser acceleration row and the browser limits they run into.
 - [architecture.md](architecture.md) has the module map.

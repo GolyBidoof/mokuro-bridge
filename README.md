@@ -32,7 +32,7 @@ The bridge owns one half of the capture pipeline and only that half: it never to
 
 ## Dashboard, accounts and live status
 
-The bridge serves its own configuration dashboard at the address it prints at startup, `http://127.0.0.1:62642/`. It is one self-contained page, styled after reader.mokuro.app, with an Auto/Light/Dark switch that follows the operating system by default and is remembered in the browser. It shows the live status, the pages waiting to be read, the volumes reading now, the destination it files to, and one card per upload account with its alias, provider, note, folder and state.
+The bridge serves its own configuration dashboard at the address it prints at startup, `http://127.0.0.1:62642/`. It is one self-contained page, styled after reader.mokuro.app, with an Auto/Light/Dark switch that follows the operating system by default and is remembered in the browser. It shows the live status, the pages waiting to be read, the volumes reading now, the destination it files to, a live browser acceleration row with the open fetch-proxy ports, and one card per upload account with its alias, provider, note, folder and state; an Open reader link sits in the header.
 
 Accounts are added and managed in the page: MEGA with an email and password, Google Drive through Google's sign-in, OneDrive through Microsoft's device-code flow, WebDAV with a server URL and Basic credentials, with reconnect, rename, remove, set default and folder browsing on each account card. Each account gets a memorable alias such as `mega`, `mega-2` or `drive-next`; a dokuha script selects one with `upload_method=mega-work`. Historical ids (`mega:work`, `drive:main`) keep resolving, so old scripts do not break. Three preferences cover the browser downloader's extra ports, the fallback local output folder and extra read roots; everything else stays in `.env.example`. See [docs/dashboard.md](docs/dashboard.md).
 
@@ -111,6 +111,7 @@ When a newer release exists the service logs one line about it at startup, and `
 | | |
 | --- | --- |
 | [docs/dashboard.md](docs/dashboard.md) | The web dashboard, browser account setup, aliases, settings precedence, the terminal status display and the origin gate |
+| [docs/browser-acceleration.md](docs/browser-acceleration.md) | The fetch-proxy ports, the browser connection limits behind them, and when to change the port count |
 | [docs/series-json.md](docs/series-json.md) | The `series.json` sidecar: its format, why the uploader writes it, and the pin on upstream |
 | [docs/endpoints.md](docs/endpoints.md) | Every HTTP route: method, path, form fields, response shape, error codes and test coverage |
 | [docs/destinations.md](docs/destinations.md) | Upload targets, named accounts, credential stores and the sticky default |
