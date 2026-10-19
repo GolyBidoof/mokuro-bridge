@@ -1349,6 +1349,16 @@ function renderDestinations() {
   const methods = config.methods || [];
   // Implicit "not configured" provider slots are not accounts: do not show them.
   const shownMethods = methods.filter((m) => stateOf(m) !== "not_configured");
+  const signature = JSON.stringify([
+    shownMethods.map((m) => [m.id, stateOf(m), Boolean(m.default), m.root, m.label || "", (m.extra || {}).email || ""]),
+    enginesReady(),
+    state.config.output_dir || "",
+  ]);
+  if (state.destSignature === signature && $("destinations").childElementCount) {
+    renderGates();
+    return;
+  }
+  state.destSignature = signature;
   const html = shownMethods.map((m) => {
     const provider = providerOf(m);
     const alias = aliasOf(m);
@@ -3116,8 +3126,19 @@ setInterval(async () => {
   try { await loadConfig(); } catch (error) { /* the health poll reports trouble */ }
 }, 45000);
 
+let resumeTimer = null;
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) loadAll({ quiet: true });
+  if (document.hidden) {
+    if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = null; }
+    return;
+  }
+  // One refresh after the tab settles; polling pauses while hidden, so this
+  // avoids a burst of overlapping renders when alt-tabbing back.
+  if (resumeTimer) clearTimeout(resumeTimer);
+  resumeTimer = setTimeout(() => {
+    resumeTimer = null;
+    if (!document.hidden) loadAll({ quiet: true });
+  }, 350);
 });
 </script>
 </body>
