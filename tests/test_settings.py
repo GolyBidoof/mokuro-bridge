@@ -316,3 +316,16 @@ def test_absolute_ingest_roots_with_spaces_are_still_accepted():
     assert problems == []
     assert saved == {"MOKURO_BRIDGE_INGEST_ROOTS": "/media/one,~/library/two"}
 
+
+
+def test_the_page_renders_settings_in_groups_with_a_switch():
+    """Styling is a contract too: the page needs its group headings and switch markup."""
+    page = (Path(__file__).resolve().parent.parent / "mokuro_bridge" / "web" / "dashboard.html").read_text(encoding="utf-8")
+    for marker in (
+        'class="pref-group"',
+        "pref-switch",
+        "switch-track",
+        "switch-text",
+        'row.type === "bool"',
+    ):
+        assert marker in page, f"the preferences page lost {marker!r}"
