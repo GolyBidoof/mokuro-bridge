@@ -28,50 +28,35 @@ SETTINGS_FILE = Path(
 SPECS: tuple[dict, ...] = (
     {
         "env": "MOKURO_BRIDGE_FETCH_PORTS",
-        "label": "Proxy ports",
-        "help": "Extra localhost ports the downloader fetches pages through. "
-        "Each is a separate browser origin worth 6 more sockets. 0 disables.",
+        "label": "Faster downloads in the browser",
+        "help": "Opens extra local ports so the page downloader can fetch more "
+        "pages at once. 0 turns the extra speed off.",
         "type": "int", "min": 0, "max": 256, "default": 48, "restart": True,
     },
     {
-        "env": "MOKURO_BRIDGE_FETCH_CONCURRENCY",
-        "label": "Upstream fetch concurrency",
-        "help": "Simultaneous upstream fetches the proxy may make. 0 means no cap.",
-        "type": "int", "min": 0, "max": 64, "default": 0, "restart": True,
-    },
-    {
         "env": "MOKURO_BRIDGE_OUTPUT_DIR",
-        "label": "Default local output folder",
-        "help": "Where a local finalize writes <series>/<volume>.{cbz,mokuro,webp} "
-        "and series.json when no folder has been chosen for a volume.",
+        "label": "Where finished volumes are saved on this computer",
+        "help": "Each series gets its own folder here. Leave it empty to use the "
+        "default folder next to the install.",
         "type": "path", "default": "", "restart": True,
     },
     {
         "env": "MOKURO_BRIDGE_INGEST_ROOTS",
-        "label": "Extra folder read roots",
-        "help": "Comma-separated extra roots the bridge may read a finished "
-        "volume folder from, beyond your home directory.",
+        "label": "Other folders the bridge may read",
+        "help": "Only needed if a library lives outside your home folder, for "
+        "example on another drive. Separate several with commas.",
         "type": "csv", "default": "", "restart": True,
     },
-    {
-        "env": "OCR_CHUNK_SIZE",
-        "label": "OCR chunk size",
-        "help": "Pages batched into one recognition pass before the queue flushes.",
-        "type": "int", "min": 1, "max": 256, "default": 8, "restart": True,
-    },
-    {
-        "env": "OCR_IDLE_FLUSH_S",
-        "label": "OCR idle flush",
-        "help": "Seconds a partially filled chunk waits before it is processed.",
-        "type": "float", "min": 0.0, "max": 60.0, "default": 1.5, "restart": True,
-    },
-    {
-        "env": "MIN_PAGES_FOR_MEGA",
-        "label": "Minimum pages for a remote upload",
-        "help": "A remote finalize below this page count is refused as a failed "
-        "scrape; a local one is not.",
-        "type": "int", "min": 1, "max": 500, "default": 1, "restart": True,
-    },
+)
+
+# Settings that exist but are not on the page: OCR batch tuning and the
+# minimum-page guard are set from the environment (see .env.example) rather
+# than offered to someone configuring their uploads for the first time.
+_ENV_ONLY = (
+    "MOKURO_BRIDGE_FETCH_CONCURRENCY",
+    "OCR_CHUNK_SIZE",
+    "OCR_IDLE_FLUSH_S",
+    "MIN_PAGES_FOR_MEGA",
 )
 
 _BY_ENV = {spec["env"]: spec for spec in SPECS}
@@ -126,6 +111,95 @@ def source(env: str) -> str:
     return "default"
 
 
+def env_pinned(env: str) -> bool:
+    """True when a non-empty environment variable owns this setting right now."""
+    raw = os.environ.get(env)
+    return raw is not None and str(raw).strip() != ""
+
+
+def pinned_keys(values: dict) -> list[str]:
+    """The keys in `values` that the environment currently owns.
+
+    `update` skips these keys silently rather than returning an error, because
+    the environment wins at read time anyway and one pinned key must not stop
+    the other, editable keys from being saved. A caller that wants to say so
+    (the dashboard does) can report this list beside the saved keys.
+    """
+    return [env for env in values if env_pinned(env)]
+
+
+def _absolute_path(text: str) -> Path:
+    """Parse one path value and require it to be absolute.
+
+    Raises ValueError with a user-facing sentence, never a bare OSError.
+    """
+    value = str(text).strip()
+    if "\x00" in value:
+        raise ValueError("must not contain a NUL byte")
+    try:
+        candidate = Path(value).expanduser()
+    except (OSError, ValueError) as error:
+        raise ValueError(f"is not a usable path ({error})") from error
+    if not candidate.is_absolute():
+        raise ValueError(
+            "must be an absolute path, for example /Users/you/Books/mokuro"
+        )
+    return candidate
+
+
+def _output_dir_value(raw: Any) -> str:
+    """A folder that the bridge can create and write at the next start.
+
+    An existing directory is accepted. A path that does not exist yet is
+    accepted only when its parent exists, is a directory and is writable,
+    because config.py does `OUTPUT_DIR.mkdir(parents=True, exist_ok=True)` at
+    import time and a path pointing at an existing *file* makes that line raise
+    FileExistsError and the whole bridge fail to start.
+    """
+    candidate = _absolute_path(raw)
+    try:
+        if candidate.is_symlink() and not candidate.exists():
+            raise ValueError(
+                "is a broken link; choose a folder that exists"
+            )
+        if candidate.exists():
+            if not candidate.is_dir():
+                raise ValueError(
+                    "is a file, not a folder; choose a folder or a new name "
+                    "inside an existing folder"
+                )
+            return str(candidate)
+        parent = candidate.parent
+        if not parent.exists() or not parent.is_dir():
+            raise ValueError(
+                "cannot be created because its parent folder does not exist"
+            )
+        if not os.access(parent, os.W_OK):
+            raise ValueError(
+                "cannot be created because its parent folder is not writable"
+            )
+    except OSError as error:
+        raise ValueError(f"cannot be checked ({error})") from error
+    return str(candidate)
+
+
+def _csv_value(raw: Any) -> str:
+    """A comma list whose every entry is an absolute path.
+
+    config.py silently drops relative ingest roots, so accepting one here would
+    report a saved setting that never takes effect. Entries are kept as the
+    user wrote them (with `~` unexpanded) and expanded by the reader.
+    """
+    kept: list[str] = []
+    for part in str(raw).split(","):
+        entry = part.strip()
+        if not entry:
+            continue
+        _absolute_path(entry)
+        kept.append(entry)
+    return ",".join(kept)
+
+
 def _coerce(spec: dict, raw: Any) -> Any:
     kind = spec["type"]
     if kind in ("int", "float"):
@@ -137,20 +211,32 @@ def _coerce(spec: dict, raw: Any) -> Any:
             raise ValueError(f"must be between {low} and {high}")
         return int(number) if kind == "int" else number
     if kind == "path":
-        return str(Path(str(raw)).expanduser())
+        return _output_dir_value(raw)
     if kind == "csv":
-        return ",".join(part.strip() for part in str(raw).split(",") if part.strip())
+        return _csv_value(raw)
     return str(raw).strip()
 
 
 def update(values: dict) -> tuple[dict, list[str]]:
-    """Validate and persist wizard changes. Returns (saved, problems)."""
+    """Validate and persist wizard changes. Returns (saved, problems).
+
+    `problems` holds only rejected values, and when it is non-empty nothing is
+    written, as before. Keys whose environment variable is set and non-empty
+    are skipped before validation: they are left out of `saved` and their
+    stored file value is left untouched, because the environment wins at read
+    time and a page or curl request must never be able to clobber the value
+    that is kept for the day the variable is unset. `pinned_keys(values)` names
+    those skipped keys so a caller can report them without turning the save
+    into an error.
+    """
     saved: dict = {}
     problems: list[str] = []
     for env, raw in values.items():
         spec = _BY_ENV.get(env)
         if spec is None:
             problems.append(f"unknown setting: {env}")
+            continue
+        if env_pinned(env):
             continue
         if str(raw).strip() == "":
             saved[env] = ""  # an explicit clear falls back to the default
@@ -161,6 +247,8 @@ def update(values: dict) -> tuple[dict, list[str]]:
             problems.append(f"{spec['label']}: {error}")
     if problems:
         return {}, problems
+    if not saved:
+        return {}, []
     merged = dict(load(refresh=True))
     merged.update({env: value for env, value in saved.items() if value != ""})
     for env, value in saved.items():
@@ -195,21 +283,28 @@ def snapshot() -> list[dict]:
     """One row per setting, for the dashboard."""
     rows = []
     for spec in SPECS:
-        current = value(spec["env"], spec["default"])
+        env = spec["env"]
+        env_set = env_pinned(env)
+        current = value(env, spec["default"])
         rows.append(
             {
-                "env": spec["env"],
+                "env": env,
                 "label": spec["label"],
                 "help": spec["help"],
                 "type": spec["type"],
                 "value": current,
                 "display": _display(spec, current),
                 "default": spec["default"],
-                "source": source(spec["env"]),
+                "source": source(env),
+                # A row the environment pins cannot be changed from the page: the
+                # file is written, but the environment keeps winning until it is
+                # unset. Say so instead of reporting a change that never applies.
+                "env_set": env_set,
+                "pinned": env_set,
+                "file_value": stored(env),
                 "restart": spec["restart"],
                 "min": spec.get("min"),
                 "max": spec.get("max"),
-                "effective": spec["env"] not in load(),
             }
         )
     return rows

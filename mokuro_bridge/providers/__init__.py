@@ -44,6 +44,8 @@ __all__ = [
     "_default_upload_method",
     "_method_current_folder",
     "_remember_upload_method",
+    "_repoint_upload_method",
+    "_clear_remembered_upload_method",
     "canonical_method_id",
     "instance_for",
     "known_method_ids",
@@ -112,21 +114,27 @@ _UPLOAD_METHOD_STATE_FILE = WORK_DIR / "upload_method_default.json"
 _upload_state_lock = threading.RLock()
 
 def canonical_method_id(value: str) -> str:
-    """Normalise a target to its canonical method id.
+    """Normalise a target to its canonical user-facing id (its alias).
 
-    "local" stays "local"; "mega" and the redundant "mega:default" become
-    "mega"; "mega:work" stays "mega:work". Legacy booleans are *not* handled
-    here — resolve_upload_method does that.
+    "local" stays "local"; an alias, "mega", "mega:work" and the redundant
+    "mega:default" all resolve to the account's alias (``mega``, ``mega-work``
+    for a legacy named account). A named account that does not exist keeps the
+    historical spelling so the caller's error message can quote what the client
+    asked for. Legacy booleans are *not* handled here — resolve_upload_method
+    does that.
     """
     raw = str(value or "").strip().lower()
     if raw == _LOCAL_ID:
         return _LOCAL_ID
     provider, name = accounts.parse_method_id(raw)  # raises ValueError
+    for instance in accounts.list_instances():
+        if instance.provider == provider and instance.name == name:
+            return instance.id
     return accounts.method_id(provider, name)
 
 def known_method_ids() -> list[str]:
-    """Every currently-addressable target id (accounts first, then local)."""
-    return [i.id for i in accounts.list_instances()] + [_LOCAL_ID]
+    """Every currently-addressable target id (account aliases, then local)."""
+    return accounts.known_aliases()
 
 def instance_for(method: str) -> Optional[accounts.Instance]:
     """The account behind a canonical method id (None for "local")."""
@@ -222,10 +230,18 @@ def _remember_upload_method(method: str) -> None:
     the default simply falls back to the env seed on the next start.
     """
     if method != _LOCAL_ID:
+        try:
+            method = canonical_method_id(method)
+        except ValueError:
+            return
         if not any(i.id == method for i in accounts.list_instances()):
             return
         if not _method_configured(method):
             return
+    _write_upload_method_state(method)
+
+def _write_upload_method_state(method: str) -> None:
+    """Write the sticky-default state file (non-fatal on any filesystem error)."""
     try:
         with _upload_state_lock:
             _UPLOAD_METHOD_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -250,13 +266,72 @@ def _remember_upload_method(method: str) -> None:
     except OSError:
         pass  # non-fatal
 
-def resolve_upload_method(value: Optional[str]) -> str:
-    """Map a client-supplied upload target to a concrete method id.
+def _repoint_upload_method(old: str, new: str) -> bool:
+    """Follow a rename in the sticky-default state file.
 
-    Accepts: None/"" (current default), "local", "mega", "mega:work", "drive",
-    "drive:main", "onedrive", "onedrive:uni", the redundant
-    "<provider>:default", and legacy booleans ("true"→mega, "false"→local) for
-    backward compatibility with upload_to_mega. A named account must exist.
+    When the remembered default was the account that just got a new alias, the
+    state file keeps pointing at it instead of silently falling back to the env
+    seed. Returns True when it was rewritten.
+    """
+    try:
+        data = json.loads(_UPLOAD_METHOD_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    raw = str(data.get("method", "")).strip().lower() if isinstance(data, dict) else ""
+    if not raw:
+        return False
+    wanted = str(old or "").strip().lower()
+    if raw != wanted:
+        # The stored spelling may be the account's legacy id ("drive:work"),
+        # which still resolves after the rename.
+        try:
+            if canonical_method_id(raw) != wanted:
+                return False
+        except ValueError:
+            return False
+    _write_upload_method_state(new)
+    return True
+
+def _clear_remembered_upload_method(*method_ids: str) -> bool:
+    """Drop the sticky default when it names one of ``method_ids``.
+
+    Forgetting the account a default pointed at leaves the file pointing at
+    nothing; deleting it lets the env seed (or local) apply again. The raw
+    spelling is canonicalised first, so an old ``mega:work`` entry is recognised
+    after the account moved to an alias.
+    """
+    wanted = {str(value or "").strip().lower() for value in method_ids if value}
+    if not wanted:
+        return False
+    try:
+        data = json.loads(_UPLOAD_METHOD_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    raw = str(data.get("method", "")).strip().lower() if isinstance(data, dict) else ""
+    if not raw:
+        return False
+    try:
+        canonical = canonical_method_id(raw)
+    except ValueError:
+        canonical = raw
+    if canonical not in wanted and raw not in wanted:
+        return False
+    try:
+        with _upload_state_lock:
+            _UPLOAD_METHOD_STATE_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return True
+
+def resolve_upload_method(value: Optional[str]) -> str:
+    """Map a client-supplied upload target to a concrete method id (an alias).
+
+    Accepts: None/"" (current default), "local", an alias (``mega-1``,
+    ``drive-next``), a bare provider (``mega``), the historical ``provider:name``
+    spelling (``mega:work``, ``drive:main``), the redundant
+    ``<provider>:default``, and legacy booleans ("true"→mega, "false"→local) for
+    backward compatibility with upload_to_mega. An unknown account raises with
+    the list of known aliases.
     """
     raw = str(value).strip().lower() if value is not None else ""
     if not raw:
@@ -360,6 +435,10 @@ def forget_account(target: str) -> dict:
     legacy = accounts.legacy_secret_path(provider, name)
     if legacy is not None:
         removed += [str(path) for path in accounts.remove_paths([legacy])]
+    if _clear_remembered_upload_method(
+        label, accounts.method_id(provider, name)
+    ):
+        notes.append("it was the default destination; the default was reset")
 
     if provider == "mega":
         if email and email in siblings:
@@ -420,6 +499,7 @@ def _build_upload_methods() -> dict[str, UploadMethod]:
         )
         extra: dict = {
             "provider": instance.provider,
+            "alias": instance.id,
             "account": instance.name,
             "creds_source": _method_creds_source(instance.id),
             "tracked": instance.tracked,

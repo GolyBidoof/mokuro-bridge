@@ -2,7 +2,7 @@
 
 The failures that come up in practice, and what to do about them.
 
-**Check `/health` first.** It reports the engine (`mokuro_installed`, `mokuro_version`, `mokuro_fork_api`), the fetch-proxy ports it bound (`fetchProxyPorts`, `fetchUpstreams`), the upload targets and the current default (`upload_method_default`), the OCR queue (`ocr_queue_depth`), whether the bridge is busy (`busy`, `busy_stage`, `busy_detail`) and the update state, so most of these questions answer themselves without guessing.
+**Check `/health` first.** It reports the engine (`mokuro_installed`, `mokuro_version`, `mokuro_fork_api`), the fetch-proxy ports it bound (`fetchProxyPorts`, `fetchUpstreams`), the upload targets by alias and the current default (`upload_method_default`), the OCR queue (`ocr_queue_depth`), whether the bridge is busy (`busy`, `busy_stage`, `busy_detail`), the live upload when one is running (`upload`) and the update state, so most of these questions answer themselves without guessing. The dashboard at `http://127.0.0.1:62642/` renders the same facts in one page.
 
 ## Install
 
@@ -51,6 +51,30 @@ Comma-separated, absolute paths only. A relative entry is ignored rather than re
 **Finalize answers 409.** Another finalize already owns that session, or a page ingest is still holding a reservation. `GET /session/{id}/status` shows `finalizing` and `pages_ingesting`; wait for them to clear rather than retrying immediately.
 
 **MEGA upload fails with `ENOENT` after a successful wizard run.** A v0.6.0 keychain bug, where a stale entry for an older address shadowed the working one. Upgrade.
+
+## Dashboard and accounts
+
+**The dashboard does not load, or loads with empty panels.** The page is a small JavaScript app: it reads `/health` and `/config` after loading. Check those two endpoints first (`curl -s http://127.0.0.1:62642/health`, then `/config`). A `500` saying `dashboard page missing` means the packaged page is not installed, so reinstall the package or restore `mokuro_bridge/web/dashboard.html`. The page is served from disk on every request with no cache, so a normal reload picks up a new build without restarting the service. If JavaScript is disabled, `/health` and `mokuro-bridge --status` show the same state without the page.
+
+**A change on the page answers `403 configuration changes are accepted only from this machine`.** Every configuration write is gated to a loopback `Origin`, because the bridge is unauthenticated and any page in a browser can reach it. Open the dashboard at `http://127.0.0.1:62642/` or `http://localhost:62642/`, not through a LAN address or another hostname. curl and the CLI are accepted because they send no `Origin`.
+
+**A destination says `Sign-in expired`.** The account has stored credential material but the bridge cannot use it right now, so uploads to it would fail. Open its card and press Reconnect, which runs the same sign-in flow again with the same alias and keeps the folder, note and default. For Google Drive and OneDrive this is usually a revoked or expired token; for MEGA, sign in again with the account password. The state is a local check, so `needs_sign_in` can also mean a required optional library is missing; `/config` lists what is missing under `providers[].missing`.
+
+**Add a destination is disabled, or a provider says it is unavailable.** The page checks for what that provider needs and names it: `megatools` for MEGA, `google-auth-oauthlib` and `google-api-python-client` for Drive, `msal` and `requests` for OneDrive, and `ONEDRIVE_CLIENT_ID` for the OneDrive app registration. Install the matching requirements file (`pip install -r requirements-drive.txt`, `pip install -r requirements-onedrive.txt`), install megatools for MEGA, register the Azure app for OneDrive, then reload the page. The page links to the Google Cloud console and the Azure portal for creating those clients.
+
+**The Google sign-in window says the link is no longer valid, or the sign-in did not finish.** Drive and OneDrive sign-ins are held in memory for 10 minutes, and restarting the bridge cancels one in progress. Press Add destination and start again. If Drive answers that the OAuth client is unrecognised or missing, set `DRIVE_CLIENT_ID` and `DRIVE_CLIENT_SECRET`, or point `DRIVE_CLIENT_SECRET_FILE` at a downloaded `client_secrets.json`; a client pasted into the page is used for that sign-in only and is not saved.
+
+**The OneDrive code is rejected or the flow expired.** A sign-in flow expires after 10 minutes and is held in memory. Start the sign-in again from the destination card. If the page says OneDrive needs an app registration, register a public client in the Azure portal, put its application ID in `ONEDRIVE_CLIENT_ID` where the service can see it (a launchd plist or shell export), and restart the bridge.
+
+**An alias is rejected, or Rename answers that it is taken.** Aliases are 1 to 32 characters from lowercase letters, digits and hyphens, must start with a letter or digit, cannot be `local`, and cannot be another provider's bare name (`mega`, `drive`, `onedrive`). They are unique across all accounts, so an alias owned by a different provider is refused. After a rename, update any script that used the old alias: the alias is the id scripts pass, while historical `provider:name` spellings keep resolving for existing accounts.
+
+**A preference row is disabled and says `Pinned by ...`.** That environment variable is set for the bridge, and the environment wins over the settings file. The page disables the row and the save endpoint skips that key, so a save can never overwrite the stored value. Unset the variable in the service's environment (launchd plist, systemd unit or shell), restart, and then the stored value applies.
+
+**Saving preferences says `Restart the bridge to apply them`.** The three preferences are read when the process starts. The page shows the restart command with a copy button; on macOS launchd the command is `launchctl kickstart -k gui/$(id -u)/com.mokuro-bridge`. Anything else the bridge understands is set from the environment and documented in `.env.example`; a hand-edited settings file can carry those keys as well.
+
+**Saving the output folder is rejected.** The value must be an absolute path. An existing file is refused with `is a file, not a folder`, and a path whose parent folder does not exist is refused with `cannot be created because its parent folder does not exist`. A new folder is allowed when its parent exists and is writable; the bridge creates it at the next start. Extra read roots must be absolute too, because the bridge ignores relative entries.
+
+**The page says update checks are off or failed.** `MOKURO_BRIDGE_UPDATE_CHECK=0` turns the background check off, and a failed check is reported with its reason. Neither affects uploads; `mokuro-bridge --check-update` runs the check by hand and still works when the background check is disabled.
 
 ## Updating
 

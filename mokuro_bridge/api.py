@@ -426,6 +426,27 @@ def _current_activity() -> tuple[str, str]:
         return _activity["stage"], _activity["detail"]
 
 
+_UPLOAD_SNAPSHOT_FIELDS = ("file", "percent", "current_bytes", "total_bytes", "speed_human")
+
+
+def _active_upload_snapshot():
+    """The live upload of an active session, trimmed to what a status client draws.
+
+    ``_set_upload_state`` keeps a rich dict per session; /health only needs the
+    small shape the terminal display and the dashboard progress bar render, and
+    it should stay absent while nothing is uploading. Locks are taken in the same
+    order as ``list_sessions`` (registry lock, then the session lock).
+    """
+    with _sessions_lock:
+        sessions = list(_sessions.values())
+    for session in sessions:
+        with session.lock:
+            upload = session.upload
+            if isinstance(upload, dict) and upload.get("active"):
+                return {key: upload.get(key) for key in _UPLOAD_SNAPSHOT_FIELDS}
+    return None
+
+
 def _set_upload_state(session, *, active, method=None, file=None, percent=None,
                       current_bytes=None, total_bytes=None, speed_bps=None,
                       speed_human=None, remote_path=None, url=None, error=None):
@@ -3225,6 +3246,11 @@ async def health():
         "ocr_active_batch_sessions": queue["active_batch_sessions"],
         "ocr_worker": queue["worker"],
     }
+    # Only present while an upload is actually in flight, so `--status` can show
+    # a progress bar without a second request and plain clients see no change.
+    active_upload = _active_upload_snapshot()
+    if active_upload is not None:
+        result["upload"] = active_upload
     # Busy flag: derived from the activity tracker (what finalize is doing
     # right now) plus any queued OCR work. A polling client can use this to
     # wait for the bridge to go idle instead of racing finalize.

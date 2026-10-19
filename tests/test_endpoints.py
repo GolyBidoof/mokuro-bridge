@@ -430,7 +430,8 @@ def test_destination_check_reports_local_presence(client, work_dir, monkeypatch)
 def test_destination_check_rejects_an_unknown_method(client):
     response = client.post("/destination/check", data={"method": "nope", "title": "Whatever 1"})
     assert response.status_code == 400, response.text
-    assert "unknown upload provider" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert "unknown upload target" in detail and "known accounts" in detail
 
 
 def test_destination_check_requires_a_title(client):

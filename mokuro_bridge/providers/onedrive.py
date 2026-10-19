@@ -1,5 +1,6 @@
 from __future__ import annotations
 import importlib.util
+import json
 import os
 import tempfile
 import time
@@ -136,6 +137,97 @@ def _onedrive_token(name: str = DEFAULT_NAME) -> str:
         f"{_onedrive_setup_hint(name)}` to sign in (device-code flow)."
     )
 
+def start_device_flow(name: str = DEFAULT_NAME):
+    """Begin a device-code sign-in for one account.
+
+    Returns ``(app, cache, flow)``; the caller shows ``flow['user_code']`` and
+    ``flow['verification_uri']``, then calls ``finish_device_flow`` (blocking,
+    usually in a thread). Reuses the account's existing token cache so a
+    re-authorization updates the same file.
+    """
+    try:
+        from msal import PublicClientApplication
+    except ImportError as exc:
+        raise RuntimeError(_ONEDRIVE_IMPORT_HINT) from exc
+    if not ONEDRIVE_CLIENT_ID:
+        raise ValueError(
+            "OneDrive sign-in needs an Azure application (client) ID in "
+            "ONEDRIVE_CLIENT_ID"
+        )
+    cache = _load_token_cache(name)
+    app = PublicClientApplication(
+        client_id=ONEDRIVE_CLIENT_ID,
+        authority="https://login.microsoftonline.com/common",
+        token_cache=cache,
+    )
+    flow = app.initiate_device_flow(scopes=_ONEDRIVE_SCOPES)
+    if "user_code" not in flow:
+        raise ValueError(
+            "could not start the OneDrive device-code flow: "
+            f"{flow.get('error_description', flow)}"
+        )
+    return app, cache, flow
+
+def finish_device_flow(
+    app,
+    cache,
+    flow,
+    name: str,
+    *,
+    alias: Optional[str] = None,
+    label: Optional[str] = None,
+    root: Optional[str] = None,
+) -> accounts.Instance:
+    """Wait for the device-code sign-in, then persist the token and metadata.
+
+    Blocking: it returns when the user finishes (or the code expires) and raises
+    RuntimeError with the provider's message on failure.
+    """
+    result = app.acquire_token_by_device_flow(flow)
+    if "access_token" not in result:
+        raise RuntimeError(
+            "OneDrive sign-in failed: "
+            f"{result.get('error', 'unknown error')}: "
+            f"{result.get('error_description', '')}"
+        )
+    _save_token_cache(cache, name)
+    return accounts.save_instance(
+        "onedrive",
+        name,
+        label=(label or None),
+        root=(root or None),
+        alias=alias,
+    )
+
+def account_identity(instance: accounts.Instance) -> str:
+    """The non-secret identity (username) recorded in one account's msal cache.
+
+    msal stores cache entries as JSON: an "Account" record carries ``username``
+    and ``home_account_id``, an "IdToken" record a ``preferred_username``. Both
+    are read straight from the file, read-only, with no msal import and no
+    network call. A cache without a username (or a corrupt one) yields "".
+    """
+    if instance.email:
+        return instance.email
+    try:
+        data = json.loads(_onedrive_token_path(instance.name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    for section in ("Account", "IdToken"):
+        entries = data.get(section)
+        if not isinstance(entries, dict):
+            continue
+        for entry in entries.values():
+            if not isinstance(entry, dict):
+                continue
+            for key in ("username", "preferred_username"):
+                value = entry.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return ""
+
 def _run_setup_onedrive(
     name: Optional[str] = None, root: str = "", label: str = ""
 ) -> None:
@@ -216,6 +308,7 @@ def _run_setup_onedrive(
         name,
         label=(label or None),
         root=(root or None),
+        alias=accounts.alias_for_storage("onedrive", name),
     )
     if stored is not None:
         print(f"Remote root: {stored.root_path} (a folder in this account's drive)")

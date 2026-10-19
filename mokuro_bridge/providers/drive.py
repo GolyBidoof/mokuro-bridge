@@ -405,6 +405,90 @@ def _drive_upload_file(
     except Exception as exc:  # HttpError / ResumableUploadError / network…
         return False, str(exc), None
 
+def resolve_oauth_client(
+    client_id: str = "", client_secret: str = ""
+) -> tuple[dict, str]:
+    """The Google OAuth client config for a browser sign-in, and its source.
+
+    Precedence matches the terminal wizard: a full client_secrets.json from
+    DRIVE_CLIENT_SECRET_FILE, then DRIVE_CLIENT_ID + DRIVE_CLIENT_SECRET, then
+    the pair the page posted. The client secret is never persisted. The source
+    ("secret-file", "posted" or "env") lets the caller skip the online client
+    check for a client_secrets.json Google already issued.
+    """
+    secret_config = _load_client_secrets_file()
+    if secret_config is not None:
+        return secret_config, "secret-file"
+    resolved_id = str(client_id or "").strip() or _drive_client_id_from_env()
+    resolved_secret = (
+        str(client_secret or "").strip()
+        or os.environ.get("DRIVE_CLIENT_SECRET", "").strip()
+    )
+    if not resolved_id:
+        raise ValueError(
+            "a Google OAuth client ID is required: set DRIVE_CLIENT_ID, use "
+            "DRIVE_CLIENT_SECRET_FILE, or paste one from Google Cloud Console "
+            "(Credentials -> OAuth client ID -> Desktop app)"
+        )
+    if not _client_id_is_plausible(resolved_id):
+        raise ValueError(
+            "that does not look like a Google client ID: it should end in "
+            "'.apps.googleusercontent.com' (Credentials -> your OAuth 2.0 Client)"
+        )
+    source = "posted" if str(client_id or "").strip() else "env"
+    return _drive_flow_config(resolved_id, resolved_secret), source
+
+def start_oauth_flow(client_config: dict, redirect_uri: str):
+    """Build an OAuth flow and its authorization URL for one sign-in.
+
+    Returns ``(flow, auth_url, state)``. The flow object is kept by the caller
+    until the browser comes back to ``redirect_uri`` so the code exchange uses
+    the matching PKCE verifier.
+    """
+    from google_auth_oauthlib.flow import Flow
+
+    flow = Flow.from_client_config(
+        client_config, DRIVE_SCOPES, redirect_uri=redirect_uri
+    )
+    auth_url, state = flow.authorization_url(access_type="offline", prompt="consent")
+    return flow, auth_url, state
+
+def store_drive_credentials(name: str, credentials_json: str) -> Path:
+    """Write one Drive account's OAuth credentials at its historical path (0600)."""
+    path = _drive_creds_path(name)
+    _write_secret_atomic(path, credentials_json)
+    return path
+
+# Fields an existing Drive credential file may already carry that name the
+# account. Nothing is inferred or fetched: a value is used only when it is
+# already present in the file and looks like an email address.
+_DRIVE_IDENTITY_KEYS = ("email", "account", "username", "client_email")
+
+def account_identity(instance: accounts.Instance) -> str:
+    """The non-secret identity of one Drive account when it is already recorded.
+
+    Drive's OAuth credential file usually has no account field (Google does not
+    put the user's address in the authorized-user JSON), so this deliberately
+    makes no network call and invents nothing: it returns the metadata email if
+    one was recorded, else the first identity field already present in the
+    credential file (``email``/``account``/``username``, or ``client_email`` for
+    a service-account key) when it contains an ``@``. Otherwise "" and /config
+    simply has no email for that destination.
+    """
+    if instance.email:
+        return instance.email
+    try:
+        info = json.loads(_drive_creds_path(instance.name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(info, dict):
+        return ""
+    for key in _DRIVE_IDENTITY_KEYS:
+        value = info.get(key)
+        if isinstance(value, str) and "@" in value:
+            return value.strip()
+    return ""
+
 def _run_setup_drive(
     name: Optional[str] = None, root: str = "", label: str = ""
 ) -> None:
@@ -570,6 +654,7 @@ def _run_setup_drive(
         name,
         label=(label or None),
         root=(root or None),
+        alias=accounts.alias_for_storage("drive", name),
     )
     if stored is not None:
         print(f"Remote root: {stored.root_path} (a folder in this account's My Drive)")

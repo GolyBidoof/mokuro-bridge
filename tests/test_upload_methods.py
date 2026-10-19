@@ -60,7 +60,16 @@ def test_bare_and_default_ids_are_the_same_target(env):
 def test_named_accounts_resolve_once_configured(env):
     accounts.save_instance("mega", "work", extra={"email": "w@example.com"})
     env["mega"].add("work")
-    assert providers.resolve_upload_method("mega:work") == "mega:work"
+    # The user-facing id is the derived alias; the historical spelling still works.
+    assert providers.resolve_upload_method("mega:work") == "mega-work"
+    assert providers.resolve_upload_method("mega-work") == "mega-work"
+
+def test_an_explicit_alias_is_the_canonical_id(env):
+    accounts.save_instance("mega", "mega-beta", alias="mega-beta", extra={"email": "b@example.com"})
+    env["mega"].add("mega-beta")
+    assert providers.resolve_upload_method("mega-beta") == "mega-beta"
+    # The storage spelling keeps resolving forever.
+    assert providers.resolve_upload_method("mega:mega-beta") == "mega-beta"
 
 def test_unknown_account_error_lists_available_targets(env):
     with pytest.raises(ValueError) as exc:
@@ -84,31 +93,33 @@ def test_every_account_is_listed_with_its_root(env):
 
     methods = providers._build_upload_methods()
 
-    assert list(methods) == ["local", "mega", "mega:work", "drive", "drive:main", "onedrive"]
+    assert list(methods) == ["local", "mega", "mega-work", "drive", "drive-main", "onedrive"]
     default_mega = methods["mega"]
     assert default_mega.name == "MEGA (megatools)"  # unchanged for existing clients
     assert default_mega.extra["library_root"] == accounts.default_root("mega")
     assert default_mega.extra["account"] == "default"
 
-    work = methods["mega:work"]
+    work = methods["mega-work"]
     assert work.name == "MEGA (megatools) — work"
+    assert work.extra["alias"] == "mega-work"
+    assert work.extra["account"] == "work"
     assert work.extra["library_root"] == "/Root/work"
     assert work.extra["email"] == "w@example.com"
     assert work.configured is True
 
-    drive_main = methods["drive:main"]
+    drive_main = methods["drive-main"]
     assert drive_main.extra["root"] == "mokuro-main"
     assert methods["onedrive"].configured is False
 
 def test_unconfigured_account_is_listed_but_not_ready(env):
     accounts.save_instance("mega", "work", extra={"email": "w@example.com"})
     methods = providers._build_upload_methods()
-    assert methods["mega:work"].configured is False
-    assert methods["mega:work"].extra["creds_source"] is None
+    assert methods["mega-work"].configured is False
+    assert methods["mega-work"].extra["creds_source"] is None
 
 def test_current_folder_is_per_account(env):
     accounts.save_instance("mega", "work", root="/Root/work")
-    assert providers._method_current_folder("mega:work") == "/Root/work"
+    assert providers._method_current_folder("mega-work") == "/Root/work"
     assert providers._method_current_folder("mega") == accounts.default_root("mega")
     assert "My Drive" in providers._method_current_folder("drive")
 
@@ -116,13 +127,22 @@ def test_remembered_target_persists_across_reads(env):
     accounts.save_instance("mega", "work", extra={"email": "w@example.com"})
     env["mega"].add("work")
 
-    providers._remember_upload_method("mega:work")
+    providers._remember_upload_method("mega:work")  # legacy spelling is accepted
 
     stored = json.loads(providers._UPLOAD_METHOD_STATE_FILE.read_text(encoding="utf-8"))
-    assert stored == {"method": "mega:work"}
-    assert providers._load_remembered_upload_method() == "mega:work"
-    assert providers._default_upload_method() == "mega:work"
-    assert providers._build_upload_methods()["mega:work"].default is True
+    assert stored == {"method": "mega-work"}, "the canonical (alias) id is persisted"
+    assert providers._load_remembered_upload_method() == "mega-work"
+    assert providers._default_upload_method() == "mega-work"
+    assert providers._build_upload_methods()["mega-work"].default is True
+
+def test_a_remembered_legacy_id_resolves_to_the_alias(env):
+    accounts.save_instance("mega", "work", extra={"email": "w@example.com"})
+    env["mega"].add("work")
+    providers._UPLOAD_METHOD_STATE_FILE.write_text(
+        json.dumps({"method": "mega:work"}), encoding="utf-8"
+    )
+    assert providers._load_remembered_upload_method() == "mega-work"
+    assert providers._default_upload_method() == "mega-work"
 
 def test_unconfigured_target_is_never_remembered(env):
     accounts.save_instance("mega", "work", extra={"email": "w@example.com"})
@@ -142,7 +162,7 @@ def test_remembered_account_that_vanished_falls_back_to_env(env):
 def test_env_seed_accepts_an_account_id(env, monkeypatch):
     accounts.save_instance("mega", "work", extra={"email": "w@example.com"})
     monkeypatch.setenv("MOKURO_BRIDGE_UPLOAD_DEFAULT", "mega:work")
-    assert providers._default_upload_method() == "mega:work"
+    assert providers._default_upload_method() == "mega-work"
     monkeypatch.setenv("MOKURO_BRIDGE_UPLOAD_DEFAULT", "true")
     assert providers._default_upload_method() == "mega"
     monkeypatch.setenv("MOKURO_BRIDGE_UPLOAD_DEFAULT", "mega:ghost")

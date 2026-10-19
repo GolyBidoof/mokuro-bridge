@@ -226,7 +226,9 @@ def test_run_status_piped_prints_one_frame_and_returns_zero():
     assert code == 0
     out = stream.getvalue()
     assert ESC not in out
-    expected = status_tui.render_status(health(), width=100, height=29, host_header="http://127.0.0.1:62642")
+    # A piped snapshot uses the full terminal height (the alt screen reserves a
+    # row, a snapshot does not), so `head -30` with LINES=30 shows all 30 lines.
+    expected = status_tui.render_status(health(), width=100, height=30, host_header="http://127.0.0.1:62642")
     assert out == expected + "\n"
     assert calls == ["http://127.0.0.1:62642/health"]
 
@@ -324,3 +326,194 @@ def test_upstream_count_is_pluralised(count, expected):
         health(fetchUpstreams=["https://a.example"] * count), width=110, height=30
     )
     assert expected in frame
+
+
+# --- display width: wide and combining characters ---------------------------
+
+
+def assert_frame_geometry(frame, width, height):
+    lines = frame.split("\n")
+    assert len(lines) == height
+    assert all(status_tui.display_width(line) == width for line in lines), [
+        status_tui.display_width(line) for line in lines
+    ]
+
+
+def test_display_width_counts_wide_and_combining_characters():
+    assert status_tui.display_width("abc") == 3
+    assert status_tui.display_width("日本語") == 6
+    assert status_tui.display_width("e\u0301") == 1
+    assert status_tui.display_width("★") == 1
+
+
+def test_clip_never_splits_wide_or_combining_characters():
+    clipped = status_tui._clip("日本語", 4)
+    assert status_tui.display_width(clipped) <= 4
+    assert clipped.endswith("…")
+    assert status_tui._clip("日本語", 1) == "…"
+    combining = status_tui._clip("e\u0301e\u0301e\u0301", 2)
+    assert status_tui.display_width(combining) <= 2
+    assert combining == "e\u0301…"  # the combining mark stays with its base character
+
+
+def test_cjk_names_keep_the_frame_geometry():
+    frame = status_tui.render_status(
+        health(
+            upload_methods=[{
+                "id": "local",
+                "name": "ローカル出力",
+                "configured": True,
+                "root": "/Users/x/漫画/日本語の本",
+            }],
+            upload_method_default="local",
+        ),
+        width=80,
+        height=24,
+        upload=upload(file="日本語の漫画_第01巻.cbz"),
+    )
+    assert_frame_geometry(frame, 80, 24)
+    assert "日本語" in frame
+
+
+# --- borders and footer ------------------------------------------------------
+
+
+@pytest.mark.parametrize("width", [20, 30, 35, 40, 50, 60, 100])
+@pytest.mark.parametrize("overrides", [
+    {},
+    {"status": "unreachable",
+     "error": "JSONDecodeError: Expecting value: line 1 column 1 (char 0)"},
+    {"busy": True, "busy_stage": "uploading", "busy_detail": "vol01.cbz"},
+])
+def test_both_corners_survive_every_width(width, overrides):
+    frame = status_tui.render_status(
+        health(**overrides), width=width, height=15, host_header="http://127.0.0.1:62642"
+    )
+    lines = frame.split("\n")
+    assert lines[0].endswith("┐"), lines[0]
+    assert lines[-1].endswith("┘"), lines[-1]
+    assert_frame_geometry(frame, width, 15)
+
+
+@pytest.mark.parametrize("width", [30, 40, 50])
+def test_footer_keeps_the_quit_hint(width):
+    frame = status_tui.render_status(health(), width=width, height=12)
+    assert "q quit" in frame
+    assert all(status_tui.display_width(line) == width for line in frame.split("\n"))
+
+
+# --- narrow and mid-width layouts -------------------------------------------
+
+
+@pytest.mark.parametrize("width", [50, 59, 60, 61, 70])
+def test_mid_widths_keep_destinations_and_worker_state(width):
+    frame = status_tui.render_status(
+        health(busy=True, busy_stage="ocr", busy_detail="3 pages"), width=width, height=24
+    )
+    assert "DESTINATIONS" in frame
+    assert "MEGA" in frame
+    assert "worker" in frame
+    assert_frame_geometry(frame, width, 24)
+
+
+def test_narrow_body_keeps_status_destination_worker_and_activity():
+    frame = status_tui.render_status(health(), width=40, height=15)
+    for needle in ("status", "queue", "worker", "output", "MEGA", "now"):
+        assert needle in frame, needle
+    assert_frame_geometry(frame, 40, 15)
+
+
+# --- upload plumbing, help, colour, flags -----------------------------------
+
+
+def test_run_status_passes_the_health_upload_object_to_both_renderers():
+    payload = health(upload=upload())
+    tty = FakeTTY()
+    code = status_tui.run_status("http://127.0.0.1:62642", stream=tty,
+                                 fetch=lambda url: payload, keys=iter(["q"]))
+    assert code == 0
+    assert "42%" in tty.getvalue() and "█" in tty.getvalue()
+
+    plain = io.StringIO()
+    code = status_tui.run_status("http://127.0.0.1:62642", stream=plain,
+                                 fetch=lambda url: payload, keys=iter(["q"]))
+    assert code == 0
+    assert "42%" in plain.getvalue() and "█" in plain.getvalue()
+    assert ESC not in plain.getvalue()
+
+
+def test_question_mark_opens_help_and_any_key_returns():
+    stream = FakeTTY()
+    code = status_tui.run_status("http://127.0.0.1:62642", stream=stream,
+                                 fetch=lambda url: health(), keys=iter(["?", "x", "q"]))
+    assert code == 0
+    out = stream.getvalue()
+    assert "default destination" in out
+    assert "destination configured" in out
+    assert "q quit" in out
+    assert out.endswith(status_tui.CURSOR_SHOW + status_tui.ALT_OFF)
+
+
+def test_no_color_keeps_the_display_but_drops_colour(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    stream = FakeTTY()
+    code = status_tui.run_status("http://127.0.0.1:62642", stream=stream,
+                                 fetch=lambda url: health(), keys=iter(["q"]))
+    assert code == 0
+    out = stream.getvalue()
+    assert status_tui.ALT_ON in out
+    assert "\x1b[32m" not in out and "\x1b[36m" not in out and "\x1b[1m" not in out
+    assert out.endswith(status_tui.CURSOR_SHOW + status_tui.ALT_OFF)
+
+
+def test_main_honours_host_and_port_from_the_cli(monkeypatch):
+    seen = []
+    monkeypatch.setattr(status_tui, "run_status", lambda url, **kw: seen.append(url) or 0)
+    assert status_tui.main(["--status"], host="10.0.0.5", port=9000) == 0
+    assert seen[-1] == "http://10.0.0.5:9000"
+    assert status_tui.main(["--status"], host="10.0.0.5", port=9000,
+                           status_url="http://elsewhere:1") == 0
+    assert seen[-1] == "http://elsewhere:1"
+
+
+def test_url_normalisation_from_flags_and_environment(monkeypatch):
+    seen = []
+    monkeypatch.setattr(status_tui, "run_status", lambda url, **kw: seen.append(url) or 0)
+    for name in ("MOKURO_BRIDGE_HOST", "MOKURO_BRIDGE_PORT"):
+        monkeypatch.delenv(name, raising=False)
+
+    assert status_tui.main(["--status", "--status-url", "127.0.0.1:62642"]) == 0
+    assert seen[-1] == "http://127.0.0.1:62642"
+
+    monkeypatch.setenv("MOKURO_BRIDGE_HOST", "http://10.0.0.5")
+    monkeypatch.setenv("MOKURO_BRIDGE_PORT", "9000")
+    assert status_tui.main(["--status"]) == 0
+    assert seen[-1] == "http://10.0.0.5:9000"  # scheme added once, not doubled
+
+    monkeypatch.setenv("MOKURO_BRIDGE_HOST", "::1")
+    monkeypatch.setenv("MOKURO_BRIDGE_PORT", "62642")
+    assert status_tui.main(["--status"]) == 0
+    assert seen[-1] == "http://[::1]:62642"
+
+    monkeypatch.setenv("MOKURO_BRIDGE_HOST", "127.0.0.1")
+    monkeypatch.setenv("MOKURO_BRIDGE_PORT", "")  # empty must not crash the CLI
+    assert status_tui.main(["--status"]) == 0
+    assert seen[-1] == "http://127.0.0.1:62642"
+
+
+def test_run_status_re_reads_the_terminal_size_each_frame(monkeypatch):
+    stream = FakeTTY()
+    sizes = iter([(100, 30), (80, 24)])
+
+    def fake_size(*args, **kwargs):
+        return next(sizes)
+
+    monkeypatch.setattr(status_tui, "_terminal_size", fake_size)
+    code = status_tui.run_status("http://127.0.0.1:62642", stream=stream,
+                                 fetch=lambda url: health(), keys=iter(["r", "q"]))
+    assert code == 0
+    plain = SGR.sub("", stream.getvalue())
+    borders = [line for line in plain.split("\n") if "┌" in line and "┐" in line]
+    widths = {status_tui.display_width(line[line.index("┌"):line.rindex("┐") + 1]) for line in borders}
+    assert widths == {100, 80}, widths
+    assert stream.getvalue().endswith(status_tui.CURSOR_SHOW + status_tui.ALT_OFF)

@@ -531,11 +531,11 @@ def main() -> None:
         action="store_true",
         help=argparse.SUPPRESS,
     )
-    parser.add_argument("--host", default=os.environ.get("MOKURO_BRIDGE_HOST", "127.0.0.1"))
+    parser.add_argument("--host", default=os.environ.get("MOKURO_BRIDGE_HOST") or "127.0.0.1")
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.environ.get("MOKURO_BRIDGE_PORT", "62642")),
+        default=int(os.environ.get("MOKURO_BRIDGE_PORT") or "62642"),
     )
     parser.add_argument(
         "--check-update",
@@ -604,7 +604,13 @@ def main() -> None:
         raise SystemExit(_run_install_mokuro())
     if args.status:
         from . import status_tui
-        raise SystemExit(status_tui.main(sys.argv[1:]))
+        raise SystemExit(status_tui.main(
+            sys.argv[1:],
+            host=args.host,
+            port=args.port,
+            status_url=args.status_url,
+            status_interval=args.status_interval,
+        ))
     if args.check_series_reference:
         raise SystemExit(_check_series_reference())
     if args.refresh_series_reference:

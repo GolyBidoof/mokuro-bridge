@@ -1,6 +1,6 @@
 # HTTP endpoints
 
-The bridge exposes twenty-one routes, all on the same loopback server (default `http://127.0.0.1:62642`). There is no authentication: binding to `127.0.0.1` is the entire access control, and every route is meant to be reachable only from the machine that runs it. Request bodies are `application/x-www-form-urlencoded` except where a file upload or JSON body is noted. The upload body limit is 100 MiB for pages and covers.
+The bridge exposes twenty-eight routes, all on the same loopback server (default `http://127.0.0.1:62642`). There is no authentication: binding to `127.0.0.1` is the entire access control, and every route is meant to be reachable only from the machine that runs it. Request bodies are `application/x-www-form-urlencoded` except where a file upload or JSON body is noted. The upload body limit is 100 MiB for pages and covers.
 
 The routes the capture loop needs are `POST /session/start`, `POST /session/{id}/page` (or `POST /session/{id}/page-local`) and `POST /session/{id}/finalize`. Everything else exists so a client does not have to guess or repeat work.
 
@@ -107,7 +107,7 @@ Waits for the OCR queue, assembles the `.mokuro`, packs the CBZ and cover, publi
 
 | Form field | Default | Meaning |
 | --- | --- | --- |
-| `upload_method` | current default | `local`, `mega`, `mega:work`, `drive`, `drive:main`, `onedrive`, and so on |
+| `upload_method` | current default | An account alias such as `mega-work` or `drive-next`, or `local`. Historical spellings (`mega`, `mega:work`, `drive:main`, `provider:default`) keep resolving to the same account |
 | `upload_to_mega` | empty | Legacy alias: `true` means MEGA, `false` means local |
 | `delete_after_upload` | `true` | Remove the volume's working files once every step succeeded |
 | `local_dir` | empty | Output folder when the resolved method is `local`; remembered as the sticky default |
@@ -121,7 +121,7 @@ Errors before the stream starts: `400` for an unknown upload account, `404` for 
 
 ## GET /upload-methods
 
-Lists every upload target and the current default. Response `200` is `{upload_method_default, upload_method_selected: null, methods: [...]}`, where each method carries `id`, `name`, `configured`, `default`, `current_folder` and provider-specific extras (for MEGA, the library root and email; for Drive and OneDrive, the root folder name). Not covered by an HTTP test; the registry is unit-tested in `tests/test_upload_methods.py`.
+Lists every upload target and the current default. Response `200` is `{upload_method_default, upload_method_selected: null, methods: [...]}`, where each method carries `id` (the account alias), `name`, `configured`, `default`, `current_folder`, `alias` and provider-specific extras (for MEGA, the library root and email; for Drive and OneDrive, the root folder name). `upload_method_default` is an alias, and the historical spellings are still accepted as input. Not covered by an HTTP test; the registry is unit-tested in `tests/test_upload_methods.py`.
 
 ## POST /destination/check
 
@@ -139,21 +139,32 @@ Response `200` is `{method, title, file, exists}`, plus `remote_dir` for a remot
 
 `GET /` serves one self-contained HTML page (inline CSS and JavaScript, no external assets) that shows the bridge's health and edits its destinations, default folders and settings. It is documented for users in [dashboard.md](dashboard.md); the routes it calls are here.
 
-Every write below is refused with `403` when the request carries an `Origin` header that is not loopback (`127.0.0.1`, `localhost` or `[::1]`, any port). A request with no `Origin` at all, which is what curl and the CLI send, is accepted. Reads are not gated.
+Every write below is refused with `403` when the request carries an `Origin` header that is not loopback (`127.0.0.1`, `localhost` or `[::1]`, any port). A request with no `Origin` at all, which is what curl and the CLI send, is accepted. Reads are not gated. The Google Drive OAuth callback is the one exception: it is a `GET` opened by Google's redirect, so it is not Origin-gated, and it accepts only the one-time `state` this bridge created.
+
+### Accounts and aliases
+
+Every upload account has a memorable, globally unique alias: `mega`, `mega-2`, `drive-next`. The alias is the `id` in `/config` and `/health` and the value clients pass as `method`/`upload_method`. Historical spellings keep working forever: a bare provider (`mega`), `mega:work`, `drive:main` and `provider:default` all resolve to the same account, so `upload_method_default.json` and old scripts need no migration. An account added from the page persists its alias in its metadata file; an account configured before aliases existed derives one on read (`mega:work` becomes `mega-work`) without its files being rewritten. Aliases are 1-32 lowercase letters, digits or hyphens, cannot be `local` or another provider's bare name, and are suggested as `<provider>`, `<provider>-2`, `<provider>-3`, skipping anything taken. An unknown target answers `400` listing the known aliases. Passing the alias of an account that already exists re-credentials that account (the dashboard's Reconnect) while keeping its folder, note and default; an alias that belongs to another provider is a `400`.
 
 | Route | Body | Answer |
 | --- | --- | --- |
-| `GET /` | none | `200` with the page, `500` when the packaged page is missing |
-| `GET /config` | none | `200` with every upload method (`id`, `name`, `configured`, `default`, `provider`, `account`, `label`, `root`, `creds_source`, `current_folder`, provider extras), the default method, the local output folder, the settings snapshot, the work/accounts/settings paths and the platform's restart command |
+| `GET /` | none | `200` with the page, read from disk on every request with `Cache-Control: no-store`; `500` when the packaged page is missing |
+| `GET /config` | none | `200` with `providers` (one row per provider: `id`, `label`, `available`, `browser_setup`, `setup_hint`, `missing`, `alias_suggestion`, and `client_preset` for Drive/OneDrive) and every upload method (`id`/`alias`, `name`, `configured`, `default`, `provider`, `provider_label`, `account`, `label`, `root`, `creds_source`, `current_folder`, `needs_reauth`, `state`, provider extras), the default method, the local output folder, the settings snapshot, the work/accounts/settings paths and the platform's restart command. `state` is `connected`, `needs_sign_in` or `not_configured` |
 | `GET /config/browse` | query: `method`, `path` | `200` with `{path, parent, entries, truncated}` and, for a remote method, `root`. Local browsing lists directories only and only under the ingest roots, so a path outside them is `400`. A provider failure is `502` with the error redacted |
-| `POST /config/account` | `method`, `root`, `label` | `200 {ok, method, root}`; `400` for an unknown provider, a non-portable root or an invalid label; `404` for an account that does not exist yet |
+| `POST /config/account` | `method`, `root`, `label` | `200 {ok, method, root}`; `400` for an unknown provider, a non-portable root or an invalid label; `404` for an account that does not exist yet, because accounts are created by the `/config/accounts/*` routes. `method` accepts an alias or any historical spelling; an empty `root` or `label` leaves that field unchanged |
 | `POST /config/default` | `method` | `200 {ok, default_method}`; `400` for an unknown target; `404` for an unknown destination; `409` when the destination has no working credentials yet, because an unconfigured account is never made the default |
-| `POST /config/local-output` | `path` | `200 {ok, local_output}`; `400` for a path outside the allowed roots or one that cannot be created |
-| `POST /config/new-folder` | `parent`, `name` | `200 {ok, path}`; `400` for a nested or hidden name, or a name that is not a folder |
-| `POST /config/settings` | JSON object of env name to value | `200 {ok, saved, settings, restart_command}`, or `400 {ok: false, problems}` with every rejected value named. Nothing is written when any value is rejected |
-| `POST /config/forget` | `method` | `200 {ok, id, removed, notes}`; `400` for `local` or a malformed target. Removes the account's metadata, its secret files and its keychain item, the same work as `--remove-upload` |
+| `POST /config/local-output` | `path` | `200 {ok, local_output}`; `400` for a path outside the allowed roots. The folder picker only submits a folder it has just listed |
+| `POST /config/new-folder` | `parent`, `name` | `200 {ok, path}`; `400` for a nested or hidden name, a name that is not a folder, or a parent outside the local ingest roots. Local destinations only |
+| `POST /config/settings` | JSON object of setting name to value, for the three settings the page offers | `200 {ok, saved, settings, restart_command}`, or `400 {ok: false, problems}` naming every rejected value, including a setting the page does not offer. Nothing is written when any value is rejected. A key whose environment variable is set and non-empty is skipped before validation and omitted from `saved`, so its stored value can never be clobbered; a path must be absolute, an output folder that is an existing file or has a missing parent is rejected, and ingest roots must be absolute |
+| `POST /config/forget` | `method` (alias or historical id) | `200 {ok, id, removed, notes}`; `400` for `local` or a malformed target. Removes the account's metadata, its secret files and its keychain item, the same work as `--remove-upload`; a default that pointed at it is reset |
+| `POST /config/accounts/mega` | `alias`, `label`, `email`, `password`, `root` | `200 {ok, method, root}`. Verifies the login with megatools before storing anything in the existing keychain/`credentials.env` store. Using an existing account's alias re-credentials that account. `400` for bad credentials (`MEGA login failed - credentials were not stored`), an alias owned by another provider, missing megatools, or a first account that is already configured outside the page |
+| `POST /config/accounts/onedrive/start` | `alias`, `label` | `200 {ok, flow_id, user_code, verification_uri, expires_in, interval_s}`; the sign-in runs in a thread and the account is saved when it completes. `400` when msal or `ONEDRIVE_CLIENT_ID` is missing, or the alias is taken. Poll the status route with `flow_id` |
+| `GET /config/accounts/onedrive/status` | query: `flow_id` | `200 {status, method?, detail?}` where `status` is `pending`, `complete` or `error`; an unknown or expired flow is `status: "error"` |
+| `POST /config/accounts/drive/start` | `alias`, `label`, `client_id`, `client_secret` | `200 {ok, flow_id, auth_url, redirect_uri}`. Reuses `DRIVE_CLIENT_ID`/`DRIVE_CLIENT_SECRET`/`DRIVE_CLIENT_SECRET_FILE` when set, otherwise validates the posted pair and never persists the client secret. `400` for an unrecognized client, a missing client ID or missing google libraries. Open `auth_url` in a browser |
+| `GET /config/oauth/drive/callback` | query: `code`, `state` | Google's redirect target. Exchanges the code, saves the refresh token at the account's Drive credential path and answers a small self-contained HTML page that says the account is connected and closes the tab. `400` HTML for an unknown/expired `state` or a failed exchange |
+| `GET /config/accounts/drive/status` | query: `flow_id` | the same shape as the OneDrive status route |
+| `POST /config/accounts/update` | `method`, `alias`, `label` | `200 {ok, method, alias, label, default_method}` renames the alias and/or changes the display label while preserving root, credentials and the default; `409` for a taken alias, `400` for an invalid one, `404` for an unknown account. An omitted field is left alone; an empty `label` clears it |
 
-Covered by `tests/test_config_api.py`, including the origin gate, the local-root boundary, the credential check on the default, and the redaction of a provider failure.
+The Drive and OneDrive setup flows are held in memory for 10 minutes; a restart cancels a sign-in in progress, and an unknown or expired `flow_id` answers `200 {status: "error"}` so a polling client only branches on JSON. Covered by `tests/test_config_api.py`, including the origin gate, the local-root boundary, the credential check on the default, and the redaction of a provider failure. The browser account flows and alias resolution are covered by `tests/test_account_setup_api.py`, `tests/test_accounts.py` and `tests/test_upload_methods.py`.
 
 ## GET /queue
 Read-only OCR queue metrics for backpressure monitoring, with session ids and numeric counts only. Response `200` is the `ocr_queue_metrics()` snapshot: `scheduler` (`round_robin` or `fifo`), `queue_depth`, `processing_depth`, `total_depth`, `per_session` rows, `active_batch_sessions`, `active_sessions`, `source_ingesting_sessions` and a `worker` object with `started`, `alive`, `state` and `model_loaded`. Covered by `tests/test_ocr_scheduling.py`.
@@ -171,5 +182,6 @@ The one call a client makes before anything else. It never performs network I/O:
 - `fetchProxyPorts`, `fetchUpstreams`, `fetchPathUpstream`
 - `active_sessions`, `ocr_chunk_size`, `ocr_idle_flush_s`, `ocr_queue_depth`, `ocr_processing_depth`, `ocr_queue_sessions`, `ocr_active_batch_sessions`, `ocr_worker`
 - `busy`, `busy_stage` and `busy_detail`, derived from the activity tracker plus queued work
+- `upload`, present only while a volume is uploading: `file`, `percent`, `current_bytes`, `total_bytes` and `speed_human`, taken from the active session's upload state. The field is absent when nothing is uploading
 
 Covered by `tests/test_optional_ocr.py` at the route level and by `tests/test_update.py` for the update fields.

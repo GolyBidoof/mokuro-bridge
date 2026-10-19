@@ -11,9 +11,16 @@ import os
 import shutil
 import sys
 import time
+import unicodedata
 import urllib.request
+from urllib.parse import urlsplit, urlunsplit
 
 from . import APP_NAME, __version__
+
+try:  # wcwidth knows emoji and width-ambiguous characters; fall back to unicodedata
+    from wcwidth import wcwidth as _wcwidth
+except Exception:  # pragma: no cover - exercised where wcwidth is not installed
+    _wcwidth = None
 
 ALT_ON = "\x1b[?1049h"
 ALT_OFF = "\x1b[?1049l"
@@ -29,8 +36,62 @@ YELLOW = "\x1b[33m"
 CYAN = "\x1b[36m"
 
 DEFAULT_URL = "http://127.0.0.1:62642"
-NARROW_WIDTH = 60
-FOOTER = "q quit   r refresh   c config URL"
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = "62642"
+# Below this width the compact body is used; at and above it the full body must
+# fit without dropping destinations or the OCR worker state (see _pipeline_rows).
+NARROW_WIDTH = 46
+FOOTER = "q quit   r refresh   c dashboard   ? help"
+FOOTER_SHORT = "q quit  ? help"
+FETCH_TIMEOUT_S = 3.0
+HELP_TEXT = (
+    "\n  mokuro-bridge status\n"
+    "\n  q quit    r refresh    c dashboard URL    ? this help\n"
+    "\n  ★  default destination\n"
+    "  ●  destination configured\n"
+    "  ○  destination not configured\n"
+    "\n  Settings, destination folders and accounts are edited in the web\n"
+    "  dashboard the bridge serves (press c for its address).\n"
+    "\n  press any key to return\n"
+)
+DASHBOARD_TEXT = (
+    "\n  dashboard: {url}\n"
+    "  Settings, destination folders and accounts are edited in that page.\n"
+    "  press any key to return, q to quit\n"
+)
+
+
+# --- display width ---------------------------------------------------------
+
+
+def _char_width(char):
+    if _wcwidth is not None:
+        width = _wcwidth(char)
+        return width if width > 0 else 0
+    if unicodedata.combining(char):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+
+def display_width(text):
+    """Terminal columns *text* occupies (wide characters count 2, combining marks 0)."""
+    return sum(_char_width(char) for char in str(text))
+
+
+def _take_width(text, limit):
+    """Longest prefix of *text* within *limit* columns, never splitting a combining mark."""
+    if limit <= 0:
+        return ""
+    text = str(text)
+    used = 0
+    end = 0
+    for index, char in enumerate(text):
+        width = _char_width(char)
+        if used + width > limit:
+            break
+        used += width
+        end = index + 1
+    return text[:end]
 
 
 def _text(value, default="-"):
@@ -73,9 +134,18 @@ def _clip(text, limit):
     if limit <= 0:
         return ""
     text = _text(text, "")
-    if len(text) <= limit:
+    if display_width(text) <= limit:
         return text
-    return text[: limit - 1] + "…" if limit > 1 else "…"
+    if limit == 1:
+        return "…"
+    return _take_width(text, limit - 1) + "…"
+
+
+def _pad(text, width):
+    """Clip *text* to *width* columns, then pad with spaces to exactly *width*."""
+    width = max(0, int(width))
+    piece = _clip(text, width)
+    return piece + " " * max(0, width - display_width(piece))
 
 
 def _bytes_human(value):
@@ -138,11 +208,67 @@ def _now_text(health):
     return "idle"
 
 
+# --- URLs ------------------------------------------------------------------
+
+
+def _normalize_base_url(value):
+    """One URL shape for display and fetching: scheme once, no trailing slash, IPv6 bracketed."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = "http://" + text
+    scheme, _, rest = text.partition("://")
+    authority, slash, path = rest.partition("/")
+    if authority and ":" in authority and not authority.startswith("[") and authority.count(":") >= 2:
+        authority = f"[{authority}]"
+    tail = "/" + path.rstrip("/") if slash and path.strip("/") else ""
+    return f"{scheme}://{authority}{tail}"
+
+
+def _url_for(host, port):
+    """Build a base URL from a host/port pair, preserving an explicit scheme and bracketing IPv6."""
+    host = str(host or "").strip()
+    port = str(port or "").strip()
+    if "://" in host:
+        parts = urlsplit(host)
+        scheme = parts.scheme or "http"
+        netloc = parts.netloc
+        if port and parts.port is None:
+            netloc = f"{netloc}:{port}"
+        path = "/" + parts.path.strip("/") if parts.path.strip("/") else ""
+        return urlunsplit((scheme, netloc, path, "", ""))
+    if host.count(":") == 1 and host.rsplit(":", 1)[1].isdigit():
+        host, host_port = host.rsplit(":", 1)
+        port = host_port
+    if not host:
+        host = DEFAULT_HOST
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{port or DEFAULT_PORT}"
+
+
 def _host_url(host_header):
     if not host_header:
         return ""
-    text = str(host_header)
-    return text if "://" in text else f"http://{text}"
+    return _normalize_base_url(host_header)
+
+
+def _env_url():
+    host = os.environ.get("MOKURO_BRIDGE_HOST")
+    port = os.environ.get("MOKURO_BRIDGE_PORT")
+    if not host and not port:
+        return DEFAULT_URL
+    return _url_for(host, port)
+
+
+def _no_color():
+    if os.environ.get("NO_COLOR"):
+        return True
+    return os.environ.get("TERM", "").strip() == "dumb"
+
+
+# --- layout helpers --------------------------------------------------------
 
 
 def _trim(segments, width):
@@ -151,28 +277,74 @@ def _trim(segments, width):
     for text, style in segments:
         if left <= 0:
             break
-        piece = text[:left]
+        piece = _take_width(text, left)
         out.append((piece, style))
-        left -= len(piece)
+        left -= display_width(piece)
     return out
 
 
+def _fit_line(segments, width):
+    segments = _trim(segments, width)
+    used = sum(display_width(text) for text, _ in segments)
+    if used < width:
+        segments = segments + [(" " * (width - used), None)]
+    return segments
+
+
 def _top_border(width, title, url, pill, pill_style):
-    head = [("┌─ ", DIM), (_clip(title, max(4, width - 24)), BOLD), (" ", None)]
-    tail = []
+    """Top rule with the status pill, an optional URL and an always-present ``┐``."""
+    if width <= 0:
+        return []
+    if width < 4:
+        return [("─" * width, DIM)]
+    if width < 10:
+        return [("┌" + "─" * (width - 2) + "┐", DIM)]
+    reserve = 2  # "─┐"
+    budget = width - reserve
+    pill_text = f" {pill} "
+    pill_room = min(display_width(pill_text), max(4, budget // 2))
+    right = [(_clip(pill_text, pill_room), pill_style)]
     if url:
-        tail.append((f" {_clip(url, max(0, width // 4))} ", None))
-    tail.append((f" {_clip(pill, max(4, width // 2))} ", pill_style))
-    tail.append(("─┐", DIM))
-    used = sum(len(text) for text, _ in head + tail)
-    return _trim(head + [("─" * max(1, width - used), DIM)] + tail, width)
+        url_text = f" {url} "
+        url_room = min(display_width(url_text), max(4, width // 4))
+        url_piece = _clip(url_text, url_room)
+        if display_width(url_piece) + 1 < budget - display_width(right[0][0]):
+            right.insert(0, (url_piece, None))
+    right_w = sum(display_width(text) for text, _ in right)
+    head_room = budget - right_w - 1  # keep at least one dash between the sides
+    if head_room < 4 and len(right) > 1:
+        right = right[-1:]
+        right_w = display_width(right[0][0])
+        head_room = budget - right_w - 1
+    if head_room < 4:
+        pill_room = max(2, budget - 5)
+        right = [(_clip(pill_text, pill_room), pill_style)]
+        right_w = display_width(right[0][0])
+        head_room = budget - right_w - 1
+    title_room = max(0, head_room - 4)
+    left = [("┌─ ", DIM), (_clip(title, title_room), BOLD), (" ", None)]
+    used = 4 + display_width(left[1][0]) + right_w
+    fill = max(1, width - used - reserve)
+    return _fit_line(left + [("─" * fill, DIM)] + right + [("─┐", DIM)], width)
 
 
 def _bottom_border(width):
-    head = [("└─ ", DIM), (FOOTER, None), (" ", None)]
-    tail = [("─┘", DIM)]
-    used = sum(len(text) for text, _ in head + tail)
-    return _trim(head + [("─" * max(1, width - used), DIM)] + tail, width)
+    """Bottom rule; keeps the quit hint and an always-present ``┘``."""
+    if width <= 0:
+        return []
+    if width < 4:
+        return [("─" * width, DIM)]
+    if width < 10:
+        return [("└" + "─" * (width - 2) + "┘", DIM)]
+    budget = width - 2
+    footer = FOOTER if budget >= display_width(FOOTER) + 5 else FOOTER_SHORT
+    if 3 + display_width(footer) + 1 <= budget:
+        left = [("└─ ", DIM), (footer, None), (" ", None)]
+    else:
+        left = [("└─ ", DIM), (_clip(footer, max(0, budget - 3)), None)]
+    used = sum(display_width(text) for text, _ in left)
+    fill = max(0, width - used - 2)
+    return _fit_line(left + [("─" * fill, DIM), ("─┘", DIM)], width)
 
 
 def _row(segments, inner):
@@ -183,7 +355,7 @@ def _row(segments, inner):
             break
         piece = _clip(text, left)
         out.append((piece, style))
-        left -= len(piece)
+        left -= display_width(piece)
     if left > 0:
         out.append((" " * left, None))
     out.append((" │", DIM))
@@ -202,7 +374,7 @@ def _destination_rows(health, inner):
             continue
         star = "★" if method.get("id") == default_id else " "
         dot = "●" if method.get("configured") else "○"
-        name = _clip(method.get("name") or method.get("id"), name_width).ljust(name_width)
+        name = _pad(method.get("name") or method.get("id"), name_width)
         path = (
             method.get("root")
             or method.get("library_root")
@@ -212,6 +384,19 @@ def _destination_rows(health, inner):
         )
         rows.append([(f"  {star} {dot} {name}  {_clip(path, inner - name_width - 8)}", None)])
     return rows or [[("  -", None)]]
+
+
+def _default_destination(health):
+    methods = health.get("upload_methods")
+    default_id = health.get("upload_method_default")
+    if not isinstance(methods, list):
+        return "-"
+    for method in methods:
+        if not isinstance(method, dict):
+            continue
+        if method.get("id") == default_id or (not default_id and method.get("default")):
+            return _text(method.get("name") or method.get("id"))
+    return "-"
 
 
 def _upload_line(upload, inner):
@@ -224,6 +409,31 @@ def _upload_line(upload, inner):
         f"  {_text(upload.get('speed_human'))}"
     )
     return (text, None)
+
+
+def _pipeline_rows(health, inner):
+    """Queue metrics; wraps instead of hiding the worker state word at mid widths."""
+    queue = (
+        f"  queue {_int(health.get('ocr_queue_depth'))}"
+        f"   processing {_int(health.get('ocr_processing_depth'))}"
+        f"   sessions {_int(health.get('active_sessions'))}"
+        f"   chunk {_int(health.get('ocr_chunk_size'))}"
+        f"   idle-flush {_seconds(health.get('ocr_idle_flush_s'))}"
+        f"   worker {_worker_state(health.get('ocr_worker'))}"
+    )
+    if display_width(queue) <= inner:
+        return [[(queue, None)]]
+    first = (
+        f"  queue {_int(health.get('ocr_queue_depth'))}"
+        f"   processing {_int(health.get('ocr_processing_depth'))}"
+        f"   sessions {_int(health.get('active_sessions'))}"
+    )
+    second = (
+        f"  worker {_worker_state(health.get('ocr_worker'))}"
+        f"   chunk {_int(health.get('ocr_chunk_size'))}"
+        f"   idle-flush {_seconds(health.get('ocr_idle_flush_s'))}"
+    )
+    return [[(_clip(line, inner), None)] for line in (first, second)]
 
 
 def _normal_body(health, upload, inner):
@@ -243,12 +453,7 @@ def _normal_body(health, upload, inner):
 
     rows.append([])
     rows.append([("PIPELINE", CYAN)])
-    rows.append([(f"  queue {_int(health.get('ocr_queue_depth'))}"
-                  f"   processing {_int(health.get('ocr_processing_depth'))}"
-                  f"   sessions {_int(health.get('active_sessions'))}"
-                  f"   chunk {_int(health.get('ocr_chunk_size'))}"
-                  f"   idle-flush {_seconds(health.get('ocr_idle_flush_s'))}"
-                  f"   worker {_worker_state(health.get('ocr_worker'))}", None)])
+    rows.extend(_pipeline_rows(health, inner))
     if isinstance(upload, dict):
         rows.append([_upload_line(upload, inner)])
 
@@ -269,22 +474,26 @@ def _normal_body(health, upload, inner):
     return rows
 
 
-def _narrow_body(health):
-    return [
+def _narrow_body(health, upload, inner):
+    """Compact body: status, engine, queue + worker, default destination, activity."""
+    rows = [
         [(f"status   {_text(health.get('status'))}", None)],
         [(f"engine   {_text(health.get('mokuro_flavor'))}", None)],
-        [(f"queue    {_int(health.get('ocr_queue_depth'))} / {_int(health.get('ocr_processing_depth'))}", None)],
+        [(f"queue    {_int(health.get('ocr_queue_depth'))} / {_int(health.get('ocr_processing_depth'))}"
+          f"   worker {_worker_state(health.get('ocr_worker'))}", None)],
+        [(f"output   {_clip(_default_destination(health), inner - 11)}", None)],
         [(f"now      {_now_text(health)}", None)],
     ]
+    if isinstance(upload, dict):
+        rows.insert(4, [(f"upload   {_percent(upload):3.0f}%  "
+                         f"{_clip(upload.get('file'), inner - 16)}", None)])
+    return rows
 
 
 def _render(lines, width, height, color):
     out = []
     for segments in lines[:height]:
-        segments = _trim(segments, width)
-        visible = sum(len(text) for text, _ in segments)
-        if visible < width:
-            segments = segments + [(" " * (width - visible), None)]
+        segments = _fit_line(segments, width)
         if color:
             out.append("".join(f"{style or ''}{text}{RESET if style else ''}" for text, style in segments))
         else:
@@ -304,7 +513,10 @@ def render_status(health: dict, *, width: int = 100, height: int = 30, color: bo
     inner = max(1, width - 4)
     title = f"{_text(health.get('app'), APP_NAME)} {_text(health.get('version'), __version__)}"
     pill, pill_style = _pill(health)
-    body = _narrow_body(health) if width < NARROW_WIDTH else _normal_body(health, upload, inner)
+    if width < NARROW_WIDTH:
+        body = _narrow_body(health, upload, inner)
+    else:
+        body = _normal_body(health, upload, inner)
     capacity = max(0, height - 2)
     rows = [_row(row, inner) for row in body[:capacity]]
     rows += [_row([], inner)] * (capacity - len(rows))
@@ -314,8 +526,11 @@ def render_status(health: dict, *, width: int = 100, height: int = 30, color: bo
     return _render(lines, width, height, color)
 
 
+# --- polling and terminal ownership ---------------------------------------
+
+
 def _http_get_json(url):
-    with urllib.request.urlopen(url, timeout=10) as response:
+    with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT_S) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -392,9 +607,26 @@ def _read_key(state, reader, timeout):
     return sys.stdin.read(1) or ""
 
 
-def _terminal_size(fallback_width=100, fallback_height=30):
+def _terminal_size(fallback_width=100, fallback_height=30, *, reserve_last=True):
     size = shutil.get_terminal_size((fallback_width, fallback_height))
-    return max(20, size.columns), max(6, size.lines - 1)
+    height = size.lines - 1 if reserve_last else size.lines
+    return max(20, size.columns), max(6, height)
+
+
+def _single_frame(stream, health, width, height, host_header):
+    stream.write(render_status(health, width=width, height=height,
+                               upload=health.get("upload"), host_header=host_header) + "\n")
+    stream.flush()
+
+
+def _pause(stream, state, reader, text):
+    """Leave the alt screen, show *text*, and wait up to five seconds for a key."""
+    stream.write(ALT_OFF + CURSOR_SHOW + text)
+    stream.flush()
+    key = _read_key(state, reader, 5.0)
+    stream.write(ALT_ON + CURSOR_HIDE)
+    stream.flush()
+    return key
 
 
 def run_status(base_url: str, *, interval_s: float = 2.0, stream=None, fetch=None, keys=None) -> int:
@@ -407,50 +639,52 @@ def run_status(base_url: str, *, interval_s: float = 2.0, stream=None, fetch=Non
     fetch = _http_get_json if fetch is None else fetch
     reader = _key_reader(keys)
     interval = max(0.05, float(interval_s))
+    base_url = _normalize_base_url(base_url) or DEFAULT_URL
     try:
         interactive = bool(stream.isatty())
     except Exception:
         interactive = False
 
-    width, height = _terminal_size()
     if not interactive:
-        frame = _fetch_health(fetch, base_url)
-        stream.write(render_status(frame, width=width, height=height, host_header=base_url) + "\n")
-        stream.flush()
+        # A snapshot is full-height: it is not fighting the terminal for space.
+        width, height = _terminal_size(reserve_last=False)
+        _single_frame(stream, _fetch_health(fetch, base_url), width, height, base_url)
         return 0
 
     state = None
     if reader is None:
         state = _enter_raw()
         if state is None:
-            frame = _fetch_health(fetch, base_url)
-            stream.write(render_status(frame, width=width, height=height, host_header=base_url) + "\n")
-            stream.flush()
+            width, height = _terminal_size()
+            _single_frame(stream, _fetch_health(fetch, base_url), width, height, base_url)
             return 0
 
+    color = not _no_color()
     stream.write(ALT_ON + CURSOR_HIDE)
     stream.flush()
     try:
         deadline = 0.0
         while True:
+            width, height = _terminal_size()  # re-read each frame so a resize is picked up
             now = time.monotonic()
             if now >= deadline:
                 health = _fetch_health(fetch, base_url)
-                stream.write(HOME + render_status(health, width=width, height=height, color=True,
-                                                  host_header=base_url))
+                stream.write(HOME + render_status(health, width=width, height=height, color=color,
+                                                  upload=health.get("upload"), host_header=base_url))
                 stream.flush()
                 deadline = time.monotonic() + interval
-            key = _read_key(state, reader, deadline - time.monotonic())
-            if key == "q":
+            key = _read_key(state, reader, max(0.0, deadline - time.monotonic()))
+            if key in ("q", "Q"):
                 break
             if key == "r":
                 deadline = 0.0
             elif key == "c":
-                stream.write(ALT_OFF + CURSOR_SHOW + f"\n  dashboard: {base_url}\n  press any key…")
-                stream.flush()
-                _read_key(state, reader, 5.0)
-                stream.write(ALT_ON + CURSOR_HIDE)
-                stream.flush()
+                if _pause(stream, state, reader, DASHBOARD_TEXT.format(url=base_url)) in ("q", "Q"):
+                    break
+                deadline = 0.0
+            elif key == "?":
+                if _pause(stream, state, reader, HELP_TEXT) in ("q", "Q"):
+                    break
                 deadline = 0.0
         return 0
     except KeyboardInterrupt:
@@ -461,18 +695,29 @@ def run_status(base_url: str, *, interval_s: float = 2.0, stream=None, fetch=Non
         stream.flush()
 
 
-def _env_url():
-    if "MOKURO_BRIDGE_HOST" not in os.environ and "MOKURO_BRIDGE_PORT" not in os.environ:
-        return DEFAULT_URL
-    host = os.environ.get("MOKURO_BRIDGE_HOST") or "127.0.0.1"
-    port = os.environ.get("MOKURO_BRIDGE_PORT") or "62642"
-    return f"http://{host}:{port}"
+def main(argv: list[str] | None = None, *, host=None, port=None,
+         status_url: str = "", status_interval: float | None = None) -> int:
+    """Entry point for ``mokuro-bridge --status``.
 
-
-def main(argv: list[str] | None = None) -> int:
-    """Entry point for ``mokuro-bridge --status``; URL/interval come from argv or the environment."""
+    The CLI passes *host*/*port*/*status_url*/*status_interval* from its own parse so
+    ``--status`` honours the same flags as the server; a direct call may pass only
+    *argv* and falls back to the environment and ``DEFAULT_URL``.
+    """
     parser = argparse.ArgumentParser(prog="mokuro-bridge --status", add_help=False, allow_abbrev=False)
     parser.add_argument("--status-url", default=None)
-    parser.add_argument("--status-interval", type=float, default=2.0)
+    parser.add_argument("--status-interval", type=float, default=None)
     args, _ = parser.parse_known_args(argv)
-    return run_status(args.status_url or _env_url(), interval_s=args.status_interval)
+    url = status_url or args.status_url
+    if status_interval is not None:
+        interval = status_interval
+    elif args.status_interval is not None:
+        interval = args.status_interval
+    else:
+        interval = 2.0
+    if url:
+        base_url = _normalize_base_url(url)
+    elif host is not None or port is not None:
+        base_url = _url_for(host, port)
+    else:
+        base_url = _env_url()
+    return run_status(base_url, interval_s=interval)

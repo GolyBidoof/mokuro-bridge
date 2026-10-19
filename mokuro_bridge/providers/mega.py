@@ -85,6 +85,104 @@ def _get_mega_creds(name: str = DEFAULT_NAME) -> tuple[str, str]:
         f"--setup-upload mega --name {name}`."
     )
 
+def store_mega_account(
+    name: str,
+    email: str,
+    password: str,
+    *,
+    alias: Optional[str] = None,
+    label: Optional[str] = None,
+    root: Optional[str] = None,
+) -> tuple[accounts.Instance, str, Optional[Path]]:
+    """Persist verified MEGA credentials and account metadata (no prompting).
+
+    Shared by the terminal wizard and the dashboard's browser setup, so the two
+    cannot disagree about where a secret goes: the OS store first (keychain on
+    macOS), the account's 0600 credentials file as fallback. Callers verify the
+    credentials first with ``_mega_verify_creds``.
+
+    Returns ``(instance, keychain_backend, creds_file)``; ``keychain_backend`` is
+    '' when the OS store was unavailable and ``creds_file`` is the fallback path
+    only when it was actually written.
+    """
+    instance = accounts.load_instance("mega", name)
+    previous_email = ""
+    if instance is not None and instance.tracked:
+        previous_email = instance.email
+    if not previous_email and name == DEFAULT_NAME:
+        previous_email = _keychain_mega_account() or ""
+    others = {
+        i.email
+        for i in accounts.instances_for("mega")
+        if i.email and i.name != name
+    }
+    stale = (
+        [previous_email]
+        if previous_email and previous_email != email and previous_email not in others
+        else []
+    )
+    backend = ""
+    try:
+        backend = _store_mega_creds_os(email, password, stale)
+    except RuntimeError:
+        backend = ""  # no OS store: the credentials file below is the fallback
+    stored = accounts.save_instance(
+        "mega",
+        name,
+        label=(label or None),
+        root=(root or None),
+        extra={"email": email},
+        alias=alias,
+    )
+    secret_file = (
+        MEGA_CREDS_FILE if name == DEFAULT_NAME else _mega_account_secret_file(name)
+    )
+    written: Optional[Path] = None
+    if not _mega_creds_source(name):
+        _write_creds_file(email, password, secret_file)
+        written = secret_file
+    return stored, backend, written
+
+def _creds_file_email(path: Path) -> str:
+    """The MEGA_EMAIL value in one credentials file, without reading the password.
+
+    Used only to show which account a destination belongs to; the file's
+    password line is never parsed, held or returned here.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip().upper() == "MEGA_EMAIL":
+            return value.strip().strip('"').strip("'")
+    return ""
+
+def account_identity(instance: accounts.Instance) -> str:
+    """The non-secret identity (username/email) of one MEGA account, or "".
+
+    Prefers the email recorded in the account metadata, then reads only the
+    username from the credential the account actually uses: MEGA_EMAIL for the
+    default account (environment first, then the 0600 credentials file, then the
+    OS keychain item), or a named account's own 0600 credentials file. The
+    password is never read here, never logged and never returned. A megarc is
+    transient, so it is not an identity source.
+    """
+    if instance.email:
+        return instance.email
+    name = instance.name
+    if name == DEFAULT_NAME:
+        env_email = os.environ.get("MEGA_EMAIL", "").strip()
+        if env_email:
+            return env_email
+        email = _creds_file_email(MEGA_CREDS_FILE)
+        if email:
+            return email
+        account = _keychain_mega_account()
+        return str(account or "").strip()
+    return _creds_file_email(_mega_account_secret_file(name))
+
 def _run_setup_mega(
     name: Optional[str] = None, root: str = "", label: str = ""
 ) -> None:
@@ -156,49 +254,19 @@ def _run_setup_mega(
         print(f"error: MEGA login failed — credentials not stored. {verify_err or ''}".strip())
         return
 
-    # Which keychain items this store leaves orphaned: the email this account
-    # used before, unless some *other* tracked account still uses it. Empty
-    # unless there really is something to drop, so adding an account never
-    # deletes a sibling account's item.
-    previous_email = ""
-    if instance is not None and instance.tracked:
-        previous_email = instance.email
-    if not previous_email and name == DEFAULT_NAME:
-        previous_email = _keychain_mega_account() or ""
-    others = {
-        i.email
-        for i in accounts.instances_for("mega")
-        if i.email and i.name != name
-    }
-    stale = (
-        [previous_email]
-        if previous_email and previous_email != email and previous_email not in others
-        else []
-    )
-
-    secret_file = (
-        MEGA_CREDS_FILE if name == DEFAULT_NAME else _mega_account_secret_file(name)
-    )
-    backend = ""
-    try:
-        backend = _store_mega_creds_os(email, password, stale)
-    except RuntimeError as exc:
-        print(f"{exc}; falling back to a credentials file.")
-
-    # Record the instance first: the source check below resolves a *named*
-    # account through its account file (name → email → keychain item).
-    stored = accounts.save_instance(
-        "mega",
+    stored, backend, written = store_mega_account(
         name,
-        label=(label or None),
-        root=(root or None),
-        extra={"email": email},
+        email,
+        password,
+        label=label or None,
+        root=root or None,
+        # New accounts persist their alias; an existing rename is respected.
+        alias=accounts.alias_for_storage("mega", name),
     )
     if backend:
         print(f"Stored in {backend}.")
-    if not _mega_creds_source(name):
-        _write_creds_file(email, password, secret_file)
-        print(f"Stored in {secret_file} (permissions 0600).")
+    if written is not None:
+        print(f"Stored in {written} (permissions 0600).")
     if stored is not None and stored.root:
         print(f"Remote root: {stored.root_path}")
     print(
