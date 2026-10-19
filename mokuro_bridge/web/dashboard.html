@@ -225,7 +225,9 @@
   .dot { width: 7px; height: 7px; border-radius: 999px; display: inline-block; flex: 0 0 auto; transform: translateY(-1px); }
   .dot[data-state="ok"] { background: var(--accent); }
   .dot[data-state="warn"] { background: #e5b567; }
-  .dot[data-state="off"] { background: var(--muted); opacity: .5; }
+  .dot[data-state="off"] { background: #e5534b; }
+  .dot[data-state="unknown"] { background: var(--muted); opacity: .5; }
+  .ver strong.is-action { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
   .gate-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin: 0 0 14px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
   .gate-banner strong { color: var(--text); }
   .dest-usage { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; margin-top: 8px; color: var(--muted); font-size: 12px; }
@@ -456,9 +458,9 @@
         <div class="stat stat-status">
           <dt>Setup status</dt>
           <dd class="versions-strip" aria-label="Installed components">
-            <div class="ver"><i class="dot" id="dot-bridge" data-state="ok"></i><span class="ver-name">bridge</span><strong id="ver-bridge">—</strong><span class="ver-note" id="ver-bridge-state">checking…</span><button class="link" type="button" id="check-update">Check now</button></div>
-            <div class="ver"><i class="dot" id="dot-mokuro" data-state="off"></i><span class="ver-name">mokuro</span><strong id="ver-mokuro">—</strong><span class="ver-note" id="ver-mokuro-note"></span></div>
-            <div class="ver"><i class="dot" id="dot-bunko" data-state="off"></i><span class="ver-name">mokuro-bunko</span><strong id="ver-bunko">—</strong><span class="ver-note" id="ver-bunko-note"></span></div>
+            <div class="ver"><i class="dot" id="dot-bridge" data-state="unknown"></i><span class="ver-name">bridge</span><strong id="ver-bridge">—</strong><span class="ver-note" id="ver-bridge-state"></span></div>
+            <div class="ver"><i class="dot" id="dot-mokuro" data-state="unknown"></i><span class="ver-name">mokuro</span><strong id="ver-mokuro">—</strong><span class="ver-note" id="ver-mokuro-note"></span></div>
+            <div class="ver"><i class="dot" id="dot-bunko" data-state="unknown"></i><span class="ver-name">mokuro-bunko</span><strong id="ver-bunko">—</strong><span class="ver-note" id="ver-bunko-note"></span></div>
           </dd>
         </div>
       </dl>
@@ -1210,58 +1212,93 @@ function setupHintFor(provider) {
   return providerDescriptor(provider).setupHint;
 }
 
+function setDot(id, state) {
+  const dot = document.getElementById(id);
+  if (dot) dot.dataset.state = state;
+}
+
+function markAction(id, action, title) {
+  const node = document.getElementById(id);
+  if (!node) return;
+  if (!action) {
+    node.classList.remove("is-action");
+    node.onclick = null;
+    node.title = "";
+    return;
+  }
+  node.classList.add("is-action");
+  node.title = title || "Update";
+  node.onclick = action;
+}
+
 function renderVersions() {
   const h = state.health || {};
+  const engines = state.engines || {};
+  const mokuroInfo = engines.mokuro || {};
+  const bunkoInfo = engines.bunko || null;
+
+  // mokuro-bridge
+  const bridgeState = h.update_available ? "warn" : "ok";
+  setDot("dot-bridge", bridgeState);
   const bridge = $("ver-bridge");
   if (bridge) bridge.textContent = h.version ? `v${h.version}` : "unknown";
-  const dotBridge = $("dot-bridge");
-  if (dotBridge) dotBridge.dataset.state = h.update_available ? "warn" : (h.update_error ? "warn" : "ok");
-  const bridgeState = $("ver-bridge-state");
-  if (bridgeState) {
-    if (h.update_error) {
-      bridgeState.textContent = "check failed";
-      bridgeState.title = String(h.update_error);
-    } else if (h.update_available && h.latest_version) {
-      bridgeState.innerHTML = `<a class="inline-link" href="${esc(h.update_url || "#")}" target="_blank" rel="noopener">v${esc(h.latest_version)} available ↗</a>`;
-    } else if (h.latest_version) {
-      bridgeState.textContent = "up to date";
-    } else {
-      bridgeState.textContent = "not checked yet";
-    }
-  }
+  const bridgeNote = $("ver-bridge-state");
+  if (bridgeNote) bridgeNote.textContent = h.update_available && h.latest_version ? `v${h.latest_version} available` : "";
+  markAction("ver-bridge", h.update_available ? async () => {
+    bridgeNote.textContent = "updating…";
+    try {
+      const result = await postForm("/config/update/apply", {});
+      toast(result.ok
+        ? "Bridge updated. Restart the bridge to load the new version."
+        : "The bridge update did not finish; see the log below.", result.ok ? "info" : "bad");
+      await loadHealth();
+    } catch (error) { toast(error.message, "bad"); }
+  } : null, "Update mokuro-bridge");
+
+  // mokuro
+  const mokuroInstalled = h.mokuro_installed !== false;
+  const mokuroNewest = mokuroInstalled && h.mokuro_flavor === "fork";
+  setDot("dot-mokuro", !mokuroInstalled ? "off" : mokuroNewest ? "ok" : "warn");
   const mokuro = $("ver-mokuro");
-  const dotMokuro = $("dot-mokuro");
-  if (dotMokuro) dotMokuro.dataset.state = h.mokuro_installed !== false ? "ok" : "off";
-  if (mokuro) {
-    const installed = h.mokuro_installed !== false;
-    mokuro.textContent = installed && h.mokuro_version ? `v${h.mokuro_version}` : "not installed";
-    const note = $("ver-mokuro-note");
-    if (note) note.textContent = installed
-      ? (h.mokuro_flavor === "fork" ? "GolyBidoof fork" : h.mokuro_flavor === "upstream" ? "upstream build" : (h.mokuro_flavor || "installed"))
-      : "";
-  }
+  if (mokuro) mokuro.textContent = mokuroInstalled && h.mokuro_version ? `v${h.mokuro_version}` : "not installed";
+  const mokuroNote = $("ver-mokuro-note");
+  if (mokuroNote) mokuroNote.textContent = mokuroInstalled
+    ? (h.mokuro_flavor === "fork" ? "GolyBidoof fork" : h.mokuro_flavor === "upstream" ? "upstream build" : (h.mokuro_flavor || "installed"))
+    : "";
+  markAction("ver-mokuro", mokuroNewest ? null : () => installEngine("mokuro", {}),
+    mokuroInstalled ? "Replace with the faster GolyBidoof build" : "Install mokuro");
+
+  // mokuro-bunko
+  const bunkoInstalled = Boolean(bunkoInfo && bunkoInfo.installed);
+  const bunkoNewest = bunkoInstalled && !(bunkoInfo && bunkoInfo.update_available);
+  setDot("dot-bunko", !bunkoInstalled ? "off" : bunkoNewest ? "ok" : "warn");
   const bunko = $("ver-bunko");
-  const bunkoNote = $("ver-bunko-note");
-  const info = state.engines && state.engines.bunko;
-  const dotBunko = $("dot-bunko");
-  if (dotBunko) dotBunko.dataset.state = info && info.installed ? "ok" : "off";
   if (bunko) {
-    if (!info) {
-      bunko.textContent = "—";
-      if (bunkoNote) bunkoNote.textContent = "";
-    } else if (!info.installed) {
-      bunko.textContent = "not installed";
-      if (bunkoNote) bunkoNote.textContent = "";
-    } else {
-      const short = String(info.version || "").slice(0, 8);
-      bunko.textContent = short ? short : "installed";
-      const sync = info.sync || {};
-      if (bunkoNote) {
-        bunkoNote.textContent = sync.running
-          ? `following ${sync.configured_method || "the default"}`
-          : (sync.configured_method ? `library on ${sync.configured_method}` : "installed");
-      }
-    }
+    if (!bunkoInfo) bunko.textContent = "checking…";
+    else if (!bunkoInstalled) bunko.textContent = "not installed";
+    else bunko.textContent = String(bunkoInfo.version || "").slice(0, 8) || "installed";
+  }
+  const bunkoNote = $("ver-bunko-note");
+  if (bunkoNote) {
+    bunkoNote.textContent = !bunkoInstalled
+      ? ""
+      : bunkoInfo.update_available
+        ? "update available"
+        : (bunkoInfo.sync && bunkoInfo.sync.configured_method ? `library on ${bunkoInfo.sync.configured_method}` : "installed");
+  }
+  if (!bunkoInstalled) {
+    markAction("ver-bunko", () => installEngine("bunko", {}), "Install mokuro-bunko");
+  } else if (bunkoInfo.update_available) {
+    markAction("ver-bunko", async () => {
+      if (!window.confirm("Rebuild mokuro-bunko at the newest development commit?")) return;
+      try {
+        await postForm("/config/engines/bunko/update", {});
+        toast("Updating mokuro-bunko…", "info");
+        startEnginePoll();
+      } catch (error) { toast(error.message, "bad"); }
+    }, "Update mokuro-bunko");
+  } else {
+    markAction("ver-bunko", null);
   }
 }
 
@@ -2566,15 +2603,7 @@ function bindDialogPlumbing() {
   $("open-wizard").onclick = () => openWizard(true);
   $("install-mokuro").onclick = () => installEngine("mokuro");
   $("install-bunko").onclick = () => installEngine("bunko", { totp: (document.getElementById("engine-bunko-totp") || {}).value || "" });
-  $("check-update").onclick = async () => {
-    try {
-      await postForm("/config/update/check", {});
-      await loadHealth();
-      toast(state.health && state.health.update_available
-        ? `mokuro-bridge ${state.health.latest_version} is available.`
-        : "mokuro-bridge is up to date.", "info");
-    } catch (error) { toast(error.message, "bad"); }
-  };
+
   $("uninstall-mokuro").onclick = async () => {
     if (!window.confirm("Uninstall mokuro? OCR pauses until it is installed again.")) return;
     try {
@@ -2709,7 +2738,7 @@ function renderEngines() {
 
 async function loadEngines() {
   try {
-    state.engines = await api("/config/engines");
+    state.engines = await api(`/config/engines?t=${Date.now()}`);
     renderEngines();
     renderGates();
     renderVersions();
@@ -2722,7 +2751,7 @@ function startEnginePoll() {
   if (state.enginePoll) return;
   state.enginePoll = setInterval(async () => {
     try {
-      state.engines = await api("/config/engines");
+      state.engines = await api(`/config/engines?t=${Date.now()}`);
       renderEngines();
       const running = ["mokuro", "bunko"].some((name) => engineJob(name).state === "running");
       if (!running) {

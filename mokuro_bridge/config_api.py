@@ -1599,6 +1599,8 @@ def _bunko_engine_status() -> dict:
             "method": method,
             "prerequisites": prerequisites,
             "sync": bunko_agent.sync_info(),
+            "update_available": bunko_agent.update_available(),
+            "latest_commit": bunko_agent.latest_commit(),
         }
     except Exception as error:
         return {"available": True, "installed": False, "version": None, "detail": str(error), "can_install": True}
@@ -1662,15 +1664,18 @@ def _run_bunko_install_job(method: Optional[str], totp: Optional[str]) -> None:
 
 @router.get("/config/engines")
 async def read_engines() -> JSONResponse:
+    # Installed engines change at runtime, and a cached "not installed" answer
+    # left the dashboard red until a hard reload.
     return JSONResponse(
-        {
+        headers={"Cache-Control": "no-store, max-age=0"},
+        content={
             "mokuro": await asyncio.to_thread(_mokuro_engine_status),
             "bunko": await asyncio.to_thread(_bunko_engine_status),
             "jobs": {
                 "mokuro": _engine_job_json("mokuro"),
                 "bunko": _engine_job_json("bunko"),
             },
-        }
+        },
     )
 
 
@@ -1680,6 +1685,72 @@ def _start_engine_job(name: str, runner, *args) -> None:
             state="running", code=None, output="", started=time.time(), finished=0.0
         )
     threading.Thread(target=runner, args=args, name=f"install-{name}", daemon=True).start()
+
+
+def _run_bunko_update_job() -> None:
+    import contextlib
+    import io
+
+    def stream(message: str) -> None:
+        line = str(message).rstrip()
+        if not line:
+            return
+        with _ENGINE_LOCK:
+            current = _ENGINE_JOBS["bunko"].get("output", "")
+            _ENGINE_JOBS["bunko"]["output"] = (current + "\n" + line)[-6000:]
+
+    code = 1
+    try:
+        from . import bunko_agent
+
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            bunko_agent.update(log=stream)
+        code = 0
+    except Exception as error:
+        stream(f"{type(error).__name__}: {error}")
+    with _ENGINE_LOCK:
+        _ENGINE_JOBS["bunko"].update(
+            state="done" if code == 0 else "error", code=code, finished=time.time()
+        )
+
+
+@router.post("/config/engines/bunko/update")
+async def update_bunko_engine(request: Request) -> JSONResponse:
+    """Rebuild Bunko at the newest development commit."""
+    _require_local_origin(request)
+    with _ENGINE_LOCK:
+        if _ENGINE_JOBS["bunko"]["state"] == "running":
+            raise HTTPException(status_code=409, detail="a mokuro-bunko job is already running")
+        _ENGINE_JOBS["bunko"].update(
+            state="running", code=None, output="", started=time.time(), finished=0.0
+        )
+    threading.Thread(target=_run_bunko_update_job, name="bunko-update", daemon=True).start()
+    return JSONResponse({"ok": True, "state": "running"}, status_code=202)
+
+
+@router.post("/config/update/apply")
+async def apply_bridge_update(request: Request) -> JSONResponse:
+    """Run the bridge's own updater; the process must be restarted afterwards."""
+    _require_local_origin(request)
+    import sys as _sys
+
+    try:
+        result = await asyncio.to_thread(
+            lambda: __import__("subprocess").run(
+                [_sys.executable, "-m", "mokuro_bridge", "--update"],
+                capture_output=True, text=True, timeout=300,
+            )
+        )
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+    output = ((result.stdout or "") + (result.stderr or ""))[-4000:]
+    return JSONResponse(
+        {
+            "ok": result.returncode == 0,
+            "output": output,
+            "restart_required": result.returncode == 0,
+        }
+    )
 
 
 @router.post("/config/update/check")

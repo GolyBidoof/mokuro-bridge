@@ -21,6 +21,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -872,6 +873,41 @@ def repoint(method: Optional[str] = None, *, log: Callable[[str], None] = print)
     target = method or sync_info()["default_method"]
     log(f"re-pointing mokuro-bunko to {target}")
     return setup(target, log=log, reuse_install=True)
+
+
+_LATEST_LOCK = threading.Lock()
+_LATEST = {"commit": "", "checked": 0.0, "busy": False}
+_LATEST_TTL_S = 600.0
+
+
+def latest_commit() -> str:
+    """The newest development commit, refreshed in the background when stale."""
+    with _LATEST_LOCK:
+        fresh = time.time() - _LATEST["checked"] < _LATEST_TTL_S
+        if fresh or _LATEST["busy"]:
+            return str(_LATEST["commit"] or "")
+        _LATEST["busy"] = True
+
+    def refresh() -> None:
+        try:
+            value = resolve_ref(None)
+        except Exception:
+            value = ""
+        with _LATEST_LOCK:
+            _LATEST.update(commit=value, checked=time.time(), busy=False)
+
+    threading.Thread(target=refresh, name="bunko-latest", daemon=True).start()
+    with _LATEST_LOCK:
+        return str(_LATEST["commit"] or "")
+
+
+def update_available() -> bool:
+    """True when the install is behind the newest development commit."""
+    state = load_state()
+    if state is None or not state.commit:
+        return False
+    latest = latest_commit()
+    return bool(latest and latest != state.commit)
 
 
 def sync_info() -> dict:
