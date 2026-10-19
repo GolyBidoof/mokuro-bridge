@@ -535,10 +535,6 @@
               <button class="btn big" id="install-bunko" type="button" disabled>Not available</button>
               <button class="btn danger big" id="uninstall-bunko" type="button" hidden>Uninstall mokuro-bunko</button>
             </div>
-            <details class="engine-field" id="engine-bunko-totp-row" hidden>
-              <summary>MEGA two-factor code (optional)</summary>
-              <label class="pref-help">Leave empty unless the MEGA sign-in asks for a code.<input type="text" id="engine-bunko-totp" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"></label>
-            </details>
           </div>
           <pre class="engine-log" id="engine-bunko-log" hidden></pre>
         </div>
@@ -2634,7 +2630,7 @@ function bindDialogPlumbing() {
   $("add-destination").onclick = () => openAdd();
   $("open-wizard").onclick = () => openWizard(true);
   $("install-mokuro").onclick = () => installEngine("mokuro");
-  $("install-bunko").onclick = () => installEngine("bunko", { totp: (document.getElementById("engine-bunko-totp") || {}).value || "" });
+  $("install-bunko").onclick = () => installEngine("bunko");
 
   $("uninstall-mokuro").onclick = async () => {
     if (!window.confirm("Uninstall mokuro? OCR pauses until it is installed again.")) return;
@@ -2766,13 +2762,6 @@ function renderEngines() {
       : (!prereqOk ? "Unavailable" : (ready ? "Install mokuro-bunko" : "Add a destination first"));
     bunkoButton.hidden = Boolean(bunko.installed);
     if (bunko.can_install === false && bunko.detail) $("engine-bunko-detail").textContent = bunko.detail;
-    const totpRow = $("engine-bunko-totp-row");
-    if (totpRow) totpRow.hidden = !(
-      String(bunko.method || "").startsWith("mega")
-      && ready && !bunko.installed && bunko.can_install !== false
-      && bunko.available !== false
-      && bunkoJob.state !== "running"
-    );
     const sync = bunko.sync || null;
     if (sync && sync.installed && !sync.in_sync && sync.can_sync) {
       const syncing = bunkoJob.state === "running";
@@ -3004,7 +2993,7 @@ function renderWizardEngineActions() {
       <h3 class="we-title">mokuro-bunko</h3>
       <p class="we-desc">${installed ? "Compiles series.json and catalog.json in your cloud library so new series appear in the reader without a rescan." : ready ? "Builds the library index in the cloud and keeps it fresh. The first install compiles it from source, which takes a few minutes." : "Compiles the library index in the cloud. It reads the folder the bridge uploads to, so add a cloud destination first."}</p>
       ${ready && !installed ? `<div class="we-actions"><button class="btn" type="button" id="wizard-install-bunko" ${running ? "disabled" : ""}>${running ? `Installing… ${bunkoJob.elapsed_s || 0}s` : failed ? "Try again" : "Install mokuro-bunko"}</button></div>` : ""}
-      ${ready && !installed && isMega ? `<details class="we-details"><summary>MEGA two-factor code</summary><label class="we-field">Only if your MEGA account uses two-factor sign-in.<input type="text" id="wizard-bunko-totp" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"></label></details>` : ""}
+
       ${running ? `<p class="we-foot">Keep this page open. Sign-in links and progress appear below.</p>` : ""}
       ${engineLogHtml(bunkoJob)}
     </div>`);
@@ -3016,7 +3005,7 @@ function renderWizardEngineActions() {
   if (button) button.onclick = () => installEngine("mokuro");
   const bunkoButton = document.getElementById("wizard-install-bunko");
   if (bunkoButton) {
-    bunkoButton.onclick = () => installEngine("bunko", { totp: (document.getElementById("wizard-bunko-totp") || {}).value || "" });
+    bunkoButton.onclick = () => installEngine("bunko");
   }
 }
 
