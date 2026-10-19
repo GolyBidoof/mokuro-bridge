@@ -368,6 +368,9 @@ _USAGE_LOCK = threading.Lock()
 _USAGE_CACHE: dict[str, tuple[float, dict]] = {}
 _USAGE_INFLIGHT: set[str] = set()
 _USAGE_TTL_S = 300.0
+_EMAIL_LOCK = threading.Lock()
+_EMAIL_CACHE: dict[str, str] = {}
+_EMAIL_INFLIGHT: set[str] = set()
 
 
 def _format_usage(data):
@@ -423,6 +426,32 @@ def _prefetch_usage(base_url, health, fetch):
                     _USAGE_CACHE[method_id] = (time.monotonic(), data)
 
         threading.Thread(target=load, name=f"usage-{method_id}", daemon=True).start()
+        _prefetch_email(base_url, method_id, fetch)
+
+
+def _prefetch_email(base_url, method_id, fetch):
+    if fetch is not _http_get_json or method_id == "local":
+        return
+    with _EMAIL_LOCK:
+        if method_id in _EMAIL_CACHE or method_id in _EMAIL_INFLIGHT:
+            return
+        _EMAIL_INFLIGHT.add(method_id)
+
+    def load():
+        try:
+            data = fetch(
+                base_url.rstrip("/")
+                + "/config/account-email?method="
+                + urllib.parse.quote(method_id, safe="")
+            )
+            email = str((data or {}).get("email") or "").strip()
+        except Exception:
+            email = ""
+        with _EMAIL_LOCK:
+            _EMAIL_INFLIGHT.discard(method_id)
+            _EMAIL_CACHE[method_id] = email
+
+    threading.Thread(target=load, name=f"email-{method_id}", daemon=True).start()
 
 
 def _usage_text(method_id):
@@ -451,7 +480,9 @@ def _destination_rows(health, inner):
             or "-"
         )
         detail = _usage_text(method.get("id"))
-        email = str(method.get("email") or "")
+        with _EMAIL_LOCK:
+            email = _EMAIL_CACHE.get(method.get("id") or "", "")
+        email = email or str(method.get("email") or "")
         if email and "·" not in email and email not in path:
             detail = f"{email} · {detail}" if detail else email
         suffix = f"  {detail}" if detail else ""
