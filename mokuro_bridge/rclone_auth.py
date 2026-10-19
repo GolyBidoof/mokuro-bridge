@@ -96,7 +96,9 @@ def _create(remote: str, kind: str, params: dict[str, str]) -> None:
 def check_remote(remote: str) -> tuple[bool, Optional[str]]:
     from .providers import rclone as rclone_provider
 
-    return rclone_provider.check_remote(remote if remote.endswith(":") else f"{remote}:")
+    return rclone_provider.check_remote(
+        remote if remote.endswith(":") else f"{remote}:", refresh=True
+    )
 
 
 def create_mega(
@@ -118,6 +120,7 @@ def create_mega(
     if code:
         params["2fa"] = code
     _create(remote, "mega", params)
+    _refresh_provider_caches()
     if check:
         ok, error = check_remote(remote)
         if not ok:
@@ -148,12 +151,19 @@ def create_webdav(
         "pass": obscure(str(password or "")),
     }
     _create(remote, "webdav", params)
+    _refresh_provider_caches()
     if check:
         ok, error = check_remote(remote)
         if not ok:
             _remove(remote)
             raise RcloneAuthError(error or "the WebDAV server refused those credentials")
     return remote, {"url": url, "username": str(username or "")}
+
+
+def _refresh_provider_caches() -> None:
+    from .providers import rclone as rclone_provider
+
+    rclone_provider.refresh_caches()
 
 
 def _remove(remote: str) -> None:
@@ -278,6 +288,7 @@ def finish_authorize(flow_id: str, remote_alias: str, *, root: str = "") -> tupl
     if kind == "onedrive":
         params["drive_type"] = "personal"
     _create(remote, kind, params)
+    _refresh_provider_caches()
     ok, error = check_remote(remote)
     if not ok:
         _remove(remote)

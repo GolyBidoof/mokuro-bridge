@@ -123,6 +123,15 @@ _dump_cache: Optional[tuple[float, dict]] = None
 _dump_lock = threading.Lock()
 
 
+def refresh_caches() -> None:
+    """Forget the cached remote list and config dump after a config change."""
+    global _remotes_cache, _dump_cache
+    with _remotes_lock:
+        _remotes_cache = None
+    with _dump_lock:
+        _dump_cache = None
+
+
 def config_dump(*, refresh: bool = False) -> dict:
     """rclone's config as {remote: {key: value}} (cached briefly).
 
@@ -257,12 +266,17 @@ def _stat(path: str, config: Optional[str] = None) -> Optional[dict]:
     return data if isinstance(data, dict) else {}
 
 
-def check_remote(remote: str) -> tuple[bool, Optional[str]]:
-    """Prove that one remote is reachable and authorized, for setup."""
+def check_remote(remote: str, *, refresh: bool = False) -> tuple[bool, Optional[str]]:
+    """Prove that one remote is reachable and authorized, for setup.
+
+    ``refresh`` is for callers that just wrote the remote: without it the
+    short-lived remote cache can report the new remote as missing.
+    """
     if not remote.endswith(":"):
         remote += ":"
-    if remote not in list_remotes():
-        available = ", ".join(list_remotes()) or "none"
+    remotes = list_remotes(refresh=refresh)
+    if remote not in remotes:
+        available = ", ".join(remotes) or "none"
         return False, f"rclone has no remote named {remote} (available: {available})"
     try:
         result = _run(["lsf", remote, "--max-depth", "1"], timeout=60.0)
