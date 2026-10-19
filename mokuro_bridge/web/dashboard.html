@@ -1811,8 +1811,11 @@ function renderListing() {
   if (browse.method === "local") {
     $("folder-hint").textContent = "";
   } else {
-    const meta = PROVIDER_META[browse.method] || {};
-    const link = PROVIDER_LINKS[browse.method];
+    // browse.method is an alias; providerOf maps it to the real service so
+    // "drive-other-email" never borrows another provider's link.
+    const method = (state.config.methods || []).find((m) => aliasOf(m) === browse.method);
+    const provider = method ? providerOf(method) : browse.method;
+    const link = PROVIDER_LINKS[provider];
     $("folder-hint").innerHTML = link
       ? `Uploads create series folders inside this one. <a class="inline-link" href="${esc(link.web)}" target="_blank" rel="noopener">${esc(link.webLabel)} ${icon("external")}</a>`
       : "Uploads create series folders inside this one.";

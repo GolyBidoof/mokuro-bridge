@@ -475,6 +475,38 @@ def test_destination_check_does_not_leak_provider_tokens(client, monkeypatch):
     assert "access_token=" not in detail
 
 
+def test_upload_method_rows_name_their_alias_including_local(client, monkeypatch):
+    """Every /upload-methods row carries `alias`, the value clients send back.
+
+    Account rows get it from the provider's extra dict, so `local` used to be
+    the one row without it even though docs/clients.md and docs/endpoints.md
+    tell a client to read the alias from this route.
+    """
+    from mokuro_bridge.providers import UploadMethod
+
+    methods = {
+        "local": UploadMethod(
+            id="local", name="Local output directory", configured=True, default=True
+        ),
+        "mega": UploadMethod(
+            id="mega",
+            name="rclone - mega",
+            configured=True,
+            default=False,
+            extra={"alias": "mega", "provider": "rclone", "remote": "mb-mega:"},
+        ),
+    }
+    monkeypatch.setattr(api, "_build_upload_methods", lambda: methods)
+
+    listed = {row["id"]: row for row in client.get("/upload-methods").json()["methods"]}
+    assert listed["local"]["alias"] == "local"
+    assert listed["mega"]["alias"] == "mega"
+
+    health_rows = {row["id"]: row for row in api._health_upload_methods(methods)}
+    assert health_rows["local"]["alias"] == "local"
+    assert health_rows["mega"]["alias"] == "mega"
+
+
 def test_health_reports_the_mokuro_flavor(client, monkeypatch):
     """The flavor is provenance, not the version string.
 
