@@ -57,10 +57,14 @@ cloud = [
 # without it tests/test_packaging.py importorskips, so a 3.10 CI job would
 # report green having tested nothing. ruff pins the lint result to this repo's
 # [tool.ruff] block instead of whatever config happens to be installed.
+# requests is the cloud extra's one dependency: the WebDAV provider tests run
+# against the bundled local test server and need it, so a clean dev install
+# carries it too. Mirrors requirements-dev.txt.
 dev = [
   "pytest>=8.0",
   "tomli>=2.0; python_version < \"3.11\"",
   "ruff>=0.6",
+  "requests>=2.31",
 ]
 
 [project.scripts]

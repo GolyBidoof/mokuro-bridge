@@ -1,6 +1,10 @@
-# Test-only dependencies. Deliberately builds on the base requirements, which no
-# longer include the OCR engine: the suite is meant to pass with no mokuro. The suite never needs mokuro, torch or any upload
-# provider: it exercises the bridge itself against local stub servers.
+# Test-only dependencies. These build on the base requirements, which
+# deliberately exclude the OCR engine and every upload SDK: the suite passes
+# with no mokuro, no torch and no cloud credential. requests is the one
+# exception, and it is already the declared dependency of the cloud extra:
+# tests/test_webdav_provider.py runs the native WebDAV provider against the
+# bundled local test server over a real socket, and that provider speaks HTTP
+# through requests. Without this line a clean checkout and CI fail 20 tests.
 -r requirements.txt
 pytest>=8.0
 # tests/test_packaging.py reads pyproject.toml; tomllib is stdlib only from 3.11.
@@ -8,3 +12,4 @@ tomli>=2.0; python_version < "3.11"
 # Lint config lives in pyproject.toml [tool.ruff]; ruff must be pinned here so
 # `python3 -m ruff check .` is the same run CI does.
 ruff>=0.6
+requests>=2.31

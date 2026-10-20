@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.0.1
+
+### Fixed
+
+- **A clean development install could not run the WebDAV provider tests.** `tests/test_webdav_provider.py` runs the native WebDAV provider against the bundled test server over a real socket, and that provider speaks HTTP through `requests`. The development requirements did not install it, so `python -m pytest` after the documented `pip install -r requirements-dev.txt` failed 20 tests in a bare environment, and the tests workflow failed the same way on every interpreter right after v1.0.0 published. `requests` is now declared in `requirements-dev.txt` and the `dev` extra, the same dependency the `cloud` extra already carries, and the suite passes in a clean virtualenv with nothing else installed. No shipped runtime behaviour changed: an install without `requests` still reports the missing library clearly and only native WebDAV is unavailable.
+
+### Changed
+
+- **A README that is easier to skim.** Centered PyPI, Python, CI and licence badges, a feature table, labelled sections and the two dashboard screenshots side by side, one of them a real six-destination setup. No behaviour change; this release exists so the PyPI project page carries it.
+
 ## v1.0.0
 
 The first stable release. The HTTP protocol, the CLI and the account model are now the contract: a 1.x release will not break an existing client, script or saved account, and a change that would break one ships in a new major version. This release folds in everything built since v0.9.0: the dashboard and browser account setup, WebDAV and rclone destinations, the four-lane scheduler, the settings file, the terminal status display, and mokuro-bunko owning a destination's metadata.

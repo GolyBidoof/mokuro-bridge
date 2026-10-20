@@ -1,18 +1,27 @@
 # mokuro-bridge
 
-Turn a folder of page images into a mokuro-reader library, locally or in the cloud.
+<p align="center">
+  <a href="https://pypi.org/project/mokuro-bridge/"><img alt="PyPI version" src="https://img.shields.io/pypi/v/mokuro-bridge?color=ef562f"></a>
+  <a href="https://pypi.org/project/mokuro-bridge/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/mokuro-bridge"></a>
+  <a href="https://github.com/GolyBidoof/mokuro-bridge/actions/workflows/tests.yml"><img alt="Tests" src="https://github.com/GolyBidoof/mokuro-bridge/actions/workflows/tests.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/pypi/l/mokuro-bridge"></a>
+</p>
+
+<p align="center"><strong>Turn a folder of page images into a mokuro-reader library, locally or in the cloud.</strong></p>
 
 mokuro-bridge is an independent local service in the mokuro ecosystem. It runs mokuro OCR on finished pages, assembles the files reader.mokuro.app expects, and delivers them to a folder on this computer or to a cloud destination. It is useful on its own for any set of page images, and it speaks one plain HTTP protocol, so a browser, a script or the bundled command-line tool can hand it work.
 
-## What it gives you
+## ✨ What it gives you
 
-- **A finished volume, not a pile of images.** Every capture becomes a `.mokuro` file with text and block data, a `.cbz` of the pages and a `.webp` cover, under a per-series folder with the reader's `series.json` (a destination managed by mokuro-bunko is the exception: Bunko compiles the index itself).
-- **OCR while the pages arrive.** Pages are read in small batches as they are received, so a long volume is not a capture followed by a long wait.
-- **Delivery where you want it.** A local folder by default, or MEGA, Google Drive, OneDrive, any WebDAV server, or any other rclone remote. Accounts are named, so several destinations of one kind can coexist.
-- **One small service to drive.** A self-contained dashboard for setup and live status, a terminal display for a background service, and a documented HTTP API for everything else.
-- **No storefront knowledge.** The bridge begins at the image. It holds no store account, no cookie and no store protocol, so a store redesign cannot break it.
+| | |
+| --- | --- |
+| **A finished volume, not a pile of images** | Every capture becomes a `.mokuro` file with text and block data, a `.cbz` of the pages and a `.webp` cover, under a per-series folder with the reader's `series.json`. A destination managed by mokuro-bunko is the exception: Bunko compiles the index itself |
+| **OCR while the pages arrive** | Pages are read in small batches as they are received, so a long volume is not a capture followed by a long wait |
+| **Delivery where you want it** | A local folder by default, or MEGA, Google Drive, OneDrive, any WebDAV server, or any other rclone remote. Accounts are named, so several destinations of one kind can coexist |
+| **One small service to drive** | A self-contained dashboard for setup and live status, a terminal display for a background service, and a documented HTTP API for everything else |
+| **No storefront knowledge** | The bridge begins at the image. It holds no store account, no cookie and no store protocol, so a store redesign cannot break it |
 
-## Quick start
+## 🚀 Quick start
 
 Install the service, then start it:
 
@@ -37,7 +46,7 @@ curl -N -X POST http://127.0.0.1:62642/session/<id>/finalize -F upload_method=lo
 
 The last call answers NDJSON: progress frames, then a terminal `done` or `error` frame. [docs/endpoints.md](docs/endpoints.md) is the full reference.
 
-## What you get
+## 📦 What you get
 
 ```
 <output>/<series>/
@@ -49,34 +58,33 @@ The last call answers NDJSON: progress frames, then a terminal `done` or `error`
 
 A completed volume is a folder reader.mokuro.app can open, a cloud library another device can sync, or a `.cbz` and `.mokuro` pair a reader can load directly. When mokuro-bunko manages a destination, it compiles the index and the library catalog instead of the bridge.
 
-## Screenshots
+## 🖼️ Screenshots
 
-![The mokuro-bridge dashboard: live status, the destination volumes are filed to, and browser acceleration](https://raw.githubusercontent.com/GolyBidoof/mokuro-bridge/main/docs/images/dashboard-dark.png)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/GolyBidoof/mokuro-bridge/main/docs/images/dashboard-dark.png" alt="The mokuro-bridge dashboard: status, the destination it files to and browser acceleration" width="49%">
+  <img src="https://raw.githubusercontent.com/GolyBidoof/mokuro-bridge/main/docs/images/dashboard-destinations.png" alt="Six destinations on one bridge: this computer, two Google Drive accounts, two MEGA accounts and a NAS over WebDAV" width="49%">
+</p>
 
-The dashboard and `mokuro-bridge --status` read the same `/health`, so the terminal shows the same picture in a window without a browser.
+The dashboard and `mokuro-bridge --status` read the same `/health`, so the terminal shows the same picture without a browser. Each destination is one card with its own alias, folder and live usage, and several accounts of the same service can coexist.
 
-![Six destinations on one bridge: this computer, two Google Drive accounts, two MEGA accounts and a NAS over WebDAV](https://raw.githubusercontent.com/GolyBidoof/mokuro-bridge/main/docs/images/dashboard-destinations.png)
-
-Each destination is one card with its own alias, folder and live usage, and several accounts of the same service can coexist. A client picks one with `upload_method=<alias>`.
-
-## How it works
+## ⚙️ How it works
 
 mokuro-bridge is a FastAPI service on loopback. A session owns one volume: pages arrive one at a time or as a folder, OCR reads them as they land, and finalize waits for the queue, assembles the volume, packs the archive and cover, publishes the series index and uploads or saves the result. Session state is persisted, so a restart does not lose a volume in flight.
 
-Blocking work runs on four bounded lanes (control, data, finalize and upload), which is why a busy upload cannot starve the health check or the next capture. The terminal frame of a finalize is a stream, not a request, so a client reads progress on the connection that is doing the work. Delivery goes through a provider layer: MEGA, Google Drive, OneDrive and WebDAV have native backends, rclone is an additional destination for those services and for the ones it supports, and the browser setup performs those four sign-ins through rclone, so one rclone install covers them there. Only rclone-backed accounts share one rclone sign-in, through a loopback WebDAV gateway that mokuro-bunko can also use. [docs/architecture.md](docs/architecture.md) explains the whole path.
+Blocking work runs on four bounded lanes (control, data, finalize and upload), which is why a busy upload cannot starve the health check or the next capture. The terminal frame of a finalize is a stream, not a request, so a client reads progress on the connection that is doing the work. Delivery goes through a provider layer: MEGA, Google Drive, OneDrive and WebDAV have native backends, rclone is an additional destination for those services and for the ones it supports, and the browser setup performs those four sign-ins through rclone. Only rclone-backed accounts share one rclone sign-in, through a loopback WebDAV gateway that mokuro-bunko can also use. [docs/architecture.md](docs/architecture.md) explains the whole path.
 
-## Destinations
+## ☁️ Destinations
 
 Choose a local folder, or connect an account: MEGA, Google Drive, OneDrive, WebDAV or an rclone remote. Each account has an alias such as `mega`, `mega-2` or `drive-next`, its own folder and its own credentials. A client selects one with `upload_method=<alias>`, and the last explicit choice becomes the sticky default until another replaces it. The dashboard adds, reconnects, renames and removes accounts, and browses each provider's folders. [docs/destinations.md](docs/destinations.md) covers the account model, the credential stores and the per-provider behaviour.
 
-## Works with the rest of the ecosystem
+## 🧩 Works with the rest of the ecosystem
 
 - **reader.mokuro.app** reads the result. The bridge publishes the `series.json` index the reader needs for a library it did not fill itself.
 - **mokuro-bunko** can take over the compiled metadata for a destination. The bridge then uploads the volume files and leaves `series.json` and `catalog.json` to Bunko.
 - **Any HTTP client** that can produce page images can drive the bridge. The protocol is the contract, and no client library is required.
 - **[dokuha-cli](https://github.com/GolyBidoof/dokuha-cli)** and **[dokuha-userscript](https://github.com/GolyBidoof/dokuha-userscript)** are two downloaders that can hand volumes over if you already run them. They are examples of the protocol, not a dependency in either direction.
 
-## Install
+## 📥 Install
 
 Install with [pipx](https://pipx.pypa.io/) or `uv tool install`, or from a checkout:
 
@@ -94,11 +102,9 @@ pip install "mokuro @ git+https://github.com/GolyBidoof/mokuro"   # the batched 
 pip install -r requirements-ocr.txt                               # upstream mokuro
 ```
 
-`mokuro-bridge --install-mokuro` performs the fork install in the environment that runs the service and verifies the import; [docs/mokuro.md](docs/mokuro.md) has the per-environment details. Without an engine the service still starts, `/health` reports `mokuro_installed: false`, and only OCR is unavailable. The browser setup signs MEGA, Google Drive, OneDrive and WebDAV in through `rclone`, so it needs that binary, and the native providers ask their terminal wizard to install a Python SDK or system tool when it is missing; the terminal wizards cover every provider.
+`mokuro-bridge --install-mokuro` performs the fork install in the environment that runs the service and verifies the import; [docs/mokuro.md](docs/mokuro.md) has the per-environment details. Without an engine the service still starts, `/health` reports `mokuro_installed: false`, and only OCR is unavailable. The browser setup signs MEGA, Google Drive, OneDrive and WebDAV in through `rclone`, so it needs that binary; the terminal wizards create the native accounts and install their provider SDK when it is missing. An optional macOS launch agent, `./install-launchd.sh`, starts the bridge at login.
 
-Optional macOS launch agent: `./install-launchd.sh` starts the bridge at login.
-
-## Docs
+## 📚 Docs
 
 | | |
 | --- | --- |
@@ -115,7 +121,7 @@ Optional macOS launch agent: `./install-launchd.sh` starts the bridge at login.
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Install, OCR, dashboard, sign-in and delivery problems |
 | [CHANGELOG.md](CHANGELOG.md) | What changed, release by release |
 
-## Development
+## 🛠️ Development
 
 ```bash
 pip install -r requirements-dev.txt
@@ -123,9 +129,9 @@ python3 -m pytest
 python3 -m ruff check .
 ```
 
-The suite is hermetic: no network, no real credentials and no OCR model. It covers the capture routes, the finalize stream, the provider seams, the dashboard API, the settings file, the terminal display and the packaging contract.
+The suite is hermetic: no internet, no real credentials and no OCR model. It covers the capture routes, the finalize stream, the provider seams, the dashboard API, the settings file, the terminal display and the packaging contract. The one exception to "no network" is WebDAV: those tests run against a small stdlib server in this repository over a local socket.
 
-## Credits and licence
+## 📄 Credits and licence
 
 MIT, see [LICENSE](LICENSE).
 
