@@ -411,6 +411,13 @@ def _provider_rows() -> list[dict]:
             entry["services"] = rclone_auth.services()
             entry["default_root"] = rclone_auth.default_root()
             entry["recommended"] = True
+        # The page performs these four sign-ins through rclone, so a card is
+        # unusable in the browser without the binary even when the legacy
+        # native SDK is installed. The terminal wizard is the native path and
+        # still works, so the disabled card keeps its setup_hint command.
+        if provider_id in ("mega", "drive", "onedrive", "webdav") and not rclone_ready:
+            entry["available"] = False
+            entry["missing"] = ["rclone"]
         # Legacy native accounts stay manageable, but a new setup never needs
         # the old SDKs: the cards above are rclone-backed.
         if provider_id in ("mega", "drive", "onedrive", "webdav"):

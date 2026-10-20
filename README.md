@@ -2,8 +2,6 @@
 
 Turn a folder of page images into a mokuro-reader library, locally or in the cloud.
 
-<!-- Logo slot: a wide wordmark or a square mark, 240 to 480 px, light and dark variants welcome. Keep the tagline above visible without it. Do not read the image from a path that does not exist yet. -->
-
 mokuro-bridge is an independent local service in the mokuro ecosystem. It runs mokuro OCR on finished pages, assembles the files reader.mokuro.app expects, and delivers them to a folder on this computer or to a cloud destination. It is useful on its own for any set of page images, and it speaks one plain HTTP protocol, so a browser, a script or the bundled command-line tool can hand it work.
 
 ## What it gives you
@@ -51,17 +49,21 @@ The last call answers NDJSON: progress frames, then a terminal `done` or `error`
 
 A completed volume is a folder reader.mokuro.app can open, a cloud library another device can sync, or a `.cbz` and `.mokuro` pair a reader can load directly. When mokuro-bunko manages a destination, it compiles the index and the library catalog instead of the bridge.
 
-<!-- Screenshots:
-Caption slot 1: the dashboard, showing live OCR state, the destination it files to and the browser acceleration it offers.
-Caption slot 2: mokuro-bridge --status, drawing the same picture for a service running in the background.
-When the images exist, add them under docs/images/ and place one image and its caption here. Do not reference a file that does not exist yet.
--->
+## Screenshots
+
+![The mokuro-bridge dashboard: live status, the destination volumes are filed to, and browser acceleration](https://raw.githubusercontent.com/GolyBidoof/mokuro-bridge/main/docs/images/dashboard-dark.png)
+
+The dashboard and `mokuro-bridge --status` read the same `/health`, so the terminal shows the same picture in a window without a browser.
+
+![Six destinations on one bridge: this computer, two Google Drive accounts, two MEGA accounts and a NAS over WebDAV](https://raw.githubusercontent.com/GolyBidoof/mokuro-bridge/main/docs/images/dashboard-destinations.png)
+
+Each destination is one card with its own alias, folder and live usage, and several accounts of the same service can coexist. A client picks one with `upload_method=<alias>`.
 
 ## How it works
 
 mokuro-bridge is a FastAPI service on loopback. A session owns one volume: pages arrive one at a time or as a folder, OCR reads them as they land, and finalize waits for the queue, assembles the volume, packs the archive and cover, publishes the series index and uploads or saves the result. Session state is persisted, so a restart does not lose a volume in flight.
 
-Blocking work runs on four bounded lanes (control, data, finalize and upload), which is why a busy upload cannot starve the health check or the next capture. The terminal frame of a finalize is a stream, not a request, so a client reads progress on the connection that is doing the work. Delivery goes through a provider layer: MEGA, Google Drive, OneDrive and WebDAV are native backends, and rclone reaches everything else through one loopback WebDAV gateway that mokuro-bunko can share. [docs/architecture.md](docs/architecture.md) explains the whole path.
+Blocking work runs on four bounded lanes (control, data, finalize and upload), which is why a busy upload cannot starve the health check or the next capture. The terminal frame of a finalize is a stream, not a request, so a client reads progress on the connection that is doing the work. Delivery goes through a provider layer: MEGA, Google Drive, OneDrive and WebDAV have native backends, rclone is an additional destination for those services and for the ones it supports, and the browser setup performs those four sign-ins through rclone, so one rclone install covers them there. Only rclone-backed accounts share one rclone sign-in, through a loopback WebDAV gateway that mokuro-bunko can also use. [docs/architecture.md](docs/architecture.md) explains the whole path.
 
 ## Destinations
 
@@ -92,7 +94,7 @@ pip install "mokuro @ git+https://github.com/GolyBidoof/mokuro"   # the batched 
 pip install -r requirements-ocr.txt                               # upstream mokuro
 ```
 
-`mokuro-bridge --install-mokuro` performs the fork install in the environment that runs the service and verifies the import; [docs/mokuro.md](docs/mokuro.md) has the per-environment details. Without an engine the service still starts, `/health` reports `mokuro_installed: false`, and only OCR is unavailable. Cloud destinations that go through rclone need the `rclone` binary; the native providers ask their wizard to install a Python SDK when it is missing.
+`mokuro-bridge --install-mokuro` performs the fork install in the environment that runs the service and verifies the import; [docs/mokuro.md](docs/mokuro.md) has the per-environment details. Without an engine the service still starts, `/health` reports `mokuro_installed: false`, and only OCR is unavailable. The browser setup signs MEGA, Google Drive, OneDrive and WebDAV in through `rclone`, so it needs that binary, and the native providers ask their terminal wizard to install a Python SDK or system tool when it is missing; the terminal wizards cover every provider.
 
 Optional macOS launch agent: `./install-launchd.sh` starts the bridge at login.
 
@@ -127,6 +129,6 @@ The suite is hermetic: no network, no real credentials and no OCR model. It cove
 
 MIT, see [LICENSE](LICENSE).
 
-OCR runs on [the mokuro fork](https://github.com/GolyBidoof/mokuro), which adds batched recognition and is the recommended engine, or on [kha-white's original mokuro](https://github.com/kha-white/mokuro) as the slower fallback, each under its own licence. Cloud delivery uses MEGA through megatools, Google Drive and OneDrive through their own APIs, any WebDAV server you run, or rclone for the services it supports, each under its own terms. The `series.json` format belongs to [Gnathonic's mokuro-reader](https://github.com/Gnathonic/mokuro-reader) (GPL-3.0) and is implemented a second time by [mokuro-bunko](https://github.com/Gnathonic/mokuro-bunko) (MPL-2.0); this project pins the upstream files and ports the contract rather than copying either codebase.
+OCR runs on [the mokuro fork](https://github.com/GolyBidoof/mokuro), which adds batched recognition and is the recommended engine, or on [kha-white's original mokuro](https://github.com/kha-white/mokuro) as the slower fallback, each under its own licence. Cloud delivery uses the native MEGA, Google Drive, OneDrive and WebDAV backends, or rclone for those and for the services it supports, each under its own terms. The `series.json` format belongs to [Gnathonic's mokuro-reader](https://github.com/Gnathonic/mokuro-reader) (GPL-3.0) and is implemented a second time by [mokuro-bunko](https://github.com/Gnathonic/mokuro-bunko) (MPL-2.0); this project pins the upstream files and ports the contract rather than copying either codebase.
 
 The code was written by DeepSeek V4.1 Flash.

@@ -547,10 +547,8 @@
             <div class="pref-meta"><span class="prov" id="engine-bunko-state">—</span></div>
           </div>
           <div class="engine-actions">
-            <div class="engine-actions">
-              <button class="btn big" id="install-bunko" type="button" disabled>Not available</button>
-              <button class="btn danger big" id="uninstall-bunko" type="button" hidden>Uninstall mokuro-bunko</button>
-            </div>
+            <button class="btn big" id="install-bunko" type="button" disabled>Not available</button>
+            <button class="btn danger big" id="uninstall-bunko" type="button" hidden>Uninstall mokuro-bunko</button>
           </div>
           <pre class="engine-log" id="engine-bunko-log" hidden></pre>
         </div>
@@ -606,7 +604,7 @@
     <div class="titles">
       <p class="wiz-kicker" id="wizard-kicker">Getting started</p>
       <h2 id="wizard-title">Welcome to mokuro-bridge</h2>
-      <p id="wizard-subtitle">Three steps, all by clicking.</p>
+      <p id="wizard-subtitle">A few clicks and the bridge is set up.</p>
     </div>
     <button class="icon-btn dlg-close" type="button" data-close="wizard" aria-label="Close setup guide">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
@@ -950,7 +948,7 @@ async function copyText(text, what) {
     area.value = text; area.style.position = "fixed"; area.style.opacity = "0";
     document.body.appendChild(area); area.select();
     try { document.execCommand("copy"); toast(`${what || "Copied"} copied.`, "info"); }
-    catch (err) { toast("Copy failed — select the text manually.", "bad"); }
+    catch (err) { toast("Copy failed. Select the text manually.", "bad"); }
     area.remove();
   }
 }
@@ -1080,7 +1078,7 @@ function renderLive() {
   const methods = (state.config && state.config.methods) || [];
   const target = methods.find((m) => m.default) || methods.find((m) => providerOf(m) !== "local");
   if (target) {
-    $("stat-target").textContent = aliasOf(target);
+    $("stat-target").textContent = providerOf(target) === "local" ? "This computer" : aliasOf(target);
     $("stat-target-sub").textContent = tidyFolder(target.root || target.current_folder) || "default destination";
   } else if (state.config) {
     $("stat-target").textContent = "This computer";
@@ -1088,10 +1086,6 @@ function renderLive() {
   }
 
   const engine = engineParts(h);
-  const engineCell = $("stat-engine");
-  if (engineCell) engineCell.textContent = engine.version;
-  const engineSub = $("stat-engine-sub");
-  if (engineSub) engineSub.textContent = engine.flavour;
   const engineHelp = $("engine-help");
   if (engineHelp) engineHelp.hidden = engine.flavour !== "upstream build" && engine.flavour !== "not installed";
   const bunko = bunkoInfo(h);
@@ -1112,7 +1106,7 @@ function renderLive() {
     const ports = h.fetchProxyPorts || [];
     accel.dataset.on = String(ports.length > 0);
     if (ports.length) {
-      $("accel-text").textContent = `${ports.length} ports open (${ports[0]}–${ports[ports.length - 1]}) · up to ${6 * ports.length} extra browser lanes`;
+      $("accel-text").textContent = `${ports.length} ports open (${ports[0]} to ${ports[ports.length - 1]}) · up to ${6 * ports.length} extra browser lanes`;
     } else {
       $("accel-text").textContent = "off · the browser downloader uses its usual connections";
     }
@@ -1322,14 +1316,6 @@ function renderVersions() {
   }
 }
 
-function enginesReady() {
-  const bunko = state.engines && state.engines.bunko;
-  // Lock only on a definitive "not installed" answer. Unknown or unsupported
-  // must never leave connected cards stuck on "Uploads locked".
-  if (!bunko || bunko.available === false) return true;
-  return bunko.installed !== false;
-}
-
 function mokuroReady() {
   const h = state.health || {};
   return h.mokuro_installed !== false;
@@ -1339,11 +1325,11 @@ function renderGates() {
   const host = $("engine-alert");
   if (!host) return;
   const missing = [];
+  // Only the reading engine can pause work: packaging and uploads keep going
+  // without it. mokuro-bunko is optional (the bridge writes series.json on its
+  // own), so its absence is reported in Reading engine, never as a gate.
   if (!mokuroReady()) {
     missing.push(`<div class="alert-line"><span aria-hidden="true">⚠</span><span><strong>OCR is paused</strong> until mokuro is installed.</span><button class="link" type="button" data-gate="mokuro">Install mokuro</button></div>`);
-  }
-  if (state.engines && !enginesReady()) {
-    missing.push(`<div class="alert-line"><span aria-hidden="true">⚠</span><span><strong>Cloud uploads are paused</strong> until mokuro-bunko is installed.</span><button class="link" type="button" data-gate="bunko">Install mokuro-bunko</button></div>`);
   }
   host.hidden = missing.length === 0;
   host.innerHTML = missing.join("");
@@ -1351,7 +1337,7 @@ function renderGates() {
     button.onclick = () => {
       const section = document.getElementById("engines-heading");
       if (section) section.scrollIntoView({ behavior: "smooth", block: "center" });
-      const target = button.dataset.gate === "bunko" ? $("install-bunko") : $("install-mokuro");
+      const target = $("install-mokuro");
       if (target && !target.hidden) target.focus();
     };
   });
@@ -1365,7 +1351,6 @@ function renderDestinations() {
   const shownMethods = methods.filter((m) => stateOf(m) !== "not_configured");
   const signature = JSON.stringify([
     shownMethods.map((m) => [m.id, stateOf(m), Boolean(m.default), m.root, m.label || "", (m.extra || {}).email || ""]),
-    enginesReady(),
     state.config.output_dir || "",
   ]);
   if (state.destSignature === signature && $("destinations").childElementCount) {
@@ -1388,12 +1373,9 @@ function renderDestinations() {
     const folder = tidyFolder(m.root || m.current_folder);
     const isLocal = provider === "local";
     const folderLine = folder || (isLocal ? state.config.output_dir : "");
-    const uploadLocked = !isLocal && st === "connected" && !enginesReady();
-    const primary = uploadLocked
-      ? `<span class="btn small" aria-disabled="true">Uploads locked</span>`
-      : st === "connected"
-        ? `<button class="btn small" type="button" data-choose="${esc(alias)}">Change folder</button>`
-        : `<button class="btn small primary" type="button" data-reconnect="${esc(alias)}">${st === "needs_sign_in" ? "Reconnect" : "Connect"}</button>`;
+    const primary = st === "connected"
+      ? `<button class="btn small" type="button" data-choose="${esc(alias)}">Change folder</button>`
+      : `<button class="btn small primary" type="button" data-reconnect="${esc(alias)}">${st === "needs_sign_in" ? "Reconnect" : "Connect"}</button>`;
     const defaultAction = m.default
       ? `<span class="default-mark">${icon("star")} Default</span>`
       : st === "connected"
@@ -1415,7 +1397,6 @@ function renderDestinations() {
       </div>
       <div class="dest-folder"><span class="k">Folder</span><code title="${esc(folderLine)}">${esc(folderLine || "not chosen yet")}</code>${!isLocal && PROVIDER_LINKS[provider] ? `<a class="folder-open" data-folder-link="${esc(alias)}" href="${esc(PROVIDER_LINKS[provider].web)}" target="_blank" rel="noopener" title="${esc(PROVIDER_LINKS[provider].webLabel)}" aria-label="${esc(PROVIDER_LINKS[provider].webLabel)}">${icon("external")}</a>` : ""}</div>
       ${st !== "connected" ? `<p class="dest-note">${esc(STATE_NOTE[st] || "")}</p>` : ""}
-      ${uploadLocked ? `<p class="dest-note">Install mokuro-bunko to resume uploads.</p>` : ""}
       ${st === "connected" ? `<div class="dest-usage" data-usage="${esc(alias)}"><span class="usage-text">Checking space…</span></div>` : ""}
       <div class="dest-actions">${primary}${defaultAction}</div>
       <div class="dest-links">${links.join("<span aria-hidden=\"true\">·</span>")}</div>
@@ -1578,7 +1559,7 @@ function fieldFor(row) {
     const on = truthySetting(row.value);
     return `<div class="pref-control">
       <label class="pref-switch">
-        <input id="set-${esc(row.env)}" data-env="${esc(row.env)}" type="checkbox"
+        <input id="set-${esc(row.env)}" data-env="${esc(row.env)}" data-initial="${on ? "true" : "false"}" type="checkbox"
                ${on ? "checked" : ""} ${pinned ? "disabled" : ""}
                aria-labelledby="label-${esc(row.env)}" aria-describedby="help-${esc(row.env)}">
         <span class="switch-track" aria-hidden="true"></span>
@@ -1595,13 +1576,13 @@ function fieldFor(row) {
     : `type="text"`;
   return `<div class="pref-control">
     <div class="row">
-      <input id="set-${esc(row.env)}" data-env="${esc(row.env)}" ${attrs}
+      <input id="set-${esc(row.env)}" data-env="${esc(row.env)}" data-initial="${esc(row.value)}" ${attrs}
              value="${esc(row.value)}" placeholder="${esc(row.display || row.default || (row.type === "path" ? "Default folder" : ""))}"
              aria-describedby="help-${esc(row.env)} ${pinned ? "pin-" + esc(row.env) : ""}"
              ${pinned ? "disabled" : ""}>
       ${row.type === "path" && !pinned ? `<button class="btn" type="button" data-pickpath="${esc(row.env)}">Browse…</button>` : ""}
     </div>
-    ${row.type === "path" ? `<span class="hint">Example: <code>~/Books/mokuro</code> — series folders are created inside it.</span>` : ""}
+    ${row.type === "path" ? `<span class="hint">Example: <code>~/Books/mokuro</code>. Series folders are created inside it.</span>` : ""}
     ${row.type === "csv" ? `<span class="hint">Separate several folders with commas.</span>` : ""}
     <span class="field-error" id="err-${esc(row.env)}" role="alert"></span>
   </div>`;
@@ -1718,14 +1699,39 @@ async function saveSettings() {
   });
   const save = $("save-settings");
   save.disabled = true;
+  // Compare each editable field with the value it was rendered with: the
+  // request carries every enabled row, so only the changed ones decide whether
+  // a restart is really needed. A live setting and a startup setting are told
+  // apart instead of guessing from the whole form.
+  const changedRows = state.settings.filter((row) => {
+    const input = document.getElementById(`set-${row.env}`);
+    if (!input || input.disabled) return false;
+    const current = input.type === "checkbox" ? (input.checked ? "true" : "false") : input.value;
+    return current !== (input.dataset.initial ?? "");
+  });
+  const restartRows = changedRows.filter((row) => row.restart);
+  const liveRows = changedRows.filter((row) => !row.restart);
   try {
     const result = await postJSON("/config/settings", payload);
     state.dirty = false;
-    const command = (result && result.restart_command) || (state.config && state.config.restart_command) || "restart the bridge";
-    $("save-state").innerHTML = `Saved. <span class="restart-chip"><code>${esc(command)}</code><button class="icon-btn" type="button" id="copy-restart" aria-label="Copy restart command" title="Copy restart command">${icon("copy")}</button></span>`;
-    const copy = $("copy-restart");
-    if (copy) copy.onclick = () => copyText(command, "Restart command");
-    toast("Preferences saved. Restart the bridge to apply them.", "info");
+    state.settings.forEach((row) => {
+      const input = document.getElementById(`set-${row.env}`);
+      if (!input) return;
+      input.dataset.initial = input.type === "checkbox" ? (input.checked ? "true" : "false") : input.value;
+    });
+    if (restartRows.length) {
+      const command = (result && result.restart_command) || (state.config && state.config.restart_command) || "restart the bridge";
+      const stateText = liveRows.length
+        ? "Saved. The other changes are live; restart to apply the rest."
+        : `Saved. Restart the bridge to apply ${restartRows.length === 1 ? "it" : "them"}.`;
+      $("save-state").innerHTML = `${stateText} <span class="restart-chip"><code>${esc(command)}</code><button class="icon-btn" type="button" id="copy-restart" aria-label="Copy restart command" title="Copy restart command">${icon("copy")}</button></span>`;
+      const copy = $("copy-restart");
+      if (copy) copy.onclick = () => copyText(command, "Restart command");
+      toast("Preferences saved. Restart the bridge to apply the changes that need it.", "info");
+    } else {
+      $("save-state").textContent = "Saved. No restart needed; the change is live.";
+      toast("Preferences saved. The change takes effect immediately.", "info");
+    }
     await loadConfig({ keepSettings: true });
   } catch (error) {
     toast(error.message, "bad");
@@ -2007,14 +2013,22 @@ function renderProviderPicker() {
     const unavailable = !info.available;
     const connected = (state.config.methods || []).filter((m) => providerOf(m) === id && stateOf(m) === "connected").length;
     let sub = info.meta.blurb;
-    if (unavailable) sub = (info.live && info.live.setup_hint) || info.meta.empty;
-    else if (info.live && info.live.needs_client_id) sub = `One-time Azure app ID, then a short code · ${info.meta.blurb}`;
+    if (unavailable) {
+      const missing = info.missing || [];
+      const hint = (info.live && info.live.setup_hint) || `mokuro-bridge --setup-upload ${id}`;
+      // The four service cards sign in through rclone, so a missing rclone is
+      // a dead end unless the card names the terminal command that still works.
+      sub = missing.includes("rclone")
+        ? `Needs rclone for a browser sign-in. Run ${hint} instead.`
+        : "Unavailable on this computer";
+    }
+    else if (info.live && info.live.needs_client_id && !info.live.rclone_backed) sub = `One-time Azure app ID, then a short code · ${info.meta.blurb}`;
     else if (connected) sub = `${connected} connected · ${info.meta.blurb}`;
     else if (info.count) sub = `${info.count} set up, not connected · ${info.meta.blurb}`;
     return `<button class="provider-choice" type="button" data-provider="${id}" ${unavailable ? "disabled" : ""}>
       <span class="provider-tile" data-provider="${id}" aria-hidden="true">${providerIcon(id)}</span>
       <span class="pc-title">${esc(info.meta.label)}</span>
-      <span class="pc-sub">${unavailable ? "Unavailable on this computer" : esc(sub)}</span>
+      <span class="pc-sub">${esc(sub)}</span>
       ${unavailable ? `<span class="badge">${esc((info.missing || []).join(", ") || "missing dependency")}</span>` : ""}
     </button>`;
   }).join("")}</div>
@@ -2193,7 +2207,7 @@ function openProviderForm(provider, mode, account) {
       <div class="field"><label for="add-email">MEGA email</label><input id="add-email" type="email" autocomplete="username" required></div>
       <div class="field"><label for="add-password">Password</label><input id="add-password" type="password" autocomplete="current-password" required></div>
     </div>
-    <div class="field"><label for="add-totp">Two-factor code <span class="hint">(only if your MEGA account uses one)</span></label><input id="add-totp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"><span class="hint">rclone asks for this once at sign-in, then the shared gateway keeps the session.</span></div>` : ""}
+    <div class="field"><label for="add-totp">Two-factor code <span class="hint">(only if your MEGA account uses one)</span></label><input id="add-totp" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"><span class="hint">rclone asks for this once at sign-in, then keeps the session on this computer.</span></div>` : ""}
     ${provider === "webdav" ? `<div class="field" id="add-dav-preset-field" ${mode === "reconnect" ? "hidden" : ""}>
       <label for="add-dav-preset">Which server do you use? <span class="hint">(optional)</span></label>
       <select id="add-dav-preset">
@@ -2240,7 +2254,7 @@ function openProviderForm(provider, mode, account) {
           <input id="add-dav-root" type="text" autocomplete="off" spellcheck="false" value="${esc(davRoot)}">
           <span class="hint">Created on the server, with one folder per series inside it. You can change it later with Change folder.</span>
         </div>
-        <label class="check-row"><input id="add-dav-insecure" type="checkbox" ${davInsecure ? "checked" : ""}><span>Accept a self-signed certificate <span class="hint">Only for your own NAS or home server. It turns off certificate checking for this account.</span></span></label>
+        ${rcloneBacked ? "" : `<label class="check-row"><input id="add-dav-insecure" type="checkbox" ${davInsecure ? "checked" : ""}><span>Accept a self-signed certificate <span class="hint">Only for your own NAS or home server. It turns off certificate checking for this account.</span></span></label>`}
       </div>
     </details>` : ""}
     ${provider === "onedrive" && !rcloneBacked ? `<div class="field">
@@ -2307,7 +2321,9 @@ function openProviderForm(provider, mode, account) {
   $("add-title").textContent = title;
   $("add-subtitle").textContent = mode === "reconnect"
     ? `Sign in again so ${alias} can keep uploading.`
-    : `Connect ${meta.label}. ${info.count ? `You already have ${info.count === 1 ? "one account" : info.count + " accounts"} with ${meta.label}; this adds another.` : ""}`;
+    : (info.count
+        ? `You already have ${info.count === 1 ? "one account" : info.count + " accounts"} with ${meta.label}; this adds another.`
+        : `One sign-in, and finished volumes can be filed to ${meta.label}.`);
   $("add-foot-note").textContent = mode === "reconnect" ? "Existing files and folder stay as they are." : "Everything stays on this computer.";
   $("add-back").onclick = () => { stopFlowPoll(); $("add-form").hidden = true; $("add-picker").hidden = false; $("add-title").textContent = "Add a destination"; $("add-subtitle").textContent = "Pick where finished volumes should live. Each provider can hold as many accounts as you like."; renderProviderPicker(); };
   $("add-submit").onclick = () => submitProviderForm();
@@ -2606,8 +2622,8 @@ function openDetails(alias) {
   const link = PROVIDER_LINKS[provider];
   const rows = [
     ["Provider", esc(meta.label)],
-    ["Account", esc(account)],
-    ["Email", `<span id="detail-email">${email ? esc(email) : "Looking up…"}</span>`],
+    provider === "local" ? null : ["Account", esc(account)],
+    provider === "local" ? null : ["Email", `<span id="detail-email">${email ? esc(email) : "Looking up…"}</span>`],
     method.label ? ["Note", esc(method.label)] : null,
     server ? ["Server", `<code>${esc(server)}</code>`] : null,
     insecure ? ["Certificate", "Self-signed, accepted when it was set up"] : null,
@@ -2617,13 +2633,15 @@ function openDetails(alias) {
       ? ["Library index", `mokuro-bunko ${esc(method.extra.bunko_version || method.extra.bunko_commit || "(connected)")}`] : null,
     link ? ["Open", `<a id="details-open-link" href="${esc(link.web)}" target="_blank" rel="noopener">${esc(link.webLabel)} ${icon("external")}</a>`] : null,
   ].filter(Boolean);
-  $("details-title").textContent = alias;
+  $("details-title").textContent = provider === "local" ? "This computer" : alias;
   $("details-subtitle").textContent = `${meta.label} · ${STATE_LABEL[st] || st}`;
   $("details-body").innerHTML = rows.map(([k, v]) => `<div class="detail-row"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
   $("details-copy").onclick = () => copyText(`upload_method=${alias}`, "Destination id");
   $("details-dialog").showModal();
-  resolveAccountEmail(alias);
-  resolveFolderLink(alias);
+  if (provider !== "local") {
+    resolveAccountEmail(alias);
+    resolveFolderLink(alias);
+  }
 }
 
 async function resolveFolderLink(alias) {
@@ -2687,7 +2705,7 @@ function openRemove(alias) {
   if (!method) return;
   state.remove = alias;
   const provider = PROVIDER_META[providerOf(method)] || PROVIDER_META.local;
-  $("remove-detail").innerHTML = `<strong>${esc(alias)}</strong> · ${esc(provider.label)}${method.label ? " · " + esc(method.label) : ""}<br>Files already uploaded stay where they are. The local folder is never touched.${method.default ? " This is the current default, so This computer becomes the fallback." : ""}`;
+  $("remove-detail").innerHTML = `<strong>${esc(alias)}</strong> · ${esc(provider.label)}${method.label ? " · " + esc(method.label) : ""}${method.default ? "<br>It is the current default, so finished volumes go to This computer once it is removed." : ""}`;
   $("remove-dialog").showModal();
   $("remove-confirm").focus();
 }
@@ -2774,7 +2792,7 @@ function bindDialogPlumbing() {
     }
   };
   $("uninstall-bunko").onclick = async () => {
-    if (!window.confirm("Uninstall mokuro-bunko? Cloud uploads pause until it is installed again.")) return;
+    if (!window.confirm("Uninstall mokuro-bunko? The library index stops updating until it is installed again. Uploads keep working.")) return;
     state.busyBunkoUninstall = true;
     renderEngines();
     try {
@@ -2884,30 +2902,41 @@ function renderEngines() {
   }
   if (bunko.available) {
     const ready = remoteDestinationReady();
-    $("engine-bunko-detail").textContent = bunko.installed
-      ? "Installed and following the default destination."
-      : (ready ? "Not installed. Uploads and the library index need mokuro-bunko." : "Add a cloud destination first; mokuro-bunko reads the folder the bridge uploads to.");
-    $("engine-bunko-state").textContent = bunko.installed ? "Ready" : "Not installed";
-    if (bunkoJob.state === "running") {
+    const sync = bunko.sync || null;
+    const syncing = bunkoJob.state === "running";
+    const outOfSync = Boolean(bunko.installed && sync && sync.installed && !sync.in_sync);
+    let detailText;
+    if (bunko.installed) {
+      const following = sync && sync.configured_method ? `on ${sync.configured_method}` : "not configured";
+      detailText = outOfSync
+        ? `mokuro-bunko is ${following}, but the default destination is ${sync.default_method}.${sync.can_sync ? " It is re-pointed automatically." : " Choose a cloud default destination to re-point it."}`
+        : "Installed and following the default destination.";
+    } else {
+      detailText = ready
+        ? "Not installed. mokuro-bunko builds the library index; volumes upload and read without it."
+        : "Add a cloud destination first; mokuro-bunko reads the folder the bridge uploads to.";
+    }
+    $("engine-bunko-detail").textContent = detailText;
+    $("engine-bunko-state").textContent = bunko.installed ? (outOfSync ? "Needs attention" : "Ready") : "Not installed";
+    if (syncing) {
       $("engine-bunko-detail").textContent = "Installing mokuro-bunko. The first install compiles from source and can take a few minutes; progress appears below.";
       $("engine-bunko-state").textContent = "Installing…";
     }
     const canInstall = bunko.can_install !== false;
     const prereqOk = !bunko.prerequisites || Object.values(bunko.prerequisites).every(Boolean);
-    bunkoButton.disabled = bunko.installed || bunkoJob.state === "running" || !ready || !prereqOk;
-    bunkoButton.innerHTML = bunkoJob.state === "running"
+    bunkoButton.disabled = bunko.installed || syncing || !ready || !prereqOk;
+    bunkoButton.innerHTML = syncing
       ? `<span class="spinner"></span> Installing… ${bunkoJob.elapsed_s || 0}s`
       : (!prereqOk ? "Unavailable" : (ready ? "Install mokuro-bunko" : "Add a destination first"));
     bunkoButton.hidden = Boolean(bunko.installed);
-    if (bunko.can_install === false && bunko.detail) $("engine-bunko-detail").textContent = bunko.detail;
-    const sync = bunko.sync || null;
-    if (sync && sync.installed && !sync.in_sync && sync.can_sync) {
-      const syncing = bunkoJob.state === "running";
-      const following = sync.configured_method ? `on ${sync.configured_method}` : "not configured";
-      $("engine-bunko-detail").textContent = syncing
-        ? `Following the default destination (${sync.default_method})…`
-        : `mokuro-bunko is ${following}, but the default destination is ${sync.default_method}. It is re-pointed automatically.`;
-      $("engine-bunko-state").textContent = syncing ? "Syncing…" : "Out of sync";
+    // The backend explains why an install is unavailable; that sentence is
+    // only true while it is actually not installed.
+    if (!bunko.installed && bunko.can_install === false && bunko.detail) {
+      $("engine-bunko-detail").textContent = bunko.detail;
+    }
+    if (syncing && outOfSync) {
+      $("engine-bunko-detail").textContent = `Following the default destination (${sync.default_method})…`;
+      $("engine-bunko-state").textContent = "Syncing…";
     }
     const bunkoLog = $("engine-bunko-log");
     if (bunkoLog) {
@@ -2996,8 +3025,9 @@ const WIZARD_KEY = "mb-wizard-seen";
 const WIZARD_PROVIDER_BLURB = {
   mega: "Sign in with your MEGA email and password.",
   drive: "Sign in with Google in a new tab.",
-  onedrive: "Enter a short Microsoft code once.",
+  onedrive: "Sign in with Microsoft in a new tab.",
   webdav: "Your server address, username and password.",
+  rclone: "Use a remote you made with rclone config.",
 };
 const wizard = { step: 0, branch: null };
 let wizardChecked = false;
@@ -3014,7 +3044,7 @@ function wizardFooter() {
   $("wizard-next").hidden = wizard.step !== 0;
   $("wizard-next").textContent = "Get started";
   $("wizard-skip").hidden = false;
-  $("wizard-dots").innerHTML = [0, 1, 2].map((i) => `<span data-on="${i === wizard.step}"></span>`).join("");
+  $("wizard-dots").innerHTML = [1, 2].map((i) => `<span data-on="${i === wizard.step}"></span>`).join("");
 }
 
 function renderWizard() {
@@ -3067,7 +3097,7 @@ function renderWizard() {
         <span class="wiz-provider-body"><strong>${esc(descriptor.label)}</strong><em>${esc(available ? blurb : "Not available on this computer yet.")}</em></span>
       </button>`;
     }).join("")}</div>
-    <p class="hint" style="margin-top:12px">Adding an account takes about a minute. Your password is only used to sign in and is kept in this computer's keychain.</p>`;
+    <p class="hint" style="margin-top:12px">Adding an account takes about a minute. Your password is only used to sign in and stays on this computer.</p>`;
     body.querySelectorAll("[data-wiz-provider]").forEach((button) => {
       button.onclick = () => chooseWizardProvider(button.dataset.wizProvider);
     });
@@ -3106,7 +3136,7 @@ function renderWizardEngineActions() {
       <h3 class="we-title">mokuro</h3>
       <p class="we-desc">Reads the text in your pages. Packaging works without it, but finished volumes need an engine to be readable.</p>
       <div class="we-actions"><button class="btn primary" type="button" id="wizard-install-engine" ${running ? "disabled" : ""}>${running ? `Installing… ${mokuroJob.elapsed_s || 0}s` : failed ? "Try again" : "Install fast mokuro"}</button></div>
-      <p class="we-foot">${running ? "You can keep setting up; this runs in the background." : "About a minute. Restart the bridge after it finishes."}</p>
+      <p class="we-foot">${running ? "You can keep setting up; this runs in the background." : "About a minute. It is loaded automatically when it finishes."}</p>
       ${engineLogHtml(mokuroJob)}
     </div>`);
   } else {
@@ -3114,7 +3144,7 @@ function renderWizardEngineActions() {
       <div class="we-head"><span class="we-eyebrow">Reading engine</span><span class="we-pill ok">Ready</span></div>
       <h3 class="we-title">mokuro</h3>
       <p class="we-desc">${mokuro.version ? `Version ${mokuro.version}` : "Installed"}${mokuro.flavour === "fork" ? ", the faster GolyBidoof build." : "."}</p>
-      ${mokuroJob.state === "done" ? `<p class="we-foot">Restart the bridge to load the new engine.</p>` : ""}
+      ${mokuroJob.state === "done" ? `<p class="we-foot">Loaded automatically; new volumes use it right away.</p>` : ""}
     </div>`);
   }
   const bunko = engines.bunko || {};
@@ -3198,7 +3228,7 @@ function maybeOpenWizard() {
   const methods = (state.config && state.config.methods) || [];
   // A credential left in the OS store is not a destination the user added here;
   // it should not suppress the guide.
-  const managedRemote = methods.some((m) => providerOf(m) !== "local" && m.tracked === true);
+  const managedRemote = methods.some((m) => providerOf(m) !== "local" && stateOf(m) !== "not_configured");
   if (!managedRemote) openWizard(false);
 }
 

@@ -10,12 +10,12 @@ This exists because the bridge's own manifest is a workaround. reader.mokuro.app
 
 The bridge still uploads the volume files. Bunko reads them from the cloud folder after they land (through the loopback gateway when the account is rclone); it never receives them from the bridge, and the bridge does not hand its upload queue to Bunko. What moves to Bunko is the metadata: it compiles `series.json` and `catalog.json` in place, so the bridge stops doing that one read-merge-upload, and the upload order puts `.mokuro` before `.cbz` so Bunko does not queue OCR.
 
-Setup needs a configured cloud destination. With no MEGA, Drive, OneDrive, WebDAV or rclone account, `--setup-bunko` stops before it builds or starts anything and says which destination to configure first. The first-run page wizard in this repository does not install or configure Bunko on its own.
+Setup needs a configured cloud destination. With no MEGA, Drive, OneDrive, WebDAV or rclone account, `--setup-bunko` stops before it builds or starts anything and says which destination to configure first. The page's Reading engine section and setup guide can install Bunko once a cloud destination exists, using the default upload account (or the first connected cloud account when no default names one), the same choice the bare `--setup-bunko` makes; they do not add a destination for you.
 
 ## What it needs
 
 - A cloud upload account that is already configured in the bridge: MEGA, Google Drive, OneDrive, WebDAV or rclone. An rclone account needs no second sign-in: the bridge starts a loopback WebDAV gateway in front of the rclone remote and hands Bunko that address, so Bunko, rclone and the bridge share one authenticated session and one view of the folder (see [rclone destinations](#rclone-destinations-one-loopback-gateway)).
-- The first run builds Bunko from source: `git`, the Rust toolchain (`rustup`), and a few minutes of CPU. Later runs reuse the binary.
+- The first run builds Bunko from source: `git`, the Rust toolchain (`rustup`), and a few minutes of CPU. Later runs reuse the binary. The automatic source build is Unix-only; on Windows, build Bunko with cargo yourself and point `MOKURO_BUNKO_BIN` at the binary.
 - Bunko 0.8 remote storage is not released yet. The bridge follows the head of the `0.8/remote-storage` development branch: every install resolves the branch's newest commit, records it in the install manifest, and builds the server-only binary (`--no-default-features`, no OCR engines, no tray). Rerun `--setup-bunko` or use `--update-bunko` to move to a newer commit; the old binary is replaced only after a build succeeds. `MOKURO_BUNKO_REF` pins a branch, tag or commit for a reproducible install, `MOKURO_BUNKO_OFFLINE=1` keeps the installed build, and `MOKURO_BUNKO_BIN` points at an existing binary instead of building one.
 - No cloud secret is copied into Bunko's config. The sign-in goes through Bunko's own local control API, which only listens on `127.0.0.1` and requires the token in its 0600 `.control.json`. MEGA's password is read from the bridge's existing credential store at connect time, and the two-factor code is asked on the terminal (or taken from `MOKURO_BUNKO_MEGA_TOTP`).
 
@@ -24,12 +24,12 @@ Setup needs a configured cloud destination. With no MEGA, Drive, OneDrive, WebDA
 ```bash
 mokuro-bridge --setup-bunko            # the bridge's default upload account
 mokuro-bridge --setup-bunko mega       # or an explicit account id
-mokuro-bridge --setup-bunko webdav:home
+mokuro-bridge --setup-bunko webdav-home
 ```
 
 What it does, in order:
 
-1. Builds or reuses the pinned Bunko binary under the bridge's data directory (`~/Library/Application Support/mokuro-bridge/bunko` on macOS, `~/.local/share/mokuro-bridge/bunko` elsewhere, `MOKURO_BRIDGE_BUNKO_DIR` overrides).
+1. Builds or reuses the pinned Bunko binary under the bridge's data directory (`~/Library/Application Support/mokuro-bridge/bunko` on macOS, `%LOCALAPPDATA%\mokuro-bridge\bunko` on Windows, `~/.local/share/mokuro-bridge/bunko` elsewhere, `MOKURO_BRIDGE_BUNKO_DIR` overrides).
 2. Writes a Bunko config that points at the same cloud folder as the bridge account, binds the HTTP UI to `127.0.0.1`, disables reader serving and local OCR, and leaves the rest at Bunko's defaults.
 3. Creates Bunko's local admin user on first setup.
 4. Starts Bunko and signs it in through Bunko's control API, creating the library folder when it does not exist.
@@ -41,19 +41,19 @@ After setup the command prints the instance status and returns. Bunko keeps runn
 
 | Destination | Setup |
 | --- | --- |
-| MEGA | automatic: email and password from the bridge's account, optional `MOKURO_BUNKO_MEGA_TOTP` for two-factor accounts |
-| WebDAV | automatic: URL, user and password from the bridge's WebDAV account |
-| rclone | automatic: the bridge starts the account's loopback WebDAV gateway and hands Bunko its address and Basic-auth pair, so rclone's own sign-in is reused and nothing is asked again |
-| Google Drive | Bunko prints a sign-in address or a code; finish it in the browser. Use the same reader pairing (release or beta) as the reader you use. |
-| OneDrive | Bunko prints a sign-in address; a personal Microsoft account needs the pasted redirect address, which this automatic setup cannot supply, so use the Bunko UI for that account |
+| A native MEGA account | automatic: email and password from the bridge's account, optional `MOKURO_BUNKO_MEGA_TOTP` for two-factor accounts |
+| A native WebDAV account | automatic: URL, user and password from the bridge's WebDAV account |
+| rclone, including the MEGA, Drive, OneDrive and WebDAV accounts the page creates | automatic: the bridge starts the account's loopback WebDAV gateway and hands Bunko its address and Basic-auth pair, so rclone's own sign-in is reused and nothing is asked again |
+| A native Google Drive account | Bunko prints a sign-in address or a code; finish it in the browser. Use the same reader pairing (release or beta) as the reader you use. |
+| A native OneDrive account | Bunko prints a sign-in address; a personal Microsoft account needs the pasted redirect address, which this automatic setup cannot supply, so use the Bunko UI for that account |
 
-Google Drive has one caveat worth knowing: Bunko signs in with the reader's Google project so it sees the same files the reader sees. If the bridge uploaded the library with its own OAuth client, that project is different, and neither the reader nor Bunko lists those files. MEGA, WebDAV and rclone do not have this split.
+Google Drive has one caveat worth knowing: Bunko signs in with the reader's Google project so it sees the same files the reader sees. If the library was uploaded through a different Google project, rclone's built-in client or the bridge's own OAuth client for example, that project is different, and neither the reader nor Bunko lists those files. MEGA and WebDAV do not have this split, and a Drive sign-in inside rclone can take your own client ID and secret to match the reader's project.
 
 ## rclone destinations: one loopback gateway
 
 An rclone remote is opaque to Bunko, which has no rclone backend, and `rclone` re-authenticates on every invocation, so a MEGA account with two-factor sign-in would need a fresh code per upload. The bridge therefore runs `rclone serve webdav` for the account, bound to `127.0.0.1` on an ephemeral port with a random Basic-auth pair, and both processes talk to it: the bridge's uploads go through it, and Bunko is configured with it as its WebDAV library. One authenticated rclone session, one view of the folder, no second sign-in.
 
-The gateway's state lives beside the Bunko data, not in rclone's own config: `~/Library/Application Support/mokuro-bridge/rclone` on macOS, `~/.local/share/mokuro-bridge/rclone` elsewhere (`MOKURO_BRIDGE_RCLONE_DIR` overrides). It holds `gateways.json` (0600, one record per account: port, loopback username and password, pid), `rclone.conf` (the bridge-owned remotes that point at those ports) and one log per account. The recorded port and password survive a bridge restart so Bunko's saved URL keeps working; a gateway process survives the bridge because it is started in its own session, and `--stop-bunko` stops Bunko only. `MOKURO_BRIDGE_RCLONE_GATEWAY=0` disables the gateway, and every upload then falls back to the cloud remote directly, which is what a non-two-factor account needs if `rclone serve` cannot start.
+The gateway's state lives beside the Bunko data, not in rclone's own config: `~/Library/Application Support/mokuro-bridge/rclone` on macOS, `%LOCALAPPDATA%\mokuro-bridge\rclone` on Windows, `~/.local/share/mokuro-bridge/rclone` elsewhere (`MOKURO_BRIDGE_RCLONE_DIR` overrides). It holds `gateways.json` (0600, one record per account: port, loopback username and password, pid), `rclone.conf` (the bridge-owned remotes that point at those ports) and one log per account. The recorded port and password survive a bridge restart so Bunko's saved URL keeps working; a gateway process survives the bridge because it is started in its own session, and `--stop-bunko` stops Bunko only. `MOKURO_BRIDGE_RCLONE_GATEWAY=0` disables the gateway, and every upload then falls back to the cloud remote directly, which is what a non-two-factor account needs if `rclone serve` cannot start.
 
 ## Taking over an existing library
 
@@ -83,7 +83,7 @@ mokuro-bridge --update-bunko    # rebuild if the development branch moved, resta
 mokuro-bridge --stop-bunko      # stop the background instance
 ```
 
-The bridge and Bunko are independent processes. Bunko survives a bridge restart because setup starts it in its own session; stopping the bridge does not stop Bunko, and `--stop-bunko` does not touch the cloud library. The full Bunko admin UI is at `http://127.0.0.1:<port>/_admin` for the local admin user, and `mokuro-bunko library status` (with the config the bridge writes) shows the store, lease and sync state.
+The bridge and Bunko are independent processes. Bunko survives a bridge restart because setup starts it in its own session; stopping the bridge does not stop Bunko, and `--stop-bunko` does not touch the cloud library. The Bunko admin UI listens only on `127.0.0.1:<port>` for the local admin user, and `mokuro-bunko library status` (with the config the bridge writes) shows the store, lease and sync state.
 
 ## What the bridge changes when Bunko is present
 
@@ -98,4 +98,4 @@ Nothing changes for a destination without Bunko: the bridge writes and merges `s
 
 ## Removing it
 
-Stop Bunko, then run `mokuro-bunko library disconnect` with the config in the bridge's Bunko directory if you want Bunko to release the cloud library cleanly (it writes `released` into the marker and leaves the library files). The bridge's `series.json` handling returns as soon as the marker is no longer fresh. The pinned binary, source checkout and build target live under `MOKURO_BRIDGE_BUNKO_DIR` and can be deleted as a folder.
+Stop Bunko, then run `mokuro-bunko library disconnect` with the config in the bridge's Bunko directory if you want Bunko to release the cloud library cleanly (it writes `released` into the marker and leaves the library files). The bridge's `series.json` handling returns as soon as the marker is no longer fresh. `mokuro-bridge --uninstall-bunko` stops Bunko and deletes its binary, source, configuration and state under `MOKURO_BRIDGE_BUNKO_DIR`; the cloud library and the destination itself are untouched. To remove a leftover install by hand, delete that folder.

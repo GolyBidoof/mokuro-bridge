@@ -44,3 +44,8 @@ library/
 
 # Pytest cache: holds absolute paths and must never be committed
 .pytest_cache/
+.ruff_cache/
+
+# Release-audit working notes, scratch instances and comparison screenshots.
+# They are internal process files and are never part of the shipped tree.
+/audit/

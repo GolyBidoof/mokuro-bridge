@@ -1,11 +1,12 @@
 """
-mokuro-bridge — local OCR pipeline for manga captures → reader.mokuro.app.
+mokuro-bridge: local OCR pipeline for manga captures to reader.mokuro.app.
 
 A store-agnostic local HTTP service: any capture client (browser userscript,
 headless scraper, curl, …) POSTs page images of a volume into a *session*;
 the bridge OCRs them with mokuro and assembles the three artifacts
 reader.mokuro.app consumes — <volume>.cbz, <volume>.mokuro, <volume>.webp —
-into a per-series folder. Output can be kept locally or uploaded to MEGA.
+into a per-series folder. Output can be kept locally or filed to MEGA,
+Google Drive, OneDrive, WebDAV or any rclone remote.
 
 Pipeline:
   POST /session/start              → create volume folder + session
@@ -21,11 +22,12 @@ recognize_text over all crops. Idle flush after ~1.5s if the chunk isn't full.
 Env: OCR_CHUNK_SIZE, OCR_IDLE_FLUSH_S
 
 Everything else is configurable through environment variables — see
-MOKURO_BRIDGE_* / MEGA_* below and the README. MEGA upload is optional and
-off by default; without it results land under the local output directory.
+MOKURO_BRIDGE_* / MEGA_* below and the README. Cloud upload is optional and
+off by default; without a destination results land under the local output
+directory.
 
 Requires: Python 3.10+, the stock mokuro package (`pip install mokuro`).
-Optional: megatools + MEGA credentials for uploads.
+Optional: rclone for cloud destinations (mokuro-bridge --setup-upload).
 """
 
 from __future__ import annotations
@@ -93,8 +95,8 @@ def _list_uploads() -> None:
             method.id,
             method.name,
             "yes" if method.configured else "no",
-            method.extra.get("creds_source") or "—",
-            email or "—",
+            method.extra.get("creds_source") or "-",
+            email or "-",
             _method_current_folder(method.id),
         ))
     if not rows:
@@ -621,24 +623,33 @@ def _refresh_series_reference() -> int:
 def main() -> None:
     import argparse
 
+    # A service started by launchd, systemd or `./run.sh > log` writes stdout to
+    # a file, where Python block-buffers it: the banner below then never reaches
+    # the log until the buffer fills or the process exits. Line buffering keeps
+    # the address and first-run sentence usable in a redirected log, and leaves
+    # an interactive terminal unchanged.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass  # a test capture object or a detached stream
+
     parser = argparse.ArgumentParser(prog=APP_NAME, description=__doc__.strip().splitlines()[0])
     parser.add_argument(
         "--setup-upload",
         metavar="METHOD",
         default=None,
         help="Interactively configure/authenticate an upload account "
-        "(mega, drive, onedrive, webdav, rclone, optionally with an account "
-        "name such "
-        "as 'mega:work'). Running it again with a new name adds a second "
-        "account. e.g. --setup-upload drive --name main",
+        "(mega, drive, onedrive, webdav, rclone). Add a second account with "
+        "--name: --setup-upload mega --name work gives the id 'mega-work'. "
+        "The older 'provider:name' spelling is still accepted.",
     )
     parser.add_argument(
         "--name",
         default=None,
         metavar="ACCOUNT",
         help="Account name for --setup-upload (default: ask, offering the "
-        "first free name). Use a new name to add another account; the target "
-        "is then addressed as '<provider>:<name>'.",
+        "first free name). A new name adds another account; its id is "
+        "'<provider>-<name>', such as 'mega-2' or 'drive-next'.",
     )
     parser.add_argument(
         "--root",
@@ -662,9 +673,9 @@ def main() -> None:
         "--remove-upload",
         default=None,
         metavar="ACCOUNT",
-        help="Forget an upload account (e.g. 'mega:work'): metadata, its "
-        "credential file(s) and its OS keychain item. The default account is "
-        "addressed by the bare provider name ('mega').",
+        help="Forget an upload account by its id (e.g. 'mega', 'mega-2', "
+        "'drive-next'): metadata, its credential file(s) and its OS keychain "
+        "item. The older 'provider:name' spelling is still accepted.",
     )
     parser.add_argument(
         "--reset-credentials",
@@ -688,7 +699,7 @@ def main() -> None:
         "storage branch head, built from source), sign it "
         "in to the bridge's default upload account and start it, so Bunko "
         "compiles series.json in the cloud and the bridge stops writing it. "
-        "Pass an account id such as 'mega' or 'mega:work'; the default upload "
+        "Pass an account id such as 'mega' or 'mega-2'; the default upload "
         "account is used when omitted. The first run builds Bunko with cargo "
         "and takes several minutes.",
     )
@@ -798,7 +809,8 @@ def main() -> None:
         "--uninstall-bunko",
         action="store_true",
         help="Stop mokuro-bunko and delete its binary, source, configuration "
-        "and state. Cloud uploads pause until it is installed again.",
+        "and state. The library index stops updating until it is installed "
+        "again; uploads keep working.",
     )
     parser.add_argument(
         "--version",
@@ -956,7 +968,7 @@ def main() -> None:
         elif _mokuro_pkg is not None:
             print(f"  mokuro:     {getattr(_mokuro_pkg, '__file__', '?')} (fork API: {_fork_supported()})")
         else:
-            print("  mokuro:     NOT INSTALLED — run: pip install mokuro")
+            print("  mokuro:     NOT INSTALLED, run: pip install mokuro")
         if update.checks_enabled():
             print("  updates:    checked in the background (see /health)")
         else:

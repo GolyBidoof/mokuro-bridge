@@ -1,5 +1,5 @@
 """
-mokuro-bridge — OCR a folder of manga pages with zero ceremony.
+mokuro-bridge: OCR a folder of manga pages with zero ceremony.
 
 If you don't care about sessions, polling or the HTTP API, this is the
 fastest way to use the bridge:
@@ -99,30 +99,39 @@ def list_methods(url: str) -> None:
     width = max((len(str(m.get("id", ""))) for m in methods), default=9)
     for m in methods:
         flag = "default" if m.get("default") else ("configured" if m.get("configured") else "not configured")
-        print(f"  {m.get('id'):<{width}} {flag:<14} folder: {m.get('current_folder') or '—'}")
+        print(f"  {m.get('id'):<{width}} {flag:<14} folder: {m.get('current_folder') or '-'}")
     print(f"default: {info.get('upload_method_default')}  selected: {info.get('upload_method_selected')}")
 
 
-# Method ids the bridge can know about, even before we can ask it.
-_KNOWN_METHODS = ("local", "mega", "drive", "onedrive")
+# Upload providers the bridge can know about, even before we can ask it.
+_KNOWN_PROVIDERS = ("local", "mega", "drive", "onedrive", "webdav", "rclone")
 
 
 def _valid_method(value: str) -> bool:
-    """Accept a bare provider id or "<provider>:<account>" for a 2nd account.
+    """Accept an account id or the legacy "<provider>:<account>" spelling.
 
-    The account names themselves are validated by the bridge (the list of
-    configured ones comes from /upload-methods); this only rejects obviously
+    Account ids are the user-facing aliases: the bare provider for its first
+    account ("mega"), or "<provider>-<name>" for another one ("mega-2",
+    "drive-next"). The historical "<provider>:<name>" form still resolves, so
+    two spellings are accepted here and the bridge validates the rest (the list
+    of configured ones comes from /upload-methods). This only rejects obviously
     malformed targets early, so a typo doesn't travel all the way to the API.
     """
-    provider, sep, name = str(value or "").strip().lower().partition(":")
-    if provider not in _KNOWN_METHODS:
-        return False
-    if not sep:
+    text = str(value or "").strip().lower()
+    if ":" in text:
+        provider, _, name = text.partition(":")
+        if provider not in _KNOWN_PROVIDERS or provider == "local":
+            return False
+        return bool(name) and all(
+            c.islower() or c.isdigit() or c in ("_", "-") for c in name
+        )
+    if text in _KNOWN_PROVIDERS:
         return True
-    if provider == "local":
-        return False  # local writes to a directory; it has no accounts
-    return bool(name) and all(
-        c.islower() or c.isdigit() or c in ("_", "-") for c in name
+    return any(
+        provider != "local"
+        and text.startswith(provider + "-")
+        and len(text) > len(provider) + 1
+        for provider in _KNOWN_PROVIDERS
     )
 
 
@@ -140,9 +149,10 @@ def main() -> int:
     parser.add_argument(
         "--upload-method",
         default=None,
-        help=f"upload destination: one of {', '.join(_KNOWN_METHODS)} "
-        "(default: local), or '<provider>:<account>' for a second account "
-        "(e.g. mega:work — see `python server.py --list-uploads`)",
+        help="upload destination: an account id such as "
+        f"{', '.join(_KNOWN_PROVIDERS)}, or a named account like 'mega-2' or "
+        "'drive-next' (default: local). The older '<provider>:<account>' "
+        "spelling is still accepted; `mokuro-bridge --list-uploads` lists the ids.",
     )
     parser.add_argument(
         "--upload-mega",
@@ -172,7 +182,7 @@ def main() -> int:
             f"Cannot reach mokuro-bridge at {args.url} ({exc}).\n"
             "Start it first:  ./run.sh        (Windows: python server.py)"
         )
-    print(f"bridge: {health.get('status')} — mokuro installed: {health.get('mokuro_installed')}")
+    print(f"bridge: {health.get('status')}, mokuro installed: {health.get('mokuro_installed')}")
 
     if args.list_methods:
         try:
@@ -187,9 +197,9 @@ def main() -> int:
     method = args.upload_method or ("mega" if args.upload_mega else "local")
     if not _valid_method(method):
         sys.exit(
-            f"unknown upload method: {method} (expected one of: "
-            f"{', '.join(_KNOWN_METHODS)}, or '<provider>:<account>' such as "
-            "mega:work)"
+            f"unknown upload method: {method} (expected an account id such as "
+            f"{', '.join(_KNOWN_PROVIDERS)}, or a named one like 'mega-2'; "
+            "the old '<provider>:<account>' form also works)"
         )
     if args.upload_mega and args.upload_method:
         sys.exit("use either --upload-method or --upload-mega, not both")
@@ -213,7 +223,7 @@ def main() -> int:
         args.url, session_id, upload_method=method,
         delete=not args.keep_files, local_dir=args.local_dir,
     )
-    print(f"\nDone — {result.get('pages')} page(s) OCR'd.")
+    print(f"\nDone: {result.get('pages')} page(s) OCR'd.")
     if method == "local":
         print(f"Files are in: {result.get('output_dir')}")
         print("Point reader.mokuro.app at that folder to read.")

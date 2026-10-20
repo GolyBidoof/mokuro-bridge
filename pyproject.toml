@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "GolyBidoof" }]
 keywords = ["manga", "ocr", "mokuro", "bookwalker", "cbz"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Intended Audience :: End Users/Desktop",
   "Operating System :: MacOS",
@@ -47,8 +47,9 @@ ocr = ["mokuro>=0.2.0"]
 # its own Microsoft and Google app registrations. There is no per-provider
 # Python SDK to install for that path, so `requests` (used by the WebDAV
 # provider and the local gateway checks) is the whole extra. The native Drive
-# and OneDrive wizards install their SDKs on request instead. Mirrors
-# requirements-cloud.txt if one is added later.
+# and OneDrive wizards install their SDKs on request instead. A checkout
+# installs the same package with `pip install requests`; there is no separate
+# requirements file for this extra.
 cloud = [
   "requests>=2.31",
 ]
@@ -81,8 +82,18 @@ version = { attr = "mokuro_bridge.__version__" }
 # .audit). Auto-discovery would either fail on the multiple top-level
 # directories or sweep that tree into the wheel. Listing the packages keeps the
 # wheel to the bridge itself; the fork is still used at runtime via MOKURO_REPO.
+#
+# data and web hold only package data (JSON and HTML), but setuptools recognises
+# their names as importable packages and warns when they are absent from this
+# list. Listing them as well keeps the build free of an "ambiguous overall
+# configuration" warning without changing what the wheel contains.
 [tool.setuptools]
-packages = ["mokuro_bridge", "mokuro_bridge.providers"]
+packages = [
+  "mokuro_bridge",
+  "mokuro_bridge.providers",
+  "mokuro_bridge.data",
+  "mokuro_bridge.web",
+]
 
 # The pinned provenance for the upstream series.json format. It ships with the
 # wheel because `mokuro-bridge --check-series-reference` has to work from a pipx

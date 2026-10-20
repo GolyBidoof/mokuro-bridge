@@ -179,8 +179,23 @@ def _bar(pct, width):
     return "█" * filled + "░" * (width - filled)
 
 
+def _version_key(text):
+    """Comparable numbers from a version string, so "ahead of latest" can be told apart."""
+    parts = []
+    for piece in str(text or "").replace("-", ".").split("."):
+        digits = "".join(char for char in piece if char.isdigit())
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts[:3])
+
+
 def _update_text(health):
     state = _text(health.get("update_check"), "unknown")
+    if state in ("unknown", "-"):
+        # A failed /health fetch leaves this unset; "up to date (-)" would claim
+        # something the frame cannot know.
+        return "unknown"
     if state == "disabled":
         return "checks disabled"
     if state == "pending":
@@ -189,7 +204,14 @@ def _update_text(health):
         return f"check failed ({_text(health.get('update_error'), 'error')})"
     if health.get("update_available"):
         return f"update available: {_text(health.get('latest_version'), '?')}"
-    return f"up to date ({_text(health.get('latest_version'), _text(health.get('version')))})"
+    latest = health.get("latest_version")
+    current = health.get("version")
+    # A build ahead of the newest published release is the normal state while
+    # preparing one. Calling the older tag "up to date (0.9.0)" next to a 1.0.0
+    # header reads as if the running version were stale, so name it instead.
+    if latest and current and _version_key(current) > _version_key(latest):
+        return f"ahead of the newest release ({latest})"
+    return f"up to date ({_text(latest, _text(current))})"
 
 
 def _pill(health):
@@ -208,6 +230,11 @@ def _now_text(health):
         detail = health.get("busy_detail")
         return stage if detail in (None, "") else f"{stage} · {detail}"
     return "idle"
+
+
+def _unreachable(health):
+    """True when /health could not be read, so the body must not read as idle."""
+    return str(health.get("status") or "").lower() in ("unreachable", "error")
 
 
 # --- URLs ------------------------------------------------------------------
@@ -559,11 +586,9 @@ def _normal_body(health, upload, inner):
         if bunko.get("update_available"):
             rows.append([("  bunko      update available: run mokuro-bridge --update-bunko", None)])
     else:
-        rows.append([("  bunko      not installed", None)])
+        rows.append([("  bunko      not installed (optional: builds the library index)", None)])
     if health.get("mokuro_installed") is False:
         rows.append([("  paused     OCR needs mokuro: run mokuro-bridge --install-mokuro", None)])
-    if not isinstance(bunko, dict):
-        rows.append([("  paused     uploads need mokuro-bunko: run mokuro-bridge --setup-bunko", None)])
 
     rows.append([])
     rows.append([("DESTINATIONS", CYAN)])
@@ -588,7 +613,13 @@ def _normal_body(health, upload, inner):
                  )])
 
     rows.append([])
-    rows.append([("NOW", CYAN), (f"  {_clip(_now_text(health), inner - 6)}", None)])
+    if _unreachable(health):
+        # Every field above reads as an idle bridge when the fetch failed, which
+        # is the opposite of the truth. Say what happened and what to start.
+        rows.append([("NOW", CYAN), ("  the bridge is not answering at this address", None)])
+        rows.append([("", None), ("  start it with: mokuro-bridge; c shows the address", None)])
+    else:
+        rows.append([("NOW", CYAN), (f"  {_clip(_now_text(health), inner - 6)}", None)])
     return rows
 
 
@@ -605,6 +636,9 @@ def _narrow_body(health, upload, inner):
     if isinstance(upload, dict):
         rows.insert(4, [(f"upload   {_percent(upload):3.0f}%  "
                          f"{_clip(upload.get('file'), inner - 16)}", None)])
+    if _unreachable(health):
+        rows[-1] = [("now      the bridge is not answering", None)]
+        rows.append([("hint     start it with: mokuro-bridge", None)])
     return rows
 
 

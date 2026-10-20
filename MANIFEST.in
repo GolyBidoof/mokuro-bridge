@@ -29,8 +29,11 @@ recursive-include tests/fixtures *.json
 
 # The docs the README links to. PyPI renders the README but does not rewrite a
 # relative link, so a reader who follows one from the project page needs these
-# to be in the sdist they downloaded.
+# to be in the sdist they downloaded. The dashboard screenshots are in the
+# README by absolute URL, and they are included too so docs/dashboard.md keeps
+# its image when the sdist is unpacked offline.
 recursive-include docs *.md
+recursive-include docs/images *.png
 
 # Never ship the full mokuro fork checkout at ./mokuro. It is gitignored and
 # not part of this distribution, but it is a real directory on a maintainer's

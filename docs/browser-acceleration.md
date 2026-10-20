@@ -16,15 +16,15 @@ Each port proxies to the same upstream CDN. The pages themselves do not change, 
 
 ## What the dashboard shows
 
-The status card on the home page has a `Browser acceleration` row. When ports are open it reads, for example, `48 ports open (62643 to 62690) · up to 288 extra browser lanes`. When the count is zero it says `off`.
+The status card on the home page has a `Browser acceleration` row. When ports are open it shows the port count, the first and last port and the extra lanes at six per port, for example 48 ports covering 62643 to 62690 and up to 288 extra browser lanes. When the count is zero it says `off` and notes that the browser downloader uses its usual connections.
 
-The same information is in `/health` as `fetchProxyPorts`, and the bridge prints a line at startup:
+The same information is in `/health` as `fetchProxyPorts`, and the verbose startup output (`--verbose` or `MOKURO_BRIDGE_VERBOSE=1`) prints one line about it:
 
 ```
 fetch proxy: 48 extra port(s) 62643-62690  ->  288 browser sockets for the downloader
 ```
 
-To change the number, use `Faster downloads in the browser` in the dashboard's Preferences, or set `MOKURO_BRIDGE_FETCH_PORTS` in the environment. Both are read when the process starts, so restart the bridge afterwards. The value can be from 0 to 256. Setting it to 0 turns the accelerator off.
+To change the number, use `Faster downloads in the browser` in the dashboard's Preferences, or set `MOKURO_BRIDGE_FETCH_PORTS` in the environment. Both are read when the process starts, so restart the bridge afterwards. The dashboard preference accepts 0 to 256, and setting it to 0 turns the accelerator off.
 
 ## The browser's own limit
 
@@ -35,7 +35,7 @@ Those limits are baked into Chromium. There is no supported command line switch,
 If downloads stall while the port count is high, the useful moves are:
 
 - Close other tabs and heavy sites, or use a dedicated browser profile for downloads, so the global pool belongs to the bridge.
-- Keep `MOKURO_BRIDGE_FETCH_CONCURRENCY` modest if you set it. It is environment only and defaults to no cap; a cap is what stops many lanes from competing with each other.
+- Keep `MOKURO_BRIDGE_FETCH_CONCURRENCY` modest if you set it. It defaults to no cap, is also on the dashboard's Preferences as `Pages fetched at the same time`, and a cap is what stops many lanes from competing with each other.
 - Prefer Chromium's HTTP/2 upstream paths where the CDN offers them, because one HTTP/2 connection carries many streams.
 - Run the browser with a generous file descriptor limit if you are on macOS or Linux and deliberately run hundreds of connections. The bridge raises its own limit at startup; the browser process has its own.
 
@@ -45,17 +45,16 @@ Firefox exposes the relevant preferences, so it can go higher than Chromium when
 
 - `network.http.max-connections` (default 900) is the global connection budget.
 - `network.http.max-persistent-connections-per-server` (default 6) is the per-origin limit.
-- `network.http.max-connections-per-server` caps connections to one server.
+- `network.http.max-connections-per-server` does not exist in current Firefox; the persistent-connections preference above is the per-origin one to change.
 
 Raising `network.http.max-connections` helps only if the per-server values are also raised deliberately. Do not set them to extremes; the CDN, the bridge and the operating system all have to keep up.
 
-## Why the dashboard suggests staying near 42 to 48
+## Why the default is 48
 
 48 ports is slightly above the 256 divided by 6 ceiling, which leaves room for the main page's own connections while still using the pool fully. Higher values are allowed and harmless, but in Chromium they mostly reserve unused origins. If you use Firefox with raised limits, or you run several browsers, higher port counts can be genuinely useful.
 
 ## Related
 
-- `docs/dashboard.md` documents the settings page and the acceleration row.
+- [dashboard.md](dashboard.md) documents the settings page and the acceleration row.
 - `mokuro_bridge/fetchproxy.py` is the implementation, including the port binding and upstream matching.
 - Chromium's published connection limits are in the Chrome Enterprise networking documentation: https://support.google.com/chrome/a/answer/3339263
-- The global WebSocket ceiling is documented in this Chromium issue: https://issues.chromium.org/41140770

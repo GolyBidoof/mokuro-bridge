@@ -101,6 +101,15 @@ def test_the_version_has_a_single_source(pyproject):
     )
 
 
+def test_the_changelog_names_the_packaged_version():
+    """The version bump and its changelog heading must land together."""
+    from mokuro_bridge import __version__
+
+    text = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    headings = re.findall(r"^## v(\S+)$", text, re.MULTILINE)
+    assert __version__ in headings, f"CHANGELOG has no '## v{__version__}' heading"
+
+
 def test_the_documented_python_floor_is_the_packaged_one(pyproject):
     assert pyproject["project"]["requires-python"] == ">=3.10"
 
@@ -109,16 +118,21 @@ def test_every_package_directory_is_listed_for_the_wheel(pyproject):
     """A new subpackage must be added to [tool.setuptools] packages.
 
     Setting `packages` explicitly is what keeps the ./mokuro fork out of the
-    wheel, and the cost of that is this list going stale.
+    wheel, and the cost of that is this list going stale. The two data-only
+    directories are listed too, because setuptools treats their names as
+    packages and warns when they are missing from the list.
     """
     declared = set(pyproject["tool"]["setuptools"]["packages"])
     actual = {
         ".".join(init.parent.relative_to(REPO_ROOT).parts)
         for init in (REPO_ROOT / "mokuro_bridge").rglob("__init__.py")
     }
-    assert actual == declared, (
+    data_only = {"mokuro_bridge.data", "mokuro_bridge.web"}
+    assert actual == declared - data_only, (
         f"pyproject lists {sorted(declared)} but the tree has {sorted(actual)}"
     )
+    for name in data_only:
+        assert (REPO_ROOT / "mokuro_bridge" / name.rsplit(".", 1)[1]).is_dir(), name
 
 
 def test_the_vendored_fork_is_not_packaged(pyproject):
@@ -233,13 +247,16 @@ def test_no_source_reference_sends_the_user_to_a_missing_requirements_file():
     The three per-provider requirements files were removed when rclone became
     the dashboard's setup path, but the provider hints and the page still said
     `pip install -r requirements-<provider>.txt`, which fails with "No such file"
-    on every install, wheel or checkout.
+    on every install, wheel or checkout. The docs and .env.example had the same
+    stale hints, so they are scanned too.
     """
     pattern = re.compile(r"requirements-[a-z]+\.txt")
     referenced: set[str] = set()
     sources = list((REPO_ROOT / "mokuro_bridge").rglob("*.py")) + list(
         (REPO_ROOT / "mokuro_bridge" / "web").glob("*.html")
     )
+    sources += [REPO_ROOT / "README.md", REPO_ROOT / ".env.example"]
+    sources += sorted((REPO_ROOT / "docs").glob("*.md"))
     for source in sources:
         referenced.update(pattern.findall(source.read_text(encoding="utf-8")))
     assert not {name for name in referenced if not (REPO_ROOT / name).is_file()}

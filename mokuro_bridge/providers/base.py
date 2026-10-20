@@ -6,7 +6,7 @@ one shared folder walk, and the lock that serializes calls per account. Each
 provider module instantiates the contract as a module-level ``PROVIDER`` object.
 Adding a backend is a copy of one of those modules, one line in the registry in
 ``providers/__init__.py``, and its account metadata in ``accounts.py``. The
-walkthrough lives in ``docs/providers.md``.
+walkthrough lives in ``docs/destinations.md``.
 
 Why this shape
 --------------

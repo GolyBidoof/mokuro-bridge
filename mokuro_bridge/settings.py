@@ -30,7 +30,7 @@ SPECS: tuple[dict, ...] = (
         "env": "MOKURO_BRIDGE_FETCH_PORTS",
         "label": "Faster downloads in the browser",
         "help": "Opens extra local ports so the page downloader can fetch more "
-        "pages at once. 0 turns the extra speed off.",
+        "pages at once. 0 turns the extra speed off. Applies after a restart.",
         "type": "int", "min": 0, "max": 256, "default": 48, "restart": True,
         "group": "Downloading",
     },
@@ -39,7 +39,7 @@ SPECS: tuple[dict, ...] = (
         "label": "Pages fetched at the same time",
         "help": "How many pages the accelerator requests at once. 0 means no "
         "cap; lower it if the store's CDN starts refusing or throttling a large "
-        "burst.",
+        "burst. Applies after a restart.",
         "type": "int", "min": 0, "max": 64, "default": 0, "restart": True,
         "group": "Downloading",
     },
@@ -48,7 +48,7 @@ SPECS: tuple[dict, ...] = (
         "label": "Check for updates",
         "help": "Asks GitHub whether a newer release exists and shows it in the "
         "footer. Nothing is downloaded or installed. Turn it off on an offline "
-        "machine; this takes effect immediately.",
+        "machine. Applies immediately.",
         "type": "bool", "default": True, "restart": False,
         "group": "Updates",
     },
@@ -56,7 +56,7 @@ SPECS: tuple[dict, ...] = (
         "env": "OCR_BATCH_SIZE",
         "label": "Pages the OCR engine reads at once",
         "help": "Bigger batches keep a fast machine busier and a small one "
-        "slower: lower it when memory is tight. It applies after a restart.",
+        "slower: lower it when memory is tight. Applies after a restart.",
         "type": "int", "min": 1, "max": 256, "default": 32, "restart": True,
         "group": "Reading pages",
     },
@@ -65,7 +65,8 @@ SPECS: tuple[dict, ...] = (
         "label": "Where finished volumes are saved on this computer",
         "help": "Each series gets its own folder here. Leave it empty to use the "
         "default folder next to the install. Only used when no client names a "
-        "folder, and each destination card's Change folder wins over it.",
+        "folder, and each destination card's Change folder wins over it. "
+        "Applies after a restart.",
         "type": "path", "default": "", "restart": True,
         "group": "Advanced",
     },
@@ -73,7 +74,8 @@ SPECS: tuple[dict, ...] = (
         "env": "MOKURO_BRIDGE_INGEST_ROOTS",
         "label": "Other folders the bridge may read",
         "help": "Only needed if a library lives outside your home folder, for "
-        "example on another drive. Separate several with commas.",
+        "example on another drive. Separate several with commas. Applies after "
+        "a restart.",
         "type": "csv", "default": "", "restart": True,
         "group": "Advanced",
     },

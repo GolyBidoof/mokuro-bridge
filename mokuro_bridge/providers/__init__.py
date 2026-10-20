@@ -70,7 +70,7 @@ __all__ = [
 # The live provider registry. Dispatch below is a lookup in this mapping, so a
 # new backend is its own module plus one entry here; accounts.py stays the
 # source of truth for which accounts exist and how a method id is spelled. The
-# full contract is in docs/providers.md.
+# full contract is in docs/destinations.md.
 _PROVIDERS: dict[str, Provider] = {
     provider.id: provider
     for provider in (

@@ -25,20 +25,20 @@ Every client follows the same shape:
 
 `POST /session/{id}/finalize` answers `application/x-ndjson`, one JSON object per line, with buffering disabled. A client reads it as it arrives and acts on the `stage` field. The stages it can see, in the order they normally appear:
 
-- `wait_ocr` while the OCR queue drains, at least every 750 ms, carrying `pages_received`, `pages_ocr_done`, `pages_ocr_pending` and `pages_ocr_failed`.
-- `assemble`, then `pack`, while the `.mokuro`, the `.cbz` and the cover are produced.
-- `series_json` when the per-series index is written, uploaded, found unchanged or found unwritable, and with `external: true` when mokuro-bunko owns that destination's metadata.
-- `upload` first as a batch plan that names every file with `total_bytes` before any bytes move, then once per file with that file's `url` as it finishes; `upload_progress` in between carries `file`, `bytes`, `total_bytes`, `current_bytes`, `percent`, `speed_bps` and `speed_human`.
+- `wait_ocr` while the OCR queue drains, at least every 750 ms, carrying `pages_received`, `pages_ocr_done`, `pages_ocr_pending` and `pages_ocr_failed`; the first frame also carries `ocr_chunk_size`.
+- `assemble`, then `pack`, while the `.mokuro`, the `.cbz` and the cover are produced; a local destination follows with a second `pack` frame carrying `output_dir`, `series` and the final `files` list.
+- `series_json` when the per-series index is written, uploaded, found unchanged or found unwritable, and with `external: true` when mokuro-bunko owns that destination's metadata. A remote finalize that publishes the manifest first sends an announcement frame with only `file` and `remote_path`, then the result after the upload.
+- `upload` first as a batch plan that names every file with `total_bytes` before any bytes move, then once per file with that file's `url` as it finishes; `upload_progress` in between carries `file`, `bytes`, `total_bytes`, `current_bytes`, `percent`, `speed_bps` and `speed_human`. A local destination emits no `upload` or `upload_progress` frames at all.
 - `cleanup` when the working files are removed.
 - `done` or `error`, always last.
 
-The `done` frame carries the final record and a per-file `uploads` array. Every entry has `file`, `success`, `size` in bytes and `url`; a remote entry adds `bytes`, `total_bytes`, `current_bytes`, `percent` and `speed_bps`, and a local entry adds `path` and `unchanged`. `size` is present for both, so a client totals that one field. A mokuro-bunko destination lists three files rather than four, because Bunko compiles `series.json` itself.
+The `done` frame carries the final record and a per-file `uploads` array. Every entry has `file`, `success`, `size` in bytes, `url`, `stderr` and `duration_s`; a remote entry adds `bytes`, `total_bytes`, `current_bytes`, `percent` and `speed_bps`, and a local entry adds `path` and `unchanged`. `size` is present for both, so a client totals that one field. A remote finalize lists the three volume files and then `series.json`, and a mokuro-bunko destination lists the three volume files rather than four because Bunko compiles `series.json` itself. A local finalize lists just one entry, `series.json`: the volume files were written by the pack step and are named in the second `pack` frame's `files` list.
 
 ## What a client must not assume
 
 - **A stream that ends without `done` is not a success.** Treat it as a truncated upload and recover by re-finalizing.
 - **`upload_method` is sticky.** Naming a destination on a finalize changes the default for every later request, including from other clients, until another explicit choice replaces it. The stored default is the account alias, and `GET /health` and `GET /upload-methods` report it as `upload_method_default`. See [destinations.md](destinations.md).
-- **A `409` is not always an error, and identical bytes are not a `409`.** Re-sending exactly the bytes the bridge already holds returns `200` with `already_present: true`. A `409` saying `Page already has completed OCR` means the page is cached from different bytes, so the stored OCR no longer matches the image.
+- **A `409` is not always fatal, and identical bytes are not a `409`.** Re-sending exactly the bytes the bridge already holds returns `200` with `already_present: true`. A `409` saying `Page is currently being OCR'd` or `Page is currently being ingested` is transient, so back off and retry the same page. A `409` saying `Page already has completed OCR` means the page is cached from different bytes, so the stored OCR no longer matches the image, and that one needs the client to decide rather than to retry blindly.
 - **The bridge is unauthenticated.** Loopback binding is the only access control, so a client should reach it on `127.0.0.1` and no further.
 - **The bridge does not rate limit with `429`.** It bounds concurrency through its own lanes and admission; a client should still back off exponentially on `5xx` and transport errors, and treat a `429` from a reverse proxy like any other `5xx`.
 
@@ -46,7 +46,7 @@ The `done` frame carries the final record and a per-file `uploads` array. Every 
 
 The two [dokuha](https://github.com/GolyBidoof) downloaders are examples of clients that speak this protocol. They are not required, and the bridge has no dependency on them.
 
-**dokuha-cli** is the browserless batch downloader. It prefers the folder hand-off: for a loopback bridge whose volume folder sits under an allowed ingest root, it sends one `POST /session/resume` with `title` and `source_dir` and reads `synced_from_source`, `queued_for_ocr` and `ocr_cached` from the response. When it has to capture page by page it starts a session with `reuse_existing=true`, pushes pages with bounded concurrency and backoff, recognises the already-cached `409` as a hit, and finalizes with an account alias, `delete_after_upload=true` and `overwrite` on a retry.
+**dokuha-cli** is the browserless batch downloader. It prefers the folder hand-off: for a loopback bridge whose volume folder sits under an allowed ingest root, it sends one `POST /session/resume` with `title` and `source_dir` and reads `synced_from_source`, `queued_for_ocr` and `ocr_cached` from the response. When it has to capture page by page it starts a session with `reuse_existing=true`, pushes pages with bounded concurrency and backoff, treats a page the bridge already holds as a hit (`200` with `already_present`) instead of a failure, and finalizes with an account alias, `delete_after_upload=true` and `overwrite` on a retry.
 
 **dokuha-userscript** is the in-browser client. It calls `GET /health` to confirm the bridge and read `fetchProxyPorts`, `fetchUpstreams` and `fetchPathUpstream`, routes page fetches through the extra localhost ports when they are offered, starts a session with a title, streams each captured page as it arrives, and opens the `reader_url` from the `done` frame. With the bridge stopped it falls back to its own lanes, because downloading never depends on the bridge.
 

@@ -1760,12 +1760,13 @@ async def session_cover(
     upload_method: str = Form(""),
     local_dir: str = Form(""),
 ):
-    """Early cover upload: store/upload <title>.webp (the cover — a copy of
+    """Early cover upload: store/upload <title>.webp (the cover, a copy of
     the volume's first page) *before* OCR finishes, so the destination
     receives something immediately and the client can show upload progress
     early. Records session.cover_uploaded so a later finalize skips
     re-uploading the cover to the same destination. Returns JSON (not NDJSON):
-    {ok, method, file, remote_path|path, url|None, size}.
+    {ok, method, file, size, sha256}, with `path` added for a local
+    destination and `remote_path` plus `url` added for a remote one.
     """
     session = await _lanes.to_control(_get_session, session_id)
     if session.finalized or session.finalizing or session.cover_uploading or session.ingesting:
