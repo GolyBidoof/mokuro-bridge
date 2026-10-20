@@ -8,6 +8,7 @@ is replaced with a double, and secret paths point into ``tmp_path``.
 from __future__ import annotations
 
 import json
+import sys
 import time
 
 import pytest
@@ -105,7 +106,8 @@ def test_mega_setup_adds_the_first_account_as_the_default(client):
     assert instance.email == "me@example.com"
     # No OS store in this environment: the 0600 fallback file was written.
     assert (mega_provider.MEGA_CREDS_FILE).is_file()
-    assert oct(mega_provider.MEGA_CREDS_FILE.stat().st_mode & 0o777) == "0o600"
+    if sys.platform != "win32":
+        assert oct(mega_provider.MEGA_CREDS_FILE.stat().st_mode & 0o777) == "0o600"
 
 def test_mega_setup_adds_a_named_account_and_persists_its_alias(client):
     response = client.post(
@@ -315,7 +317,8 @@ def test_the_page_can_save_the_app_id_and_start_the_sign_in(client, monkeypatch,
     assert body["client_id_source"] == "file"
     stored = json.loads((tmp_path / "app.json").read_text(encoding="utf-8"))
     assert stored["client_id"] == GUID
-    assert oct((tmp_path / "app.json").stat().st_mode & 0o777) == "0o600"
+    if sys.platform != "win32":
+        assert oct((tmp_path / "app.json").stat().st_mode & 0o777) == "0o600"
     # The next session finds it without an environment variable.
     row = next(p for p in client.get("/config").json()["providers"] if p["id"] == "onedrive")
     assert row["client_preset"] is True and row["needs_client_id"] is False

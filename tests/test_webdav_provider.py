@@ -16,6 +16,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from mokuro_bridge import accounts, api, config_api, providers, sessions
+from mokuro_bridge.providers import rclone as rclone_provider
 from mokuro_bridge.providers import webdav
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -120,7 +121,8 @@ def test_stored_account_is_configured_and_hides_the_password(dav, env):
     assert "dav" in metadata and "password" not in metadata.lower()
     creds = env / "webdav_credentials.json"
     assert creds.is_file()
-    assert oct(creds.stat().st_mode & 0o777) == "0o600"
+    if sys.platform != "win32":
+        assert oct(creds.stat().st_mode & 0o777) == "0o600"
     assert json.loads(creds.read_text(encoding="utf-8"))["password"] == "dav"
 
 
@@ -334,7 +336,10 @@ def client(tmp_path, monkeypatch, env):
         yield test_client
 
 
-def test_the_page_can_add_a_webdav_account(client, dav):
+def test_the_page_can_add_a_webdav_account(client, dav, monkeypatch):
+    # The browser card signs in through rclone. CI has no rclone binary, so
+    # pretend it is there: the row this test checks reports the shipped setup.
+    monkeypatch.setattr(rclone_provider, "binary", lambda: "/usr/bin/rclone")
     base_url, _root = dav
     response = client.post(
         "/config/accounts/webdav",
@@ -355,6 +360,7 @@ def test_the_page_can_add_a_webdav_account(client, dav):
     providers_row = next(p for p in config["providers"] if p["id"] == "webdav")
     assert providers_row["browser_setup"] == "form"
     assert providers_row["available"] is True
+    assert providers_row["rclone_backed"] is True
 
 
 def test_a_wrong_password_is_a_form_error_nothing_is_stored(client, dav, env):

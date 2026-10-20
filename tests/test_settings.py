@@ -130,17 +130,21 @@ def test_the_file_wins_over_the_default():
     assert settings.source("MOKURO_BRIDGE_FETCH_PORTS") == "settings file"
 
 
-def test_update_coerces_types_and_persists():
+def test_update_coerces_types_and_persists(tmp_path):
+    one = tmp_path / "one"
+    two = tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
     saved, problems = settings.update(
         {
             "MOKURO_BRIDGE_FETCH_PORTS": "12",
-            "MOKURO_BRIDGE_INGEST_ROOTS": " /a/one , , /b/two ",
+            "MOKURO_BRIDGE_INGEST_ROOTS": f" {one} , , {two} ",
             "MOKURO_BRIDGE_OUTPUT_DIR": "~/library",
         }
     )
     assert problems == []
     assert saved["MOKURO_BRIDGE_FETCH_PORTS"] == 12
-    assert saved["MOKURO_BRIDGE_INGEST_ROOTS"] == "/a/one,/b/two"
+    assert saved["MOKURO_BRIDGE_INGEST_ROOTS"] == f"{one},{two}"
     assert saved["MOKURO_BRIDGE_OUTPUT_DIR"] == str(Path("~/library").expanduser())
     stored = json.loads(settings.SETTINGS_FILE.read_text())
     assert stored["MOKURO_BRIDGE_FETCH_PORTS"] == 12
@@ -228,23 +232,28 @@ def test_a_mixed_payload_saves_the_keys_the_environment_does_not_own(monkeypatch
     monkeypatch.setenv("MOKURO_BRIDGE_FETCH_PORTS", "0")
     target = tmp_path / "library"
     target.mkdir()
+    one = tmp_path / "one"
+    two = tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
+    roots = f"{one},{two}"
 
     saved, problems = settings.update(
         {
             "MOKURO_BRIDGE_FETCH_PORTS": 0,
             "MOKURO_BRIDGE_OUTPUT_DIR": str(target),
-            "MOKURO_BRIDGE_INGEST_ROOTS": "/media/one,/media/two",
+            "MOKURO_BRIDGE_INGEST_ROOTS": roots,
         }
     )
 
     assert problems == []
     assert saved == {
         "MOKURO_BRIDGE_OUTPUT_DIR": str(target),
-        "MOKURO_BRIDGE_INGEST_ROOTS": "/media/one,/media/two",
+        "MOKURO_BRIDGE_INGEST_ROOTS": roots,
     }
     stored = json.loads(settings.SETTINGS_FILE.read_text())
     assert stored["MOKURO_BRIDGE_FETCH_PORTS"] == 12, "the pinned stored value was not clobbered"
-    assert stored["MOKURO_BRIDGE_INGEST_ROOTS"] == "/media/one,/media/two"
+    assert stored["MOKURO_BRIDGE_INGEST_ROOTS"] == roots
     row = next(r for r in settings.snapshot() if r["env"] == "MOKURO_BRIDGE_FETCH_PORTS")
     assert row["file_value"] == "12" and row["pinned"] is True
 
@@ -308,13 +317,15 @@ def test_a_relative_ingest_root_is_rejected():
     assert not settings.SETTINGS_FILE.exists()
 
 
-def test_absolute_ingest_roots_with_spaces_are_still_accepted():
+def test_absolute_ingest_roots_with_spaces_are_still_accepted(tmp_path):
+    one = tmp_path / "one library"
+    two = tmp_path / "two library"
     saved, problems = settings.update(
-        {"MOKURO_BRIDGE_INGEST_ROOTS": " /media/one , , ~/library/two "}
+        {"MOKURO_BRIDGE_INGEST_ROOTS": f" {one} , , {two} "}
     )
 
     assert problems == []
-    assert saved == {"MOKURO_BRIDGE_INGEST_ROOTS": "/media/one,~/library/two"}
+    assert saved == {"MOKURO_BRIDGE_INGEST_ROOTS": f"{one},{two}"}
 
 
 

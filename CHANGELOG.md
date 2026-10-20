@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.2
+
+### Fixed
+
+- **The test suite assumed a POSIX filesystem and an rclone install.** The tests workflow failed after v1.0.1 published: Windows reports `0o666` where the suite demanded `0o600` for credential and state files, and the WebDAV browser-setup test assumed `rclone` was installed, which a CI runner does not have. The permission checks now run only on POSIX systems, where the 0600 promise applies (Windows protects those files with ACLs instead of mode bits), the settings tests build absolute paths with `tmp_path` instead of Unix-only literals such as `/media/manga`, and the WebDAV page test stubs the rclone binary it needs. The suite now passes on the full matrix and in a clean virtualenv. No runtime behaviour changed.
+
 ## v1.0.1
 
 ### Fixed

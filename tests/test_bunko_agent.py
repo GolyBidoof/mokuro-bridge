@@ -150,7 +150,8 @@ def test_state_round_trips(bunko_home):
     state.save()
     loaded = bunko_agent.load_state()
     assert loaded == state
-    assert (bunko_home / bunko_agent.STATE_FILE).stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert (bunko_home / bunko_agent.STATE_FILE).stat().st_mode & 0o777 == 0o600
 
 
 def test_mokuro_bunko_bin_skips_the_build(bunko_home, tmp_path):

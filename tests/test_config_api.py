@@ -209,16 +209,18 @@ def test_saving_an_account_root_rejects_a_non_portable_path(client):
     assert response.status_code == 400
 
 
-def test_saving_settings_persists_and_reports_restart(client):
+def test_saving_settings_persists_and_reports_restart(client, tmp_path):
+    manga = tmp_path / "manga"
+    manga.mkdir()
     response = client.post(
         "/config/settings",
-        json={"MOKURO_BRIDGE_FETCH_PORTS": 12, "MOKURO_BRIDGE_INGEST_ROOTS": "/media/manga"},
+        json={"MOKURO_BRIDGE_FETCH_PORTS": 12, "MOKURO_BRIDGE_INGEST_ROOTS": str(manga)},
     )
     body = response.json()
     assert body["ok"] is True
     assert body["saved"] == {
         "MOKURO_BRIDGE_FETCH_PORTS": 12,
-        "MOKURO_BRIDGE_INGEST_ROOTS": "/media/manga",
+        "MOKURO_BRIDGE_INGEST_ROOTS": str(manga),
     }
     assert body["restart_command"] == config_api._restart_command()
     stored = json.loads(settings.SETTINGS_FILE.read_text())

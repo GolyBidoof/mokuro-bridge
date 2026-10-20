@@ -9,6 +9,7 @@ Object ID and Directory ID lookalikes.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -78,7 +79,8 @@ def test_the_stored_file_is_private_json(app_env):
     onedrive.store_client_id(GUID)
     path = app_env / "onedrive_app.json"
     assert json.loads(path.read_text(encoding="utf-8")) == {"client_id": GUID}
-    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    if sys.platform != "win32":
+        assert oct(path.stat().st_mode & 0o777) == "0o600"
 
 
 def test_known_microsoft_errors_become_the_step_they_need():
